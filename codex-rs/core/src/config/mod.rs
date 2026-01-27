@@ -224,6 +224,9 @@ pub struct Config {
     /// - `never`: Never use alternate screen (inline mode, preserves scrollback).
     pub tui_alternate_screen: AltScreenMode,
 
+    /// Optional command (argv form) to generate a custom TUI status line.
+    pub tui_status_line: Option<Vec<String>>,
+
     /// The directory that should be treated as the current working directory
     /// for the session. All relative paths inside the business-logic layer are
     /// resolved against this path.
@@ -1662,6 +1665,7 @@ impl Config {
                 .as_ref()
                 .map(|t| t.alternate_screen)
                 .unwrap_or_default(),
+            tui_status_line: cfg.tui.as_ref().and_then(|t| t.status_line.clone()),
             otel: {
                 let t: OtelConfigToml = cfg.otel.unwrap_or_default();
                 let log_user_prompt = t.log_user_prompt.unwrap_or(false);
@@ -1899,6 +1903,7 @@ persistence = "none"
                 show_tooltips: true,
                 experimental_mode: None,
                 alternate_screen: AltScreenMode::Auto,
+                status_line: None,
             }
         );
     }
@@ -3844,6 +3849,7 @@ model_verbosity = "high"
                 analytics_enabled: Some(true),
                 feedback_enabled: true,
                 tui_alternate_screen: AltScreenMode::Auto,
+                tui_status_line: None,
                 otel: OtelConfig::default(),
             },
             o3_profile_config
@@ -3929,6 +3935,7 @@ model_verbosity = "high"
             analytics_enabled: Some(true),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
+            tui_status_line: None,
             otel: OtelConfig::default(),
         };
 
@@ -4029,6 +4036,7 @@ model_verbosity = "high"
             analytics_enabled: Some(false),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
+            tui_status_line: None,
             otel: OtelConfig::default(),
         };
 
@@ -4115,6 +4123,7 @@ model_verbosity = "high"
             analytics_enabled: Some(true),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
+            tui_status_line: None,
             otel: OtelConfig::default(),
         };
 
