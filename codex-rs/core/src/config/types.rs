@@ -494,6 +494,7 @@ pub struct Tui {
 
     /// Custom TUI keybindings.
     #[serde(default)]
+    #[schemars(schema_with = "crate::config::schema::tui_keybindings_schema")]
     pub keybindings: Option<KeybindingsToml>,
 }
 

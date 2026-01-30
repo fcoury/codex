@@ -22,11 +22,13 @@ impl KeyChord {
             if event.modifiers == self.modifiers {
                 return true;
             }
-            if matches!(self.key, KeyCode::Char(_)) {
-                let mut mods = event.modifiers;
-                mods.remove(KeyModifiers::SHIFT);
-                if mods == self.modifiers {
-                    return true;
+            if let KeyCode::Char(ch) = self.key {
+                if ch != ' ' {
+                    let mut mods = event.modifiers;
+                    mods.remove(KeyModifiers::SHIFT);
+                    if mods == self.modifiers {
+                        return true;
+                    }
                 }
             }
         }
@@ -61,6 +63,162 @@ impl KeyChord {
             }
         }
         false
+    }
+
+    fn conflict_keys(&self) -> Vec<(KeyModifiers, KeyCode)> {
+        let mut keys = HashSet::new();
+        let mut insert = |mods, key| {
+            keys.insert((mods, key));
+        };
+
+        insert(self.modifiers, self.key);
+
+        match self.key {
+            KeyCode::Char(ch) => {
+                if !self.modifiers.contains(KeyModifiers::SHIFT)
+                    && self
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                {
+                    for variant in ascii_case_variants(ch) {
+                        insert(self.modifiers, KeyCode::Char(variant));
+                        insert(self.modifiers | KeyModifiers::SHIFT, KeyCode::Char(variant));
+                    }
+                }
+            }
+            KeyCode::Tab => {
+                if self.modifiers == KeyModifiers::SHIFT {
+                    for mods in all_modifier_variants() {
+                        insert(mods, KeyCode::BackTab);
+                    }
+                }
+            }
+            KeyCode::BackTab => {
+                if self.modifiers == KeyModifiers::NONE {
+                    insert(KeyModifiers::SHIFT, KeyCode::Tab);
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(fallback) = self.fallback {
+            insert(KeyModifiers::NONE, fallback);
+        }
+
+        keys.into_iter().collect()
+    }
+}
+
+fn ascii_case_variants(ch: char) -> [char; 2] {
+    [ch.to_ascii_lowercase(), ch.to_ascii_uppercase()]
+}
+
+fn all_modifier_variants() -> Vec<KeyModifiers> {
+    const FLAGS: [KeyModifiers; 4] = [
+        KeyModifiers::SHIFT,
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::SUPER,
+    ];
+    let mut variants = Vec::new();
+    for mask in 0..(1 << FLAGS.len()) {
+        let mut mods = KeyModifiers::NONE;
+        for (idx, flag) in FLAGS.iter().enumerate() {
+            if mask & (1 << idx) != 0 {
+                mods |= *flag;
+            }
+        }
+        variants.push(mods);
+    }
+    variants
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn keybindings(pairs: &[(&str, &str)]) -> KeybindingsToml {
+        let mut map = HashMap::new();
+        for (action, chord) in pairs {
+            map.insert(
+                (*action).to_string(),
+                KeybindingValue::Single((*chord).to_string()),
+            );
+        }
+        KeybindingsToml(map)
+    }
+
+    fn assert_conflict(err: KeymapError, context: &str, expected_actions: &[&str]) {
+        match err {
+            KeymapError::Conflict {
+                context: actual_context,
+                actions,
+                ..
+            } => {
+                assert_eq!(actual_context, context);
+                let actual: HashSet<String> = actions.into_iter().collect();
+                let expected: HashSet<String> = expected_actions
+                    .iter()
+                    .map(|action| (*action).to_string())
+                    .collect();
+                assert_eq!(actual, expected);
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflicts_detect_ctrl_case_insensitive_chords() {
+        let keybindings = keybindings(&[
+            ("chat_quit_or_interrupt_primary", "Ctrl+C"),
+            ("chat_quit_or_interrupt_secondary", "Ctrl+c"),
+        ]);
+
+        let err = TuiKeymap::from_keybindings(Some(&keybindings), false, false)
+            .expect_err("should detect conflict for ctrl case variants");
+
+        assert_conflict(
+            err,
+            "chat",
+            &[
+                "chat_quit_or_interrupt_primary",
+                "chat_quit_or_interrupt_secondary",
+            ],
+        );
+    }
+
+    #[test]
+    fn conflicts_detect_shift_tab_backtab_equivalence() {
+        let keybindings =
+            keybindings(&[("popup_accept", "Shift+Tab"), ("popup_cancel", "BackTab")]);
+
+        let err = TuiKeymap::from_keybindings(Some(&keybindings), false, false)
+            .expect_err("should detect conflict for shift-tab/backtab");
+
+        assert_conflict(err, "popup", &["popup_accept", "popup_cancel"]);
+    }
+
+    #[test]
+    fn conflicts_detect_ctrl_char_fallbacks() {
+        let keybindings =
+            keybindings(&[("text_line_start", "Ctrl+A"), ("text_line_end", "\u{0001}")]);
+
+        let err = TuiKeymap::from_keybindings(Some(&keybindings), false, false)
+            .expect_err("should detect conflict for ctrl-char fallback");
+
+        assert_conflict(err, "text", &["text_line_start", "text_line_end"]);
+    }
+
+    #[test]
+    fn space_and_shift_space_are_distinct() {
+        let space = parse_key_chord("Space").expect("space should parse");
+        let shift_space = parse_key_chord("Shift+Space").expect("shift+space should parse");
+
+        assert!(space.matches(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(!space.matches(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::SHIFT)));
+        assert!(shift_space.matches(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::SHIFT)));
+        assert!(!shift_space.matches(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
     }
 }
 
@@ -340,7 +498,8 @@ impl fmt::Display for KeymapError {
                 actions,
             } => write!(
                 f,
-                "keybinding conflict in {context}: '{chord}' used by {actions:?}"
+                "keybinding conflict in {context}: {chord} used by {}",
+                format_action_list(actions)
             ),
         }
     }
@@ -689,6 +848,94 @@ fn parse_named_punct(lower: &str) -> Option<char> {
         "doublequote" => Some('"'),
         "semicolon" => Some(';'),
         _ => None,
+    }
+}
+
+fn format_action_list(actions: &[String]) -> String {
+    match actions.len() {
+        0 => String::new(),
+        1 => actions[0].clone(),
+        2 => format!("{} and {}", actions[0], actions[1]),
+        _ => {
+            let mut out = String::new();
+            for (idx, action) in actions.iter().enumerate() {
+                if idx == 0 {
+                    out.push_str(action);
+                    continue;
+                }
+                if idx == actions.len() - 1 {
+                    out.push_str(", and ");
+                } else {
+                    out.push_str(", ");
+                }
+                out.push_str(action);
+            }
+            out
+        }
+    }
+}
+
+fn format_keybinding(modifiers: KeyModifiers, key: KeyCode) -> String {
+    if modifiers == KeyModifiers::NONE {
+        if let KeyCode::Char(code) = key {
+            if let Some(letter) = ctrl_char_to_letter(code) {
+                return format!("Ctrl+{letter}");
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("Ctrl".to_string());
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        parts.push("Alt".to_string());
+    }
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("Shift".to_string());
+    }
+    if modifiers.contains(KeyModifiers::SUPER) {
+        parts.push("Super".to_string());
+    }
+    parts.push(format_keycode_display(key));
+    parts.join("+")
+}
+
+fn ctrl_char_to_letter(code: char) -> Option<char> {
+    let value = code as u32;
+    if (1..=26).contains(&value) {
+        let letter = (value as u8 + b'@') as char;
+        return Some(letter);
+    }
+    None
+}
+
+fn format_keycode_display(key: KeyCode) -> String {
+    match key {
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::BackTab => "Backtab".to_string(),
+        KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Delete => "Delete".to_string(),
+        KeyCode::Insert => "Insert".to_string(),
+        KeyCode::Up => "Up".to_string(),
+        KeyCode::Down => "Down".to_string(),
+        KeyCode::Left => "Left".to_string(),
+        KeyCode::Right => "Right".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::PageUp => "PageUp".to_string(),
+        KeyCode::PageDown => "PageDown".to_string(),
+        KeyCode::Char(' ') => "Space".to_string(),
+        KeyCode::Char(c) => {
+            if c.is_ascii_alphabetic() {
+                c.to_ascii_uppercase().to_string()
+            } else {
+                c.to_string()
+            }
+        }
+        KeyCode::F(num) => format!("F{num}"),
+        _ => format!("{key:?}"),
     }
 }
 
@@ -1250,13 +1497,9 @@ impl ContextConflicts {
 
     fn add(&mut self, action: &str, set: &KeyBindingSet) {
         for chord in &set.0 {
-            self.used
-                .entry((chord.modifiers, chord.key))
-                .or_default()
-                .push(action.to_string());
-            if let Some(fallback) = chord.fallback {
+            for (mods, key) in chord.conflict_keys() {
                 self.used
-                    .entry((KeyModifiers::NONE, fallback))
+                    .entry((mods, key))
                     .or_default()
                     .push(action.to_string());
             }
@@ -1266,7 +1509,7 @@ impl ContextConflicts {
     fn check(self) -> Result<(), KeymapError> {
         for ((mods, key), actions) in self.used {
             if actions.len() > 1 {
-                let chord = format!("{mods:?}+{key:?}");
+                let chord = format_keybinding(mods, key);
                 return Err(KeymapError::Conflict {
                     context: self.name,
                     chord,
