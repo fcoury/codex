@@ -26,12 +26,15 @@ use std::task::Context;
 use std::task::Poll;
 
 use crossterm::event::Event;
+use crossterm::event::KeyEventKind;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+use crate::keymap::KeyBindingSet;
 
 use super::TuiEvent;
 
@@ -146,6 +149,8 @@ pub struct TuiEventStream<S: EventSource + Default + Unpin = CrosstermEventSourc
     suspend_context: crate::tui::job_control::SuspendContext,
     #[cfg(unix)]
     alt_screen_active: Arc<AtomicBool>,
+    #[cfg(unix)]
+    global_suspend: KeyBindingSet,
 }
 
 impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
@@ -155,6 +160,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
         terminal_focused: Arc<AtomicBool>,
         #[cfg(unix)] suspend_context: crate::tui::job_control::SuspendContext,
         #[cfg(unix)] alt_screen_active: Arc<AtomicBool>,
+        #[cfg(unix)] global_suspend: KeyBindingSet,
     ) -> Self {
         let resume_stream = WatchStream::from_changes(broker.resume_events_rx());
         Self {
@@ -167,6 +173,8 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
             suspend_context,
             #[cfg(unix)]
             alt_screen_active,
+            #[cfg(unix)]
+            global_suspend,
         }
     }
 
@@ -238,7 +246,9 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
         match event {
             Event::Key(key_event) => {
                 #[cfg(unix)]
-                if crate::tui::job_control::SUSPEND_KEY.is_press(key_event) {
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && self.global_suspend.matches(key_event)
+                {
                     let _ = self.suspend_context.suspend(&self.alt_screen_active);
                     return Some(TuiEvent::Draw);
                 }
@@ -366,6 +376,8 @@ mod tests {
             crate::tui::job_control::SuspendContext::new(),
             #[cfg(unix)]
             Arc::new(AtomicBool::new(false)),
+            #[cfg(unix)]
+            KeyBindingSet::default(),
         )
     }
 

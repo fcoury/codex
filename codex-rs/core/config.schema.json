@@ -380,6 +380,19 @@
         }
       ]
     },
+    "KeybindingValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ]
+    },
     "ModeKind": {
       "description": "Initial collaboration mode to use when the TUI starts.",
       "enum": [
@@ -1035,6 +1048,13 @@
           ],
           "default": "auto",
           "description": "Notification method to use for unfocused terminal notifications. Defaults to `auto`."
+        },
+        "keybindings": {
+          "additionalProperties": {
+            "$ref": "#/definitions/KeybindingValue"
+          },
+          "default": null,
+          "type": "object"
         },
         "notifications": {
           "allOf": [

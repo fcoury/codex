@@ -9,20 +9,15 @@ use std::sync::atomic::Ordering;
 
 use crossterm::cursor::MoveTo;
 use crossterm::cursor::Show;
-use crossterm::event::KeyCode;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::crossterm::execute;
 use ratatui::layout::Position;
 use ratatui::layout::Rect;
 
-use crate::key_hint;
-
 use super::DisableAlternateScroll;
 use super::EnableAlternateScroll;
 use super::Terminal;
-
-pub const SUSPEND_KEY: key_hint::KeyBinding = key_hint::ctrl(KeyCode::Char('z'));
 
 /// Coordinates suspend/resume handling so the TUI can restore terminal context after SIGTSTP.
 ///

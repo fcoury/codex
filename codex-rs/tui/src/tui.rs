@@ -39,6 +39,7 @@ use tokio_stream::Stream;
 pub use self::frame_requester::FrameRequester;
 use crate::custom_terminal;
 use crate::custom_terminal::Terminal as CustomTerminal;
+use crate::keymap::KeyBindingSet;
 use crate::notifications::DesktopNotificationBackend;
 use crate::notifications::detect_backend;
 use crate::tui::event_stream::EventBroker;
@@ -255,6 +256,7 @@ pub struct Tui {
     notification_backend: Option<DesktopNotificationBackend>,
     // When false, enter_alt_screen() becomes a no-op (for Zellij scrollback support)
     alt_screen_enabled: bool,
+    global_suspend: KeyBindingSet,
 }
 
 impl Tui {
@@ -283,6 +285,7 @@ impl Tui {
             enhanced_keys_supported,
             notification_backend: Some(detect_backend(NotificationMethod::default())),
             alt_screen_enabled: true,
+            global_suspend: KeyBindingSet::default(),
         }
     }
 
@@ -293,6 +296,10 @@ impl Tui {
 
     pub fn set_notification_method(&mut self, method: NotificationMethod) {
         self.notification_backend = Some(detect_backend(method));
+    }
+
+    pub fn set_global_suspend(&mut self, global_suspend: KeyBindingSet) {
+        self.global_suspend = global_suspend;
     }
 
     pub fn frame_requester(&self) -> FrameRequester {
@@ -392,6 +399,7 @@ impl Tui {
             self.terminal_focused.clone(),
             self.suspend_context.clone(),
             self.alt_screen_active.clone(),
+            self.global_suspend.clone(),
         );
         #[cfg(not(unix))]
         let stream = TuiEventStream::new(

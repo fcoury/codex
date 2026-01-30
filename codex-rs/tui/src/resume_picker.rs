@@ -18,6 +18,7 @@ use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
@@ -31,6 +32,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::diff_render::display_path_for;
 use crate::key_hint;
+use crate::key_hint::primary_binding;
+use crate::keymap::TuiKeymap;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
@@ -116,12 +119,14 @@ pub async fn run_resume_picker(
     tui: &mut Tui,
     codex_home: &Path,
     default_provider: &str,
+    keymap: Arc<TuiKeymap>,
     show_all: bool,
 ) -> Result<SessionSelection> {
     run_session_picker(
         tui,
         codex_home,
         default_provider,
+        keymap,
         show_all,
         SessionPickerAction::Resume,
     )
@@ -132,12 +137,14 @@ pub async fn run_fork_picker(
     tui: &mut Tui,
     codex_home: &Path,
     default_provider: &str,
+    keymap: Arc<TuiKeymap>,
     show_all: bool,
 ) -> Result<SessionSelection> {
     run_session_picker(
         tui,
         codex_home,
         default_provider,
+        keymap,
         show_all,
         SessionPickerAction::Fork,
     )
@@ -148,6 +155,7 @@ async fn run_session_picker(
     tui: &mut Tui,
     codex_home: &Path,
     default_provider: &str,
+    keymap: Arc<TuiKeymap>,
     show_all: bool,
     action: SessionPickerAction,
 ) -> Result<SessionSelection> {
@@ -192,6 +200,7 @@ async fn run_session_picker(
         show_all,
         filter_cwd,
         action,
+        keymap,
     );
     state.start_initial_load();
     state.request_frame();
@@ -280,6 +289,7 @@ struct PickerState {
     action: SessionPickerAction,
     sort_key: ThreadSortKey,
     thread_name_cache: HashMap<ThreadId, Option<String>>,
+    keymap: Arc<TuiKeymap>,
 }
 
 struct PaginationState {
@@ -370,6 +380,7 @@ impl PickerState {
         show_all: bool,
         filter_cwd: Option<PathBuf>,
         action: SessionPickerAction,
+        keymap: Arc<TuiKeymap>,
     ) -> Self {
         Self {
             codex_home,
@@ -397,6 +408,7 @@ impl PickerState {
             action,
             sort_key: ThreadSortKey::CreatedAt,
             thread_name_cache: HashMap::new(),
+            keymap,
         }
     }
 
@@ -405,75 +417,75 @@ impl PickerState {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<Option<SessionSelection>> {
-        match key.code {
-            KeyCode::Esc => return Ok(Some(SessionSelection::StartFresh)),
-            KeyCode::Char('c')
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                return Ok(Some(SessionSelection::Exit));
+        let is_text_input = matches!(key.code, KeyCode::Char(_))
+            && (matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+                || key_hint::is_altgr(key.modifiers));
+
+        if self.keymap.resume_start_fresh.matches(key) {
+            return Ok(Some(SessionSelection::StartFresh));
+        }
+        if self.keymap.resume_exit.matches(key) {
+            return Ok(Some(SessionSelection::Exit));
+        }
+        if self.keymap.resume_accept.matches(key) {
+            if let Some(row) = self.filtered_rows.get(self.selected) {
+                return Ok(Some(self.action.selection(row.path.clone())));
             }
-            KeyCode::Enter => {
-                if let Some(row) = self.filtered_rows.get(self.selected) {
-                    return Ok(Some(self.action.selection(row.path.clone())));
-                }
+        }
+        if self.keymap.resume_up.matches(key) {
+            if self.selected > 0 {
+                self.selected -= 1;
+                self.ensure_selected_visible();
             }
-            KeyCode::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                    self.ensure_selected_visible();
-                }
+            self.request_frame();
+            return Ok(None);
+        }
+        if self.keymap.resume_down.matches(key) {
+            if self.selected + 1 < self.filtered_rows.len() {
+                self.selected += 1;
+                self.ensure_selected_visible();
+            }
+            self.maybe_load_more_for_scroll();
+            self.request_frame();
+            return Ok(None);
+        }
+        if self.keymap.resume_page_up.matches(key) {
+            let step = self.view_rows.unwrap_or(10).max(1);
+            if self.selected > 0 {
+                self.selected = self.selected.saturating_sub(step);
+                self.ensure_selected_visible();
                 self.request_frame();
             }
-            KeyCode::Down => {
-                if self.selected + 1 < self.filtered_rows.len() {
-                    self.selected += 1;
-                    self.ensure_selected_visible();
-                }
+            return Ok(None);
+        }
+        if self.keymap.resume_page_down.matches(key) {
+            if !self.filtered_rows.is_empty() {
+                let step = self.view_rows.unwrap_or(10).max(1);
+                let max_index = self.filtered_rows.len().saturating_sub(1);
+                self.selected = (self.selected + step).min(max_index);
+                self.ensure_selected_visible();
                 self.maybe_load_more_for_scroll();
                 self.request_frame();
             }
-            KeyCode::PageUp => {
-                let step = self.view_rows.unwrap_or(10).max(1);
-                if self.selected > 0 {
-                    self.selected = self.selected.saturating_sub(step);
-                    self.ensure_selected_visible();
-                    self.request_frame();
-                }
-            }
-            KeyCode::PageDown => {
-                if !self.filtered_rows.is_empty() {
-                    let step = self.view_rows.unwrap_or(10).max(1);
-                    let max_index = self.filtered_rows.len().saturating_sub(1);
-                    self.selected = (self.selected + step).min(max_index);
-                    self.ensure_selected_visible();
-                    self.maybe_load_more_for_scroll();
-                    self.request_frame();
-                }
-            }
-            KeyCode::Tab => {
-                self.toggle_sort_key();
-                self.request_frame();
-            }
-            KeyCode::Backspace => {
+            return Ok(None);
+        }
+        if matches!(key.code, KeyCode::Tab) {
+            self.toggle_sort_key();
+            self.request_frame();
+            return Ok(None);
+        }
+        if self.keymap.resume_search_backspace.matches(key) {
+            let mut new_query = self.query.clone();
+            new_query.pop();
+            self.set_query(new_query);
+            return Ok(None);
+        }
+        if is_text_input {
+            if let KeyCode::Char(c) = key.code {
                 let mut new_query = self.query.clone();
-                new_query.pop();
+                new_query.push(c);
                 self.set_query(new_query);
             }
-            KeyCode::Char(c) => {
-                // basic text input for search
-                if !key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
-                {
-                    let mut new_query = self.query.clone();
-                    new_query.push(c);
-                    self.set_query(new_query);
-                }
-            }
-            _ => {}
         }
         Ok(None)
     }
@@ -897,22 +909,32 @@ fn draw_picker(tui: &mut Tui, state: &PickerState) -> std::io::Result<()> {
 
         // Hint line
         let action_label = state.action.action_label();
+        let accept = primary_binding(&state.keymap.resume_accept)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Enter));
+        let start_fresh = primary_binding(&state.keymap.resume_start_fresh)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Esc));
+        let exit = primary_binding(&state.keymap.resume_exit)
+            .unwrap_or_else(|| key_hint::ctrl(KeyCode::Char('c')));
+        let up = primary_binding(&state.keymap.resume_up)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Up));
+        let down = primary_binding(&state.keymap.resume_down)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Down));
         let hint_line: Line = vec![
-            key_hint::plain(KeyCode::Enter).into(),
+            accept.into(),
             format!(" to {action_label} ").dim(),
             "    ".dim(),
-            key_hint::plain(KeyCode::Esc).into(),
+            start_fresh.into(),
             " to start new ".dim(),
             "    ".dim(),
-            key_hint::ctrl(KeyCode::Char('c')).into(),
+            exit.into(),
             " to quit ".dim(),
             "    ".dim(),
             key_hint::plain(KeyCode::Tab).into(),
             " to toggle sort ".dim(),
             "    ".dim(),
-            key_hint::plain(KeyCode::Up).into(),
+            up.into(),
             "/".dim(),
-            key_hint::plain(KeyCode::Down).into(),
+            down.into(),
             " to browse".dim(),
         ]
         .into();
@@ -1325,6 +1347,7 @@ fn column_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::TuiKeymap;
     use chrono::Duration;
     use codex_protocol::ThreadId;
     use codex_protocol::models::ContentItem;
@@ -1347,6 +1370,23 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    fn test_keymap() -> Arc<TuiKeymap> {
+        Arc::new(TuiKeymap::defaults(false, false))
+    }
+
+    fn head_with_ts_and_user_text(ts: &str, texts: &[&str]) -> Vec<serde_json::Value> {
+        vec![
+            json!({ "timestamp": ts }),
+            json!({
+                "type": "message",
+                "role": "user",
+                "content": texts
+                    .iter()
+                    .map(|t| json!({ "type": "input_text", "text": *t }))
+                    .collect::<Vec<_>>()
+            }),
+        ]
+    }
     fn make_item(path: &str, ts: &str, preview: &str) -> ThreadItem {
         ThreadItem {
             path: PathBuf::from(path),
@@ -1601,6 +1641,7 @@ mod tests {
             true,
             None,
             SessionPickerAction::Resume,
+            test_keymap(),
         );
 
         let now = Utc::now();
@@ -1756,6 +1797,7 @@ mod tests {
             true,
             None,
             SessionPickerAction::Resume,
+            test_keymap(),
         );
 
         let page = RolloutRecorder::list_threads(
@@ -1814,14 +1856,20 @@ mod tests {
             render_column_headers(&mut frame, columns, &metrics, state.sort_key);
             render_list(&mut frame, list, &state, &metrics);
 
+            let accept = primary_binding(&state.keymap.resume_accept)
+                .unwrap_or_else(|| key_hint::plain(KeyCode::Enter));
+            let start_fresh = primary_binding(&state.keymap.resume_start_fresh)
+                .unwrap_or_else(|| key_hint::plain(KeyCode::Esc));
+            let exit = primary_binding(&state.keymap.resume_exit)
+                .unwrap_or_else(|| key_hint::ctrl(KeyCode::Char('c')));
             let hint_line: Line = vec![
-                key_hint::plain(KeyCode::Enter).into(),
+                accept.into(),
                 " to resume ".dim(),
                 "    ".dim(),
-                key_hint::plain(KeyCode::Esc).into(),
+                start_fresh.into(),
                 " to start new ".dim(),
                 "    ".dim(),
-                key_hint::ctrl(KeyCode::Char('c')).into(),
+                exit.into(),
                 " to quit ".dim(),
                 "    ".dim(),
                 key_hint::plain(KeyCode::Tab).into(),
@@ -1945,6 +1993,7 @@ mod tests {
             true,
             None,
             SessionPickerAction::Resume,
+            test_keymap(),
         );
 
         state.reset_pagination();
@@ -2014,6 +2063,7 @@ mod tests {
             true,
             None,
             SessionPickerAction::Resume,
+            test_keymap(),
         );
         state.reset_pagination();
         state.ingest_page(page(
@@ -2125,6 +2175,7 @@ mod tests {
             true,
             None,
             SessionPickerAction::Resume,
+            test_keymap(),
         );
 
         let mut items = Vec::new();
@@ -2170,6 +2221,7 @@ mod tests {
             true,
             None,
             SessionPickerAction::Resume,
+            test_keymap(),
         );
 
         let mut items = Vec::new();
@@ -2215,6 +2267,7 @@ mod tests {
             true,
             None,
             SessionPickerAction::Resume,
+            test_keymap(),
         );
         state.reset_pagination();
         state.ingest_page(page(

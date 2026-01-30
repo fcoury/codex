@@ -1,4 +1,6 @@
 use crate::key_hint;
+use crate::key_hint::primary_binding;
+use crate::keymap::TuiKeymap;
 use crate::markdown_render::render_markdown_text_with_width;
 use crate::render::Insets;
 use crate::render::renderable::ColumnRenderable;
@@ -11,7 +13,6 @@ use crate::tui::TuiEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
 use ratatui::prelude::Stylize as _;
 use ratatui::prelude::Widget;
 use ratatui::text::Line;
@@ -20,6 +21,7 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
+use std::sync::Arc;
 use tokio_stream::StreamExt;
 
 /// Outcome of the migration prompt.
@@ -137,9 +139,10 @@ pub(crate) fn migration_copy_for_models(
 pub(crate) async fn run_model_migration_prompt(
     tui: &mut Tui,
     copy: ModelMigrationCopy,
+    keymap: Arc<TuiKeymap>,
 ) -> ModelMigrationOutcome {
     let alt = AltScreenGuard::enter(tui);
-    let mut screen = ModelMigrationScreen::new(alt.tui.frame_requester(), copy);
+    let mut screen = ModelMigrationScreen::new(alt.tui.frame_requester(), copy, keymap);
 
     let _ = alt.tui.draw(u16::MAX, |frame| {
         frame.render_widget_ref(&screen, frame.area());
@@ -174,16 +177,22 @@ struct ModelMigrationScreen {
     done: bool,
     outcome: ModelMigrationOutcome,
     highlighted_option: MigrationMenuOption,
+    keymap: Arc<TuiKeymap>,
 }
 
 impl ModelMigrationScreen {
-    fn new(request_frame: FrameRequester, copy: ModelMigrationCopy) -> Self {
+    fn new(
+        request_frame: FrameRequester,
+        copy: ModelMigrationCopy,
+        keymap: Arc<TuiKeymap>,
+    ) -> Self {
         Self {
             request_frame,
             copy,
             done: false,
             outcome: ModelMigrationOutcome::Accepted,
             highlighted_option: MigrationMenuOption::TryNewModel,
+            keymap,
         }
     }
 
@@ -228,14 +237,14 @@ impl ModelMigrationScreen {
             return;
         }
 
-        if is_ctrl_exit_combo(key_event) {
+        if self.keymap.migration_exit.matches(key_event) {
             self.exit();
             return;
         }
 
         if self.copy.can_opt_out {
-            self.handle_menu_key(key_event.code);
-        } else if matches!(key_event.code, KeyCode::Esc | KeyCode::Enter) {
+            self.handle_menu_key(key_event);
+        } else if self.keymap.migration_confirm.matches(key_event) {
             self.accept();
         }
     }
@@ -271,24 +280,27 @@ impl WidgetRef for &ModelMigrationScreen {
 }
 
 impl ModelMigrationScreen {
-    fn handle_menu_key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.highlight_option(MigrationMenuOption::TryNewModel);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.highlight_option(MigrationMenuOption::UseExistingModel);
-            }
-            KeyCode::Char('1') => {
-                self.highlight_option(MigrationMenuOption::TryNewModel);
-                self.accept();
-            }
-            KeyCode::Char('2') => {
-                self.highlight_option(MigrationMenuOption::UseExistingModel);
-                self.reject();
-            }
-            KeyCode::Enter | KeyCode::Esc => self.confirm_selection(),
-            _ => {}
+    fn handle_menu_key(&mut self, key_event: KeyEvent) {
+        if self.keymap.migration_up.matches(key_event) {
+            self.highlight_option(MigrationMenuOption::TryNewModel);
+            return;
+        }
+        if self.keymap.migration_down.matches(key_event) {
+            self.highlight_option(MigrationMenuOption::UseExistingModel);
+            return;
+        }
+        if self.keymap.migration_select_1.matches(key_event) {
+            self.highlight_option(MigrationMenuOption::TryNewModel);
+            self.accept();
+            return;
+        }
+        if self.keymap.migration_select_2.matches(key_event) {
+            self.highlight_option(MigrationMenuOption::UseExistingModel);
+            self.reject();
+            return;
+        }
+        if self.keymap.migration_confirm.matches(key_event) {
+            self.confirm_selection();
         }
     }
 
@@ -345,14 +357,20 @@ impl ModelMigrationScreen {
         }
 
         column.push(Line::from(""));
+        let up = primary_binding(&self.keymap.migration_up)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Up));
+        let down = primary_binding(&self.keymap.migration_down)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Down));
+        let confirm = primary_binding(&self.keymap.migration_confirm)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Enter));
         column.push(
             Line::from(vec![
                 "Use ".dim(),
-                key_hint::plain(KeyCode::Up).into(),
+                up.into(),
                 "/".dim(),
-                key_hint::plain(KeyCode::Down).into(),
+                down.into(),
                 " to move, press ".dim(),
-                key_hint::plain(KeyCode::Enter).into(),
+                confirm.into(),
                 " to confirm".dim(),
             ])
             .inset(Insets::tlbr(0, 2, 0, 0)),
@@ -380,11 +398,6 @@ impl Drop for AltScreenGuard<'_> {
     }
 }
 
-fn is_ctrl_exit_combo(key_event: KeyEvent) -> bool {
-    key_event.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key_event.code, KeyCode::Char('c') | KeyCode::Char('d'))
-}
-
 fn fill_migration_markdown(template: &str, current_model: &str, target_model: &str) -> String {
     template
         .replace("{model_from}", current_model)
@@ -396,12 +409,18 @@ mod tests {
     use super::ModelMigrationScreen;
     use super::migration_copy_for_models;
     use crate::custom_terminal::Terminal;
+    use crate::keymap::TuiKeymap;
     use crate::test_backend::VT100Backend;
     use crate::tui::FrameRequester;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use insta::assert_snapshot;
     use ratatui::layout::Rect;
+    use std::sync::Arc;
+
+    fn test_keymap() -> Arc<TuiKeymap> {
+        Arc::new(TuiKeymap::defaults(false, false))
+    }
 
     #[test]
     fn prompt_snapshot() {
@@ -426,6 +445,7 @@ mod tests {
                 Some("Codex-optimized flagship for deep and fast reasoning.".to_string()),
                 true,
             ),
+            test_keymap(),
         );
 
         {
@@ -455,6 +475,7 @@ mod tests {
                 Some("Broad world knowledge with strong general reasoning.".to_string()),
                 false,
             ),
+            test_keymap(),
         );
         {
             let mut frame = terminal.get_frame();
@@ -482,6 +503,7 @@ mod tests {
                 Some("Codex-optimized flagship for deep and fast reasoning.".to_string()),
                 false,
             ),
+            test_keymap(),
         );
         {
             let mut frame = terminal.get_frame();
@@ -509,6 +531,7 @@ mod tests {
                 Some("Optimized for codex. Cheaper, faster, but less capable.".to_string()),
                 false,
             ),
+            test_keymap(),
         );
         {
             let mut frame = terminal.get_frame();
@@ -532,6 +555,7 @@ mod tests {
                 Some("Latest recommended model for better performance.".to_string()),
                 true,
             ),
+            test_keymap(),
         );
 
         // Simulate pressing Escape
@@ -561,6 +585,7 @@ mod tests {
                 Some("Latest recommended model for better performance.".to_string()),
                 true,
             ),
+            test_keymap(),
         );
 
         screen.handle_key(KeyEvent::new(

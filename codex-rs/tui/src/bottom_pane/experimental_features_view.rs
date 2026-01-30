@@ -1,6 +1,7 @@
+use std::sync::Arc;
+
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
-use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
@@ -13,6 +14,8 @@ use ratatui::widgets::Widget;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::key_hint;
+use crate::key_hint::primary_binding;
+use crate::keymap::TuiKeymap;
 use crate::render::Insets;
 use crate::render::RectExt as _;
 use crate::render::renderable::ColumnRenderable;
@@ -43,12 +46,14 @@ pub(crate) struct ExperimentalFeaturesView {
     app_event_tx: AppEventSender,
     header: Box<dyn Renderable>,
     footer_hint: Line<'static>,
+    keymap: Arc<TuiKeymap>,
 }
 
 impl ExperimentalFeaturesView {
     pub(crate) fn new(
         features: Vec<ExperimentalFeatureItem>,
         app_event_tx: AppEventSender,
+        keymap: Arc<TuiKeymap>,
     ) -> Self {
         let mut header = ColumnRenderable::new();
         header.push(Line::from("Experimental features".bold()));
@@ -62,7 +67,8 @@ impl ExperimentalFeaturesView {
             complete: false,
             app_event_tx,
             header: Box::new(header),
-            footer_hint: experimental_popup_hint_line(),
+            footer_hint: experimental_popup_hint_line(&keymap),
+            keymap,
         };
         view.initialize_selection();
         view
@@ -136,60 +142,23 @@ impl ExperimentalFeaturesView {
 
 impl BottomPaneView for ExperimentalFeaturesView {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event {
-            KeyEvent {
-                code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('\u{0010}'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => self.move_up(),
-            KeyEvent {
-                code: KeyCode::Char('k'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => self.move_up(),
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('\u{000e}'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => self.move_down(),
-            KeyEvent {
-                code: KeyCode::Char('j'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => self.move_down(),
-            KeyEvent {
-                code: KeyCode::Char(' '),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => self.toggle_selected(),
-            KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
-                self.on_ctrl_c();
-            }
-            _ => {}
+        if self.keymap.features_up.matches(key_event) {
+            self.move_up();
+            return;
+        }
+
+        if self.keymap.features_down.matches(key_event) {
+            self.move_down();
+            return;
+        }
+
+        if self.keymap.features_toggle.matches(key_event) {
+            self.toggle_selected();
+            return;
+        }
+
+        if self.keymap.features_cancel.matches(key_event) {
+            self.on_ctrl_c();
         }
     }
 
@@ -289,12 +258,16 @@ impl Renderable for ExperimentalFeaturesView {
     }
 }
 
-fn experimental_popup_hint_line() -> Line<'static> {
+fn experimental_popup_hint_line(keymap: &TuiKeymap) -> Line<'static> {
+    let toggle =
+        primary_binding(&keymap.features_toggle).unwrap_or_else(|| key_hint::plain(KeyCode::Enter));
+    let cancel =
+        primary_binding(&keymap.features_cancel).unwrap_or_else(|| key_hint::plain(KeyCode::Esc));
     Line::from(vec![
         "Press ".into(),
-        key_hint::plain(KeyCode::Char(' ')).into(),
+        toggle.into(),
         " to select or ".into(),
-        key_hint::plain(KeyCode::Enter).into(),
+        cancel.into(),
         " to save for next conversation".into(),
     ])
 }

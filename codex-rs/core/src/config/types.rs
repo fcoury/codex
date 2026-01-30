@@ -486,12 +486,15 @@ pub struct Tui {
     /// scrollback in terminal multiplexers like Zellij that follow the xterm spec.
     #[serde(default)]
     pub alternate_screen: AltScreenMode,
-
     /// Ordered list of status line item identifiers.
     ///
     /// When set, the TUI renders the selected items as the status line.
     #[serde(default)]
     pub status_line: Option<Vec<String>>,
+
+    /// Custom TUI keybindings.
+    #[serde(default)]
+    pub keybindings: Option<KeybindingsToml>,
 }
 
 const fn default_true() -> bool {
@@ -671,6 +674,18 @@ impl Default for ShellEnvironmentPolicy {
         }
     }
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+#[serde(untagged)]
+pub enum KeybindingValue {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[serde(transparent)]
+#[schemars(schema_with = "crate::config::schema::tui_keybindings_schema")]
+pub struct KeybindingsToml(pub HashMap<String, KeybindingValue>);
 
 #[cfg(test)]
 mod tests {

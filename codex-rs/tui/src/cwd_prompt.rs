@@ -1,6 +1,8 @@
 use std::path::Path;
 
 use crate::key_hint;
+use crate::key_hint::primary_binding;
+use crate::keymap::TuiKeymap;
 use crate::render::Insets;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
@@ -13,7 +15,6 @@ use color_eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
@@ -21,6 +22,7 @@ use ratatui::style::Stylize as _;
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
+use std::sync::Arc;
 use tokio_stream::StreamExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,12 +74,14 @@ pub(crate) async fn run_cwd_selection_prompt(
     action: CwdPromptAction,
     current_cwd: &Path,
     session_cwd: &Path,
+    keymap: Arc<TuiKeymap>,
 ) -> Result<CwdSelection> {
     let mut screen = CwdPromptScreen::new(
         tui.frame_requester(),
         action,
         current_cwd.display().to_string(),
         session_cwd.display().to_string(),
+        keymap,
     );
     tui.draw(u16::MAX, |frame| {
         frame.render_widget_ref(&screen, frame.area());
@@ -112,6 +116,7 @@ struct CwdPromptScreen {
     session_cwd: String,
     highlighted: CwdSelection,
     selection: Option<CwdSelection>,
+    keymap: Arc<TuiKeymap>,
 }
 
 impl CwdPromptScreen {
@@ -120,6 +125,7 @@ impl CwdPromptScreen {
         action: CwdPromptAction,
         current_cwd: String,
         session_cwd: String,
+        keymap: Arc<TuiKeymap>,
     ) -> Self {
         Self {
             request_frame,
@@ -128,6 +134,7 @@ impl CwdPromptScreen {
             session_cwd,
             highlighted: CwdSelection::Session,
             selection: None,
+            keymap,
         }
     }
 
@@ -135,20 +142,28 @@ impl CwdPromptScreen {
         if key_event.kind == KeyEventKind::Release {
             return;
         }
-        if key_event.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key_event.code, KeyCode::Char('c') | KeyCode::Char('d'))
-        {
+        if self.keymap.cwd_exit.matches(key_event) {
             self.select(CwdSelection::Session);
             return;
         }
-        match key_event.code {
-            KeyCode::Up | KeyCode::Char('k') => self.set_highlight(self.highlighted.prev()),
-            KeyCode::Down | KeyCode::Char('j') => self.set_highlight(self.highlighted.next()),
-            KeyCode::Char('1') => self.select(CwdSelection::Session),
-            KeyCode::Char('2') => self.select(CwdSelection::Current),
-            KeyCode::Enter => self.select(self.highlighted),
-            KeyCode::Esc => self.select(CwdSelection::Session),
-            _ => {}
+        if self.keymap.cwd_up.matches(key_event) {
+            self.set_highlight(self.highlighted.prev());
+            return;
+        }
+        if self.keymap.cwd_down.matches(key_event) {
+            self.set_highlight(self.highlighted.next());
+            return;
+        }
+        if self.keymap.cwd_select_session.matches(key_event) {
+            self.select(CwdSelection::Session);
+            return;
+        }
+        if self.keymap.cwd_select_current.matches(key_event) {
+            self.select(CwdSelection::Current);
+            return;
+        }
+        if self.keymap.cwd_confirm.matches(key_event) {
+            self.select(self.highlighted);
         }
     }
 
@@ -217,7 +232,9 @@ impl WidgetRef for &CwdPromptScreen {
         column.push(
             Line::from(vec![
                 "Press ".dim(),
-                key_hint::plain(KeyCode::Enter).into(),
+                primary_binding(&self.keymap.cwd_confirm)
+                    .unwrap_or_else(|| key_hint::plain(KeyCode::Enter))
+                    .into(),
                 " to continue".dim(),
             ])
             .inset(Insets::tlbr(0, 2, 0, 0)),
@@ -229,11 +246,17 @@ impl WidgetRef for &CwdPromptScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::TuiKeymap;
     use crate::test_backend::VT100Backend;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
     use pretty_assertions::assert_eq;
     use ratatui::Terminal;
+    use std::sync::Arc;
+
+    fn test_keymap() -> Arc<TuiKeymap> {
+        Arc::new(TuiKeymap::defaults(false, false))
+    }
 
     fn new_prompt() -> CwdPromptScreen {
         CwdPromptScreen::new(
@@ -241,6 +264,7 @@ mod tests {
             CwdPromptAction::Resume,
             "/Users/example/current".to_string(),
             "/Users/example/session".to_string(),
+            test_keymap(),
         )
     }
 
@@ -261,6 +285,7 @@ mod tests {
             CwdPromptAction::Fork,
             "/Users/example/current".to_string(),
             "/Users/example/session".to_string(),
+            test_keymap(),
         );
         let mut terminal = Terminal::new(VT100Backend::new(80, 14)).expect("terminal");
         terminal

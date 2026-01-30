@@ -28,6 +28,20 @@ Codex can run a notification hook when the agent finishes a turn. See the config
 
 The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.
 
+## TUI Keybindings
+
+You can override TUI keybindings in `config.toml` using the `[tui.keybindings]` table. Each
+action accepts a single string or a list of strings. Invalid bindings or conflicts will fail
+config loading.
+
+Example:
+
+```toml
+[tui.keybindings]
+text_newline = ["Enter", "Ctrl+J"]
+text_backspace = "Ctrl+H"
+```
+
 ## Notices
 
 Codex stores "do not show again" flags for some UI prompts under the `[notice]` table.

@@ -120,10 +120,8 @@ use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::user_input::TextElement;
 use codex_protocol::user_input::UserInput;
-use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
 use rand::Rng;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -184,8 +182,8 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::WebSearchCell;
-use crate::key_hint;
 use crate::key_hint::KeyBinding;
+use crate::keymap::TuiKeymap;
 use crate::markdown::append_markdown;
 use crate::render::Insets;
 use crate::render::renderable::ColumnRenderable;
@@ -395,6 +393,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) initial_user_message: Option<UserMessage>,
     pub(crate) enhanced_keys_supported: bool,
+    pub(crate) keymap: Arc<TuiKeymap>,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: Arc<ModelsManager>,
     pub(crate) feedback: codex_feedback::CodexFeedback,
@@ -474,6 +473,7 @@ pub(crate) struct ChatWidget {
     app_event_tx: AppEventSender,
     codex_op_tx: UnboundedSender<Op>,
     bottom_pane: BottomPane,
+    keymap: Arc<TuiKeymap>,
     active_cell: Option<Box<dyn HistoryCell>>,
     /// Monotonic-ish counter used to invalidate transcript overlay caching.
     ///
@@ -2422,6 +2422,7 @@ impl ChatWidget {
             app_event_tx,
             initial_user_message,
             enhanced_keys_supported,
+            keymap,
             auth_manager,
             models_manager,
             feedback,
@@ -2475,7 +2476,9 @@ impl ChatWidget {
                 disable_paste_burst: config.disable_paste_burst,
                 animations_enabled: config.animations,
                 skills: None,
+                keymap: keymap.clone(),
             }),
+            keymap: keymap.clone(),
             active_cell,
             active_cell_revision: 0,
             config,
@@ -2584,6 +2587,7 @@ impl ChatWidget {
             app_event_tx,
             initial_user_message,
             enhanced_keys_supported,
+            keymap,
             auth_manager,
             models_manager,
             feedback,
@@ -2636,7 +2640,9 @@ impl ChatWidget {
                 disable_paste_burst: config.disable_paste_burst,
                 animations_enabled: config.animations,
                 skills: None,
+                keymap: keymap.clone(),
             }),
+            keymap: keymap.clone(),
             active_cell,
             active_cell_revision: 0,
             config,
@@ -2734,6 +2740,7 @@ impl ChatWidget {
             app_event_tx,
             initial_user_message,
             enhanced_keys_supported,
+            keymap,
             auth_manager,
             models_manager,
             feedback,
@@ -2786,7 +2793,9 @@ impl ChatWidget {
                 disable_paste_burst: config.disable_paste_burst,
                 animations_enabled: config.animations,
                 skills: None,
+                keymap: keymap.clone(),
             }),
+            keymap: keymap.clone(),
             active_cell: None,
             active_cell_revision: 0,
             config,
@@ -2882,37 +2891,30 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event {
-            KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                kind: KeyEventKind::Press,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'c') => {
-                self.on_ctrl_c();
+        if key_event.kind == KeyEventKind::Press {
+            if let Some(chord) = self
+                .keymap
+                .chat_quit_or_interrupt_primary
+                .match_chord(key_event)
+            {
+                let key = KeyBinding::new(chord.key, chord.modifiers);
+                self.on_quit_or_interrupt_primary(key);
                 return;
             }
-            KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                kind: KeyEventKind::Press,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'d') => {
-                if self.on_ctrl_d() {
+            if let Some(chord) = self
+                .keymap
+                .chat_quit_or_interrupt_secondary
+                .match_chord(key_event)
+            {
+                let key = KeyBinding::new(chord.key, chord.modifiers);
+                if self.on_quit_or_interrupt_secondary(key) {
                     return;
                 }
                 self.bottom_pane.clear_quit_shortcut_hint();
                 self.quit_shortcut_expires_at = None;
                 self.quit_shortcut_key = None;
             }
-            KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                kind: KeyEventKind::Press,
-                ..
-            } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                && c.eq_ignore_ascii_case(&'v') =>
-            {
+            if self.keymap.chat_paste_image.matches(key_event) {
                 match paste_image_to_temp_png() {
                     Ok((path, info)) => {
                         tracing::debug!(
@@ -2932,93 +2934,91 @@ impl ChatWidget {
                 }
                 return;
             }
-            other if other.kind == KeyEventKind::Press => {
-                self.bottom_pane.clear_quit_shortcut_hint();
-                self.quit_shortcut_expires_at = None;
-                self.quit_shortcut_key = None;
-            }
-            _ => {}
         }
 
-        match key_event {
-            KeyEvent {
-                code: KeyCode::BackTab,
-                kind: KeyEventKind::Press,
-                ..
-            } if self.collaboration_modes_enabled()
-                && !self.bottom_pane.is_task_running()
-                && self.bottom_pane.no_modal_or_popup_active() =>
-            {
-                self.cycle_collaboration_mode();
+        if key_event.kind == KeyEventKind::Press {
+            self.bottom_pane.clear_quit_shortcut_hint();
+            self.quit_shortcut_expires_at = None;
+            self.quit_shortcut_key = None;
+        }
+
+        if key_event.kind == KeyEventKind::Press
+            && self.keymap.chat_change_mode.matches(key_event)
+            && self.collaboration_modes_enabled()
+            && !self.bottom_pane.is_task_running()
+            && self.bottom_pane.no_modal_or_popup_active()
+        {
+            self.cycle_collaboration_mode();
+            return;
+        }
+
+        if key_event.kind == KeyEventKind::Press
+            && self.keymap.chat_recall_queued_message.matches(key_event)
+            && !self.queued_user_messages.is_empty()
+        {
+            // Prefer the most recently queued item.
+            if let Some(user_message) = self.queued_user_messages.pop_back() {
+                let local_image_paths = user_message
+                    .local_images
+                    .iter()
+                    .map(|img| img.path.clone())
+                    .collect();
+                self.bottom_pane.set_composer_text(
+                    user_message.text,
+                    user_message.text_elements,
+                    local_image_paths,
+                );
+                self.refresh_queued_user_messages();
+                self.request_redraw();
             }
-            KeyEvent {
-                code: KeyCode::Up,
-                modifiers: KeyModifiers::ALT,
-                kind: KeyEventKind::Press,
-                ..
-            } if !self.queued_user_messages.is_empty() => {
-                // Prefer the most recently queued item.
-                if let Some(user_message) = self.queued_user_messages.pop_back() {
-                    let local_image_paths = user_message
-                        .local_images
-                        .iter()
-                        .map(|img| img.path.clone())
-                        .collect();
-                    self.bottom_pane.set_composer_text(
-                        user_message.text,
-                        user_message.text_elements,
-                        local_image_paths,
-                    );
-                    self.refresh_queued_user_messages();
-                    self.request_redraw();
-                }
-            }
-            _ => match self.bottom_pane.handle_key_event(key_event) {
-                InputResult::Submitted {
+            return;
+        }
+
+        match self.bottom_pane.handle_key_event(key_event) {
+            InputResult::Submitted {
+                text,
+                text_elements,
+            } => {
+                let user_message = UserMessage {
                     text,
+                    local_images: self
+                        .bottom_pane
+                        .take_recent_submission_images_with_placeholders(),
                     text_elements,
-                } => {
-                    let user_message = UserMessage {
-                        text,
-                        local_images: self
-                            .bottom_pane
-                            .take_recent_submission_images_with_placeholders(),
-                        text_elements,
-                        mention_paths: self.bottom_pane.take_mention_paths(),
-                    };
-                    if self.is_session_configured() {
-                        // Submitted is only emitted when steer is enabled (Enter sends immediately).
-                        // Reset any reasoning header only when we are actually submitting a turn.
-                        self.reasoning_buffer.clear();
-                        self.full_reasoning_buffer.clear();
-                        self.set_status_header(String::from("Working"));
-                        self.submit_user_message(user_message);
-                    } else {
-                        self.queue_user_message(user_message);
-                    }
-                }
-                InputResult::Queued {
-                    text,
-                    text_elements,
-                } => {
-                    let user_message = UserMessage {
-                        text,
-                        local_images: self
-                            .bottom_pane
-                            .take_recent_submission_images_with_placeholders(),
-                        text_elements,
-                        mention_paths: self.bottom_pane.take_mention_paths(),
-                    };
+                    mention_paths: self.bottom_pane.take_mention_paths(),
+                };
+                if self.is_session_configured() {
+                    // Submitted is only emitted when steer is enabled (Enter sends immediately).
+                    // Reset any reasoning header only when we are actually submitting a turn.
+                    self.reasoning_buffer.clear();
+                    self.full_reasoning_buffer.clear();
+                    self.set_status_header(String::from("Working"));
+                    self.submit_user_message(user_message);
+                } else {
                     self.queue_user_message(user_message);
                 }
-                InputResult::Command(cmd) => {
-                    self.dispatch_command(cmd);
-                }
-                InputResult::CommandWithArgs(cmd, args, text_elements) => {
-                    self.dispatch_command_with_args(cmd, args, text_elements);
-                }
-                InputResult::None => {}
-            },
+            }
+            InputResult::Queued {
+                text,
+                text_elements,
+            } => {
+                let user_message = UserMessage {
+                    text,
+                    local_images: self
+                        .bottom_pane
+                        .take_recent_submission_images_with_placeholders(),
+                    text_elements,
+                    mention_paths: self.bottom_pane.take_mention_paths(),
+                };
+                self.queue_user_message(user_message);
+            }
+            InputResult::Command(cmd) => {
+                self.dispatch_command(cmd);
+            }
+            InputResult::CommandWithArgs(cmd, args, text_elements) => {
+                self.dispatch_command_with_args(cmd, args, text_elements);
+            }
+            InputResult::None => {}
         }
     }
 
@@ -5118,7 +5118,8 @@ impl ChatWidget {
             })
             .collect();
 
-        let view = ExperimentalFeaturesView::new(features, self.app_event_tx.clone());
+        let view =
+            ExperimentalFeaturesView::new(features, self.app_event_tx.clone(), self.keymap.clone());
         self.bottom_pane.show_view(Box::new(view));
     }
 
@@ -6271,10 +6272,9 @@ impl ChatWidget {
     ///
     /// If the same quit shortcut is pressed again before expiry, this requests a shutdown-first
     /// quit.
-    fn on_ctrl_c(&mut self) {
-        let key = key_hint::ctrl(KeyCode::Char('c'));
+    fn on_quit_or_interrupt_primary(&mut self, key: KeyBinding) {
         let modal_or_popup_active = !self.bottom_pane.no_modal_or_popup_active();
-        if self.bottom_pane.on_ctrl_c() == CancellationEvent::Handled {
+        if self.bottom_pane.on_ctrl_c(key) == CancellationEvent::Handled {
             if DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED {
                 if modal_or_popup_active {
                     self.quit_shortcut_expires_at = None;
@@ -6314,8 +6314,7 @@ impl ChatWidget {
     ///
     /// Ctrl-D only participates in quit when the composer is empty and no modal/popup is active.
     /// Otherwise it should be routed to the active view and not attempt to quit.
-    fn on_ctrl_d(&mut self) -> bool {
-        let key = key_hint::ctrl(KeyCode::Char('d'));
+    fn on_quit_or_interrupt_secondary(&mut self, key: KeyBinding) -> bool {
         if !DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED {
             if !self.bottom_pane.composer_is_empty() || !self.bottom_pane.no_modal_or_popup_active()
             {

@@ -20,8 +20,8 @@ use crate::app_event::ConnectorsSnapshot;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::queued_user_messages::QueuedUserMessages;
 use crate::bottom_pane::unified_exec_footer::UnifiedExecFooter;
-use crate::key_hint;
 use crate::key_hint::KeyBinding;
+use crate::keymap::TuiKeymap;
 use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
@@ -32,11 +32,11 @@ use codex_core::skills::model::SkillMetadata;
 use codex_file_search::FileMatch;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::user_input::TextElement;
-use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
+use std::sync::Arc;
 use std::time::Duration;
 
 mod app_link_view;
@@ -157,6 +157,7 @@ pub(crate) struct BottomPane {
     queued_user_messages: QueuedUserMessages,
     context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
+    keymap: Arc<TuiKeymap>,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -168,6 +169,7 @@ pub(crate) struct BottomPaneParams {
     pub(crate) disable_paste_burst: bool,
     pub(crate) animations_enabled: bool,
     pub(crate) skills: Option<Vec<SkillMetadata>>,
+    pub(crate) keymap: Arc<TuiKeymap>,
 }
 
 impl BottomPane {
@@ -181,6 +183,7 @@ impl BottomPane {
             disable_paste_burst,
             animations_enabled,
             skills,
+            keymap,
         } = params;
         let mut composer = ChatComposer::new(
             has_input_focus,
@@ -189,6 +192,7 @@ impl BottomPane {
             placeholder_text,
             disable_paste_burst,
         );
+        composer.set_keymap(keymap.clone());
         composer.set_skill_mentions(skills);
 
         Self {
@@ -207,6 +211,7 @@ impl BottomPane {
             animations_enabled,
             context_window_percent: None,
             context_window_used_tokens: None,
+            keymap,
         }
     }
 
@@ -309,7 +314,7 @@ impl BottomPane {
                 let view = &mut self.view_stack[last_index];
                 let prefer_esc =
                     key_event.code == KeyCode::Esc && view.prefer_esc_to_handle_key_event();
-                let ctrl_c_completed = key_event.code == KeyCode::Esc
+                let ctrl_c_completed = self.keymap.popup_cancel.matches(key_event)
                     && !prefer_esc
                     && matches!(view.on_ctrl_c(), CancellationEvent::Handled)
                     && view.is_complete();
@@ -341,7 +346,7 @@ impl BottomPane {
             // If a task is running and a status line is visible, allow Esc to
             // send an interrupt even while the composer has focus.
             // When a popup is active, prefer dismissing it over interrupting the task.
-            if key_event.code == KeyCode::Esc
+            if self.keymap.global_backtrack_prime.matches(key_event)
                 && self.is_task_running
                 && !self.composer.popup_active()
                 && let Some(status) = &self.status
@@ -370,7 +375,7 @@ impl BottomPane {
     /// This method may show the quit shortcut hint as a user-visible acknowledgement that Ctrl+C
     /// was received, but it does not decide whether the process should exit; `ChatWidget` owns the
     /// quit/interrupt state machine and uses the result to decide what happens next.
-    pub(crate) fn on_ctrl_c(&mut self) -> CancellationEvent {
+    pub(crate) fn on_ctrl_c(&mut self, key: KeyBinding) -> CancellationEvent {
         if let Some(view) = self.view_stack.last_mut() {
             let event = view.on_ctrl_c();
             if matches!(event, CancellationEvent::Handled) {
@@ -378,7 +383,7 @@ impl BottomPane {
                     self.view_stack.pop();
                     self.on_active_view_complete();
                 }
-                self.show_quit_shortcut_hint(key_hint::ctrl(KeyCode::Char('c')));
+                self.show_quit_shortcut_hint(key);
                 self.request_redraw();
             }
             event
@@ -387,7 +392,7 @@ impl BottomPane {
         } else {
             self.view_stack.pop();
             self.clear_composer_for_ctrl_c();
-            self.show_quit_shortcut_hint(key_hint::ctrl(KeyCode::Char('c')));
+            self.show_quit_shortcut_hint(key);
             self.request_redraw();
             CancellationEvent::Handled
         }
@@ -638,7 +643,11 @@ impl BottomPane {
 
     /// Show a generic list selection view with the provided items.
     pub(crate) fn show_selection_view(&mut self, params: list_selection_view::SelectionViewParams) {
-        let view = list_selection_view::ListSelectionView::new(params, self.app_event_tx.clone());
+        let view = list_selection_view::ListSelectionView::new(
+            params,
+            self.app_event_tx.clone(),
+            self.keymap.clone(),
+        );
         self.push_view(Box::new(view));
     }
 
@@ -708,7 +717,12 @@ impl BottomPane {
         };
 
         // Otherwise create a new approval modal overlay.
-        let modal = ApprovalOverlay::new(request, self.app_event_tx.clone(), features.clone());
+        let modal = ApprovalOverlay::new(
+            request,
+            self.app_event_tx.clone(),
+            self.keymap.clone(),
+            features.clone(),
+        );
         self.pause_status_timer_for_modal();
         self.push_view(Box::new(modal));
     }
@@ -730,6 +744,7 @@ impl BottomPane {
         let modal = RequestUserInputOverlay::new(
             request,
             self.app_event_tx.clone(),
+            self.keymap.clone(),
             self.has_input_focus,
             self.enhanced_keys_supported,
             self.disable_paste_burst,
@@ -895,8 +910,11 @@ impl Renderable for BottomPane {
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use crate::key_hint;
+    use crate::keymap::TuiKeymap;
     use codex_core::protocol::Op;
     use codex_protocol::protocol::SkillScope;
+    use crossterm::event::KeyCode;
     use crossterm::event::KeyModifiers;
     use insta::assert_snapshot;
     use ratatui::buffer::Buffer;
@@ -904,6 +922,7 @@ mod tests {
     use std::cell::Cell;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
 
     fn snapshot_buffer(buf: &Buffer) -> String {
@@ -933,6 +952,10 @@ mod tests {
         }
     }
 
+    fn test_keymap() -> Arc<TuiKeymap> {
+        Arc::new(TuiKeymap::defaults(false, false))
+    }
+
     #[test]
     fn ctrl_c_on_modal_consumes_without_showing_quit_hint() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
@@ -947,11 +970,18 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
         pane.push_approval_request(exec_request(), &features);
-        assert_eq!(CancellationEvent::Handled, pane.on_ctrl_c());
+        assert_eq!(
+            CancellationEvent::Handled,
+            pane.on_ctrl_c(key_hint::ctrl(KeyCode::Char('c')))
+        );
         assert!(!pane.quit_shortcut_hint_visible());
-        assert_eq!(CancellationEvent::NotHandled, pane.on_ctrl_c());
+        assert_eq!(
+            CancellationEvent::NotHandled,
+            pane.on_ctrl_c(key_hint::ctrl(KeyCode::Char('c')))
+        );
     }
 
     // live ring removed; related tests deleted.
@@ -970,6 +1000,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         // Create an approval modal (active view).
@@ -1004,6 +1035,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         // Start a running task so the status indicator is active above the composer.
@@ -1071,6 +1103,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         // Begin a task: show initial status.
@@ -1098,6 +1131,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         // Activate spinner (status view replaces composer) with no live ring.
@@ -1129,6 +1163,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         pane.set_task_running(true);
@@ -1152,6 +1187,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         pane.set_task_running(true);
@@ -1183,6 +1219,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         pane.set_task_running(true);
@@ -1211,6 +1248,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         pane.set_task_running(true);
@@ -1246,6 +1284,7 @@ mod tests {
                 path: PathBuf::from("test-skill"),
                 scope: SkillScope::User,
             }]),
+            keymap: test_keymap(),
         });
 
         pane.set_task_running(true);
@@ -1284,6 +1323,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         pane.set_task_running(true);
@@ -1319,6 +1359,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         pane.set_task_running(true);

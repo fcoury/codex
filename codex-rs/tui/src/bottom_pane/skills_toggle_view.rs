@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -9,12 +10,17 @@ use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui::widgets::Block;
 use ratatui::widgets::Widget;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::key_hint;
+use crate::key_hint::bindings_from_set;
+use crate::key_hint::is_altgr;
+use crate::key_hint::primary_binding;
+use crate::keymap::TuiKeymap;
 use crate::render::Insets;
 use crate::render::RectExt as _;
 use crate::render::renderable::ColumnRenderable;
@@ -51,10 +57,15 @@ pub(crate) struct SkillsToggleView {
     footer_hint: Line<'static>,
     search_query: String,
     filtered_indices: Vec<usize>,
+    keymap: Arc<TuiKeymap>,
 }
 
 impl SkillsToggleView {
-    pub(crate) fn new(items: Vec<SkillsToggleItem>, app_event_tx: AppEventSender) -> Self {
+    pub(crate) fn new(
+        items: Vec<SkillsToggleItem>,
+        app_event_tx: AppEventSender,
+        keymap: Arc<TuiKeymap>,
+    ) -> Self {
         let mut header = ColumnRenderable::new();
         header.push(Line::from("Enable/Disable Skills".bold()));
         header.push(Line::from(
@@ -67,9 +78,10 @@ impl SkillsToggleView {
             complete: false,
             app_event_tx,
             header: Box::new(header),
-            footer_hint: skills_toggle_hint_line(),
+            footer_hint: skills_toggle_hint_line(&keymap),
             search_query: String::new(),
             filtered_indices: Vec::new(),
+            keymap,
         };
         view.apply_filter();
         view
@@ -204,67 +216,43 @@ impl SkillsToggleView {
 
 impl BottomPaneView for SkillsToggleView {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event {
-            KeyEvent {
-                code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('\u{0010}'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } /* ^P */ => self.move_up(),
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('\u{000e}'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } /* ^N */ => self.move_down(),
-            KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            } => {
-                self.search_query.pop();
-                self.apply_filter();
-            }
-            KeyEvent {
-                code: KeyCode::Char(' '),
-                modifiers: KeyModifiers::NONE,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => self.toggle_selected(),
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
-                self.on_ctrl_c();
-            }
-            KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                ..
-            } if !modifiers.contains(KeyModifiers::CONTROL)
-                && !modifiers.contains(KeyModifiers::ALT) =>
-            {
+        let is_text_input = matches!(key_event.code, KeyCode::Char(_))
+            && (matches!(
+                key_event.modifiers,
+                KeyModifiers::NONE | KeyModifiers::SHIFT
+            ) || is_altgr(key_event.modifiers));
+
+        if self.keymap.skills_cancel.matches(key_event) {
+            self.on_ctrl_c();
+            return;
+        }
+
+        if self.keymap.skills_toggle.matches(key_event) {
+            self.toggle_selected();
+            return;
+        }
+
+        if self.keymap.skills_up.matches(key_event) && !is_text_input {
+            self.move_up();
+            return;
+        }
+
+        if self.keymap.skills_down.matches(key_event) && !is_text_input {
+            self.move_down();
+            return;
+        }
+
+        if self.keymap.skills_search_backspace.matches(key_event) {
+            self.search_query.pop();
+            self.apply_filter();
+            return;
+        }
+
+        if is_text_input {
+            if let KeyCode::Char(c) = key_event.code {
                 self.search_query.push(c);
                 self.apply_filter();
             }
-            _ => {}
         }
     }
 
@@ -368,16 +356,27 @@ impl Renderable for SkillsToggleView {
     }
 }
 
-fn skills_toggle_hint_line() -> Line<'static> {
-    Line::from(vec![
-        "Press ".into(),
-        key_hint::plain(KeyCode::Char(' ')).into(),
-        " or ".into(),
-        key_hint::plain(KeyCode::Enter).into(),
+fn skills_toggle_hint_line(keymap: &TuiKeymap) -> Line<'static> {
+    let toggle_keys = bindings_from_set(&keymap.skills_toggle);
+    let toggle = toggle_keys
+        .get(0)
+        .copied()
+        .unwrap_or_else(|| key_hint::plain(KeyCode::Char(' ')));
+    let toggle_alt = toggle_keys.get(1).copied();
+    let cancel =
+        primary_binding(&keymap.skills_cancel).unwrap_or_else(|| key_hint::plain(KeyCode::Esc));
+
+    let mut spans: Vec<Span<'static>> = vec!["Press ".into(), toggle.into()];
+    if let Some(alt) = toggle_alt {
+        spans.push(" or ".into());
+        spans.push(alt.into());
+    }
+    spans.extend(vec![
         " to toggle; ".into(),
-        key_hint::plain(KeyCode::Esc).into(),
+        cancel.into(),
         " to close".into(),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -431,7 +430,7 @@ mod tests {
                 path: PathBuf::from("/tmp/skills/changelog_writer.toml"),
             },
         ];
-        let view = SkillsToggleView::new(items, tx);
+        let view = SkillsToggleView::new(items, tx, Arc::new(TuiKeymap::defaults(false, false)));
         assert_snapshot!("skills_toggle_basic", render_lines(&view, 72));
     }
 }

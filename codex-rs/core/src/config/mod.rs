@@ -3,6 +3,7 @@ use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
+use crate::config::types::KeybindingsToml;
 use crate::config::types::McpServerConfig;
 use crate::config::types::McpServerDisabledReason;
 use crate::config::types::McpServerTransportConfig;
@@ -371,6 +372,8 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: crate::config::types::OtelConfig,
+
+    pub tui_keybindings: Option<KeybindingsToml>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1732,6 +1735,7 @@ impl Config {
                     metrics_exporter: OtelExporterKind::Statsig,
                 }
             },
+            tui_keybindings: cfg.tui.as_ref().and_then(|t| t.keybindings.clone()),
         };
         Ok(config)
     }
@@ -1952,6 +1956,7 @@ persistence = "none"
                 experimental_mode: None,
                 alternate_screen: AltScreenMode::Auto,
                 status_line: None,
+                keybindings: None,
             }
         );
     }
@@ -3894,6 +3899,7 @@ model_verbosity = "high"
                 notices: Default::default(),
                 check_for_update_on_startup: true,
                 disable_paste_burst: false,
+                tui_keybindings: None,
                 tui_notifications: Default::default(),
                 tui_notification_method: Default::default(),
                 animations: true,
@@ -3981,6 +3987,7 @@ model_verbosity = "high"
             notices: Default::default(),
             check_for_update_on_startup: true,
             disable_paste_burst: false,
+            tui_keybindings: None,
             tui_notifications: Default::default(),
             tui_notification_method: Default::default(),
             animations: true,
@@ -4083,6 +4090,7 @@ model_verbosity = "high"
             notices: Default::default(),
             check_for_update_on_startup: true,
             disable_paste_burst: false,
+            tui_keybindings: None,
             tui_notifications: Default::default(),
             tui_notification_method: Default::default(),
             animations: true,
@@ -4171,6 +4179,7 @@ model_verbosity = "high"
             notices: Default::default(),
             check_for_update_on_startup: true,
             disable_paste_burst: false,
+            tui_keybindings: None,
             tui_notifications: Default::default(),
             tui_notification_method: Default::default(),
             animations: true,

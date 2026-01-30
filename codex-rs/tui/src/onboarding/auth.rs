@@ -35,6 +35,9 @@ use codex_protocol::config_types::ForcedLoginMethod;
 use std::sync::RwLock;
 
 use crate::LoginStatus;
+use crate::key_hint;
+use crate::key_hint::primary_binding;
+use crate::keymap::TuiKeymap;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
 use crate::shimmer::shimmer_spans;
@@ -100,55 +103,62 @@ impl KeyboardHandler for AuthModeWidget {
             return;
         }
 
-        match key_event.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.move_highlight(-1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.move_highlight(1);
-            }
-            KeyCode::Char('1') => {
-                self.select_option_by_index(0);
-            }
-            KeyCode::Char('2') => {
-                self.select_option_by_index(1);
-            }
-            KeyCode::Char('3') => {
-                self.select_option_by_index(2);
-            }
-            KeyCode::Enter => {
-                let sign_in_state = { (*self.sign_in_state.read().unwrap()).clone() };
-                match sign_in_state {
-                    SignInState::PickMode => {
-                        self.handle_sign_in_option(self.highlighted_mode);
-                    }
-                    SignInState::ChatGptSuccessMessage => {
-                        *self.sign_in_state.write().unwrap() = SignInState::ChatGptSuccess;
-                    }
-                    _ => {}
+        if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+
+        if self.keymap.auth_up.matches(key_event) {
+            self.move_highlight(-1);
+            return;
+        }
+        if self.keymap.auth_down.matches(key_event) {
+            self.move_highlight(1);
+            return;
+        }
+        if self.keymap.auth_select_1.matches(key_event) {
+            self.select_option_by_index(0);
+            return;
+        }
+        if self.keymap.auth_select_2.matches(key_event) {
+            self.select_option_by_index(1);
+            return;
+        }
+        if self.keymap.auth_select_3.matches(key_event) {
+            self.select_option_by_index(2);
+            return;
+        }
+        if self.keymap.auth_confirm.matches(key_event) {
+            let sign_in_state = { (*self.sign_in_state.read().unwrap()).clone() };
+            match sign_in_state {
+                SignInState::PickMode => {
+                    self.handle_sign_in_option(self.highlighted_mode);
                 }
-            }
-            KeyCode::Esc => {
-                tracing::info!("Esc pressed");
-                let mut sign_in_state = self.sign_in_state.write().unwrap();
-                match &*sign_in_state {
-                    SignInState::ChatGptContinueInBrowser(_) => {
-                        *sign_in_state = SignInState::PickMode;
-                        drop(sign_in_state);
-                        self.request_frame.schedule_frame();
-                    }
-                    SignInState::ChatGptDeviceCode(state) => {
-                        if let Some(cancel) = &state.cancel {
-                            cancel.notify_one();
-                        }
-                        *sign_in_state = SignInState::PickMode;
-                        drop(sign_in_state);
-                        self.request_frame.schedule_frame();
-                    }
-                    _ => {}
+                SignInState::ChatGptSuccessMessage => {
+                    *self.sign_in_state.write().unwrap() = SignInState::ChatGptSuccess;
                 }
+                _ => {}
             }
-            _ => {}
+            return;
+        }
+        if self.keymap.auth_back.matches(key_event) {
+            tracing::info!("Back pressed");
+            let mut sign_in_state = self.sign_in_state.write().unwrap();
+            match &*sign_in_state {
+                SignInState::ChatGptContinueInBrowser(_) => {
+                    *sign_in_state = SignInState::PickMode;
+                    drop(sign_in_state);
+                    self.request_frame.schedule_frame();
+                }
+                SignInState::ChatGptDeviceCode(state) => {
+                    if let Some(cancel) = &state.cancel {
+                        cancel.notify_one();
+                    }
+                    *sign_in_state = SignInState::PickMode;
+                    drop(sign_in_state);
+                    self.request_frame.schedule_frame();
+                }
+                _ => {}
+            }
         }
     }
 
@@ -170,6 +180,7 @@ pub(crate) struct AuthModeWidget {
     pub forced_chatgpt_workspace_id: Option<String>,
     pub forced_login_method: Option<ForcedLoginMethod>,
     pub animations_enabled: bool,
+    pub keymap: Arc<TuiKeymap>,
 }
 
 impl AuthModeWidget {
@@ -342,11 +353,9 @@ impl AuthModeWidget {
             );
             lines.push("".into());
         }
-        lines.push(
-            // AE: Following styles.md, this should probably be Cyan because it's a user input tip.
-            //     But leaving this for a future cleanup.
-            "  Press Enter to continue".dim().into(),
-        );
+        let confirm = primary_binding(&self.keymap.auth_confirm)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Enter));
+        lines.push(Line::from(vec!["  Press ".dim(), confirm.into(), " to continue".dim()]).into());
         if let Some(err) = &self.error {
             lines.push("".into());
             lines.push(err.as_str().red().into());
@@ -380,21 +389,29 @@ impl AuthModeWidget {
                 state.auth_url.as_str().cyan().underlined(),
             ]));
             lines.push("".into());
+            let back = primary_binding(&self.keymap.auth_back)
+                .unwrap_or_else(|| key_hint::plain(KeyCode::Esc));
             lines.push(Line::from(vec![
-                "  On a remote or headless machine? Press Esc and choose ".into(),
+                "  On a remote or headless machine? Press ".into(),
+                back.into(),
+                " and choose ".into(),
                 "Sign in with Device Code".cyan(),
                 ".".into(),
             ]));
             lines.push("".into());
         }
 
-        lines.push("  Press Esc to cancel".dim().into());
+        let back = primary_binding(&self.keymap.auth_back)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Esc));
+        lines.push(Line::from(vec!["  Press ".dim(), back.into(), " to cancel".dim()]).into());
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .render(area, buf);
     }
 
     fn render_chatgpt_success_message(&self, area: Rect, buf: &mut Buffer) {
+        let confirm = primary_binding(&self.keymap.auth_confirm)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Enter));
         let lines = vec![
             "✓ Signed in with your ChatGPT account".fg(Color::Green).into(),
             "".into(),
@@ -417,7 +434,12 @@ impl AuthModeWidget {
             ])
             .dim(),
             "".into(),
-            "  Press Enter to continue".fg(Color::Cyan).into(),
+            Line::from(vec![
+                "  Press ".fg(Color::Cyan),
+                confirm.into(),
+                " to continue".fg(Color::Cyan),
+            ])
+            .into(),
         ];
 
         Paragraph::new(lines)
@@ -495,9 +517,13 @@ impl AuthModeWidget {
             )
             .render(input_area, buf);
 
+        let submit = primary_binding(&self.keymap.auth_api_key_submit)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Enter));
+        let back = primary_binding(&self.keymap.auth_api_key_back)
+            .unwrap_or_else(|| key_hint::plain(KeyCode::Esc));
         let mut footer_lines: Vec<Line> = vec![
-            "  Press Enter to save".dim().into(),
-            "  Press Esc to go back".dim().into(),
+            Line::from(vec!["  Press ".dim(), submit.into(), " to save".dim()]).into(),
+            Line::from(vec!["  Press ".dim(), back.into(), " to go back".dim()]).into(),
         ];
         if let Some(error) = &self.error {
             footer_lines.push("".into());
@@ -509,54 +535,52 @@ impl AuthModeWidget {
     }
 
     fn handle_api_key_entry_key_event(&mut self, key_event: &KeyEvent) -> bool {
+        if key_event.kind == KeyEventKind::Release {
+            return true;
+        }
         let mut should_save: Option<String> = None;
         let mut should_request_frame = false;
 
         {
             let mut guard = self.sign_in_state.write().unwrap();
             if let SignInState::ApiKeyEntry(state) = &mut *guard {
-                match key_event.code {
-                    KeyCode::Esc => {
-                        *guard = SignInState::PickMode;
-                        self.error = None;
+                if self.keymap.auth_api_key_back.matches(*key_event) {
+                    *guard = SignInState::PickMode;
+                    self.error = None;
+                    should_request_frame = true;
+                } else if self.keymap.auth_api_key_submit.matches(*key_event) {
+                    let trimmed = state.value.trim().to_string();
+                    if trimmed.is_empty() {
+                        self.error = Some("API key cannot be empty".to_string());
                         should_request_frame = true;
+                    } else {
+                        should_save = Some(trimmed);
                     }
-                    KeyCode::Enter => {
-                        let trimmed = state.value.trim().to_string();
-                        if trimmed.is_empty() {
-                            self.error = Some("API key cannot be empty".to_string());
-                            should_request_frame = true;
-                        } else {
-                            should_save = Some(trimmed);
-                        }
+                } else if self.keymap.auth_api_key_backspace.matches(*key_event) {
+                    if state.prepopulated_from_env {
+                        state.value.clear();
+                        state.prepopulated_from_env = false;
+                    } else {
+                        state.value.pop();
                     }
-                    KeyCode::Backspace => {
-                        if state.prepopulated_from_env {
-                            state.value.clear();
-                            state.prepopulated_from_env = false;
-                        } else {
-                            state.value.pop();
-                        }
-                        self.error = None;
-                        should_request_frame = true;
+                    self.error = None;
+                    should_request_frame = true;
+                } else if let KeyCode::Char(c) = key_event.code
+                    && key_event.kind == KeyEventKind::Press
+                    && !key_event.modifiers.contains(KeyModifiers::SUPER)
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key_event.modifiers.contains(KeyModifiers::ALT)
+                {
+                    if state.prepopulated_from_env {
+                        state.value.clear();
+                        state.prepopulated_from_env = false;
                     }
-                    KeyCode::Char(c)
-                        if key_event.kind == KeyEventKind::Press
-                            && !key_event.modifiers.contains(KeyModifiers::SUPER)
-                            && !key_event.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key_event.modifiers.contains(KeyModifiers::ALT) =>
-                    {
-                        if state.prepopulated_from_env {
-                            state.value.clear();
-                            state.prepopulated_from_env = false;
-                        }
-                        state.value.push(c);
-                        self.error = None;
-                        should_request_frame = true;
-                    }
-                    _ => {}
+                    state.value.push(c);
+                    self.error = None;
+                    should_request_frame = true;
+                } else {
+                    // handled; let guard drop before potential save
                 }
-                // handled; let guard drop before potential save
             } else {
                 return false;
             }
@@ -791,10 +815,15 @@ impl WidgetRef for AuthModeWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::TuiKeymap;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
     use codex_core::auth::AuthCredentialsStoreMode;
+
+    fn test_keymap() -> Arc<TuiKeymap> {
+        Arc::new(TuiKeymap::defaults(false, false))
+    }
 
     fn widget_forced_chatgpt() -> (AuthModeWidget, TempDir) {
         let codex_home = TempDir::new().unwrap();
@@ -815,6 +844,7 @@ mod tests {
             forced_chatgpt_workspace_id: None,
             forced_login_method: Some(ForcedLoginMethod::Chatgpt),
             animations_enabled: true,
+            keymap: test_keymap(),
         };
         (widget, codex_home)
     }

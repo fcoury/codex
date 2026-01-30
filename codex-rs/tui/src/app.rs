@@ -22,6 +22,7 @@ use crate::history_cell;
 use crate::history_cell::HistoryCell;
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
+use crate::keymap::TuiKeymap;
 use crate::model_migration::ModelMigrationOutcome;
 use crate::model_migration::migration_copy_for_models;
 use crate::model_migration::run_model_migration_prompt;
@@ -72,7 +73,6 @@ use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
-use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use ratatui::style::Stylize;
@@ -409,6 +409,7 @@ async fn handle_model_migration_prompt_if_needed(
     model: &str,
     app_event_tx: &AppEventSender,
     available_models: Vec<ModelPreset>,
+    keymap: Arc<TuiKeymap>,
 ) -> Option<AppExitInfo> {
     let upgrade = available_models
         .iter()
@@ -460,7 +461,7 @@ async fn handle_model_migration_prompt_if_needed(
             target_description,
             can_opt_out,
         );
-        match run_model_migration_prompt(tui, prompt_copy).await {
+        match run_model_migration_prompt(tui, prompt_copy, keymap).await {
             ModelMigrationOutcome::Accepted => {
                 app_event_tx.send(AppEvent::PersistModelMigrationPromptAcknowledged {
                     from_model: model.to_string(),
@@ -513,6 +514,7 @@ pub(crate) struct App {
     pub(crate) otel_manager: OtelManager,
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) chat_widget: ChatWidget,
+    pub(crate) keymap: Arc<TuiKeymap>,
     pub(crate) auth_manager: Arc<AuthManager>,
     /// Config is stored here so we can recreate ChatWidgets as needed.
     pub(crate) config: Config,
@@ -601,6 +603,7 @@ impl App {
             // Fork/resume bootstraps here don't carry any prefilled message content.
             initial_user_message: None,
             enhanced_keys_supported: self.enhanced_keys_supported,
+            keymap: self.keymap.clone(),
             auth_manager: self.auth_manager.clone(),
             models_manager: self.server.get_models_manager(),
             feedback: self.feedback.clone(),
@@ -923,6 +926,7 @@ impl App {
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         session_selection: SessionSelection,
+        keymap: Arc<TuiKeymap>,
         feedback: codex_feedback::CodexFeedback,
         is_first_run: bool,
     ) -> Result<AppExitInfo> {
@@ -953,6 +957,7 @@ impl App {
             model.as_str(),
             &app_event_tx,
             available_models,
+            keymap.clone(),
         )
         .await;
         if let Some(exit_info) = exit_info {
@@ -1010,6 +1015,7 @@ impl App {
                         Vec::new(),
                     ),
                     enhanced_keys_supported,
+                    keymap: keymap.clone(),
                     auth_manager: auth_manager.clone(),
                     models_manager: thread_manager.get_models_manager(),
                     feedback: feedback.clone(),
@@ -1040,6 +1046,7 @@ impl App {
                         Vec::new(),
                     ),
                     enhanced_keys_supported,
+                    keymap: keymap.clone(),
                     auth_manager: auth_manager.clone(),
                     models_manager: thread_manager.get_models_manager(),
                     feedback: feedback.clone(),
@@ -1070,6 +1077,7 @@ impl App {
                         Vec::new(),
                     ),
                     enhanced_keys_supported,
+                    keymap: keymap.clone(),
                     auth_manager: auth_manager.clone(),
                     models_manager: thread_manager.get_models_manager(),
                     feedback: feedback.clone(),
@@ -1094,6 +1102,7 @@ impl App {
             otel_manager: otel_manager.clone(),
             app_event_tx,
             chat_widget,
+            keymap,
             auth_manager: auth_manager.clone(),
             config,
             active_profile,
@@ -1311,6 +1320,7 @@ impl App {
                     // New sessions start without prefilled message content.
                     initial_user_message: None,
                     enhanced_keys_supported: self.enhanced_keys_supported,
+                    keymap: self.keymap.clone(),
                     auth_manager: self.auth_manager.clone(),
                     models_manager: self.server.get_models_manager(),
                     feedback: self.feedback.clone(),
@@ -1337,6 +1347,7 @@ impl App {
                     tui,
                     &self.config.codex_home,
                     &self.config.model_provider_id,
+                    self.keymap.clone(),
                     false,
                 )
                 .await?
@@ -1349,6 +1360,7 @@ impl App {
                             &path,
                             CwdPromptAction::Resume,
                             true,
+                            self.keymap.clone(),
                         )
                         .await?
                         {
@@ -1557,6 +1569,7 @@ impl App {
                 self.overlay = Some(Overlay::new_static_with_lines(
                     pager_lines,
                     "D I F F".to_string(),
+                    self.keymap.clone(),
                 ));
                 tui.frame_requester().schedule_frame();
             }
@@ -2202,6 +2215,7 @@ impl App {
                     self.overlay = Some(Overlay::new_static_with_renderables(
                         vec![diff_summary.into()],
                         "P A T C H".to_string(),
+                        self.keymap.clone(),
                     ));
                 }
                 ApprovalRequest::Exec { command, .. } => {
@@ -2211,6 +2225,7 @@ impl App {
                     self.overlay = Some(Overlay::new_static_with_lines(
                         full_cmd_lines,
                         "E X E C".to_string(),
+                        self.keymap.clone(),
                     ));
                 }
                 ApprovalRequest::McpElicitation {
@@ -2228,6 +2243,7 @@ impl App {
                     self.overlay = Some(Overlay::new_static_with_renderables(
                         vec![Box::new(paragraph)],
                         "E L I C I T A T I O N".to_string(),
+                        self.keymap.clone(),
                     ));
                 }
             },
@@ -2464,79 +2480,66 @@ impl App {
     }
 
     async fn handle_key_event(&mut self, tui: &mut tui::Tui, key_event: KeyEvent) {
-        match key_event {
-            KeyEvent {
-                code: KeyCode::Char('t'),
-                modifiers: crossterm::event::KeyModifiers::CONTROL,
-                kind: KeyEventKind::Press,
-                ..
-            } => {
-                // Enter alternate screen and set viewport to full size.
-                let _ = tui.enter_alt_screen();
-                self.overlay = Some(Overlay::new_transcript(self.transcript_cells.clone()));
-                tui.frame_requester().schedule_frame();
-            }
-            KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers: crossterm::event::KeyModifiers::CONTROL,
-                kind: KeyEventKind::Press,
-                ..
-            } => {
-                // Only launch the external editor if there is no overlay and the bottom pane is not in use.
-                // Note that it can be launched while a task is running to enable editing while the previous turn is ongoing.
-                if self.overlay.is_none()
-                    && self.chat_widget.can_launch_external_editor()
-                    && self.chat_widget.external_editor_state() == ExternalEditorState::Closed
-                {
-                    self.request_external_editor_launch(tui);
-                }
-            }
-            // Esc primes/advances backtracking only in normal (not working) mode
-            // with the composer focused and empty. In any other state, forward
-            // Esc so the active UI (e.g. status indicator, modals, popups)
-            // handles it.
-            KeyEvent {
-                code: KeyCode::Esc,
-                kind: KeyEventKind::Press | KeyEventKind::Repeat,
-                ..
-            } => {
-                if self.chat_widget.is_normal_backtrack_mode()
-                    && self.chat_widget.composer_is_empty()
-                {
-                    self.handle_backtrack_esc_key(tui);
-                } else {
-                    self.chat_widget.handle_key_event(key_event);
-                }
-            }
-            // Enter confirms backtrack when primed + count > 0. Otherwise pass to widget.
-            KeyEvent {
-                code: KeyCode::Enter,
-                kind: KeyEventKind::Press,
-                ..
-            } if self.backtrack.primed
-                && self.backtrack.nth_user_message != usize::MAX
-                && self.chat_widget.composer_is_empty() =>
+        if key_event.kind == KeyEventKind::Press
+            && self.keymap.global_show_transcript.matches(key_event)
+        {
+            // Enter alternate screen and set viewport to full size.
+            let _ = tui.enter_alt_screen();
+            self.overlay = Some(Overlay::new_transcript(
+                self.transcript_cells.clone(),
+                self.keymap.clone(),
+            ));
+            tui.frame_requester().schedule_frame();
+            return;
+        }
+
+        if key_event.kind == KeyEventKind::Press
+            && self.keymap.global_external_editor.matches(key_event)
+        {
+            // Only launch the external editor if there is no overlay and the bottom pane is not in use.
+            // Note that it can be launched while a task is running to enable editing while the previous turn is ongoing.
+            if self.overlay.is_none()
+                && self.chat_widget.can_launch_external_editor()
+                && self.chat_widget.external_editor_state() == ExternalEditorState::Closed
             {
-                if let Some(selection) = self.confirm_backtrack_from_main() {
-                    self.apply_backtrack_selection(tui, selection);
-                }
+                self.request_external_editor_launch(tui);
             }
-            KeyEvent {
-                kind: KeyEventKind::Press | KeyEventKind::Repeat,
-                ..
-            } => {
-                // Any non-Esc key press should cancel a primed backtrack.
-                // This avoids stale "Esc-primed" state after the user starts typing
-                // (even if they later backspace to empty).
-                if key_event.code != KeyCode::Esc && self.backtrack.primed {
-                    self.reset_backtrack_state();
-                }
+            return;
+        }
+
+        if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && self.keymap.global_backtrack_prime.matches(key_event)
+        {
+            // Backtrack priming only applies in normal (not working) mode with the composer empty.
+            if self.chat_widget.is_normal_backtrack_mode() && self.chat_widget.composer_is_empty() {
+                self.handle_backtrack_esc_key(tui);
+            } else {
                 self.chat_widget.handle_key_event(key_event);
             }
-            _ => {
-                // Ignore Release key events.
+            return;
+        }
+
+        if key_event.kind == KeyEventKind::Press
+            && self.backtrack.primed
+            && self.backtrack.nth_user_message != usize::MAX
+            && self.chat_widget.composer_is_empty()
+            && self.keymap.global_backtrack_confirm.matches(key_event)
+        {
+            if let Some(selection) = self.confirm_backtrack_from_main() {
+                self.apply_backtrack_selection(tui, selection);
             }
-        };
+            return;
+        }
+
+        if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            // Any non-prime key press should cancel a primed backtrack.
+            // This avoids stale "primed" state after the user starts typing
+            // (even if they later backspace to empty).
+            if self.backtrack.primed && !self.keymap.global_backtrack_prime.matches(key_event) {
+                self.reset_backtrack_state();
+            }
+            self.chat_widget.handle_key_event(key_event);
+        }
     }
 
     fn refresh_status_line(&mut self) {
@@ -2670,6 +2673,7 @@ mod tests {
     async fn make_test_app() -> App {
         let (chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender().await;
         let config = chat_widget.config_ref().clone();
+        let keymap = Arc::new(TuiKeymap::defaults(false, false));
         let server = Arc::new(ThreadManager::with_models_provider(
             CodexAuth::from_api_key("Test API Key"),
             config.model_provider.clone(),
@@ -2685,6 +2689,7 @@ mod tests {
             otel_manager,
             app_event_tx,
             chat_widget,
+            keymap: keymap.clone(),
             auth_manager,
             config,
             active_profile: None,
@@ -2723,6 +2728,7 @@ mod tests {
     ) {
         let (chat_widget, app_event_tx, rx, op_rx) = make_chatwidget_manual_with_sender().await;
         let config = chat_widget.config_ref().clone();
+        let keymap = Arc::new(TuiKeymap::defaults(false, false));
         let server = Arc::new(ThreadManager::with_models_provider(
             CodexAuth::from_api_key("Test API Key"),
             config.model_provider.clone(),
@@ -2739,6 +2745,7 @@ mod tests {
                 otel_manager,
                 app_event_tx,
                 chat_widget,
+                keymap: keymap.clone(),
                 auth_manager,
                 config,
                 active_profile: None,

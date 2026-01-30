@@ -1,7 +1,5 @@
-use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
@@ -12,8 +10,10 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
 use std::cell::Cell;
+use std::sync::Arc;
 
 use crate::ascii_animation::AsciiAnimation;
+use crate::keymap::TuiKeymap;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
 use crate::tui::FrameRequester;
@@ -28,6 +28,7 @@ pub(crate) struct WelcomeWidget {
     animation: AsciiAnimation,
     animations_enabled: bool,
     layout_area: Cell<Option<Rect>>,
+    keymap: Arc<TuiKeymap>,
 }
 
 impl KeyboardHandler for WelcomeWidget {
@@ -36,8 +37,7 @@ impl KeyboardHandler for WelcomeWidget {
             return;
         }
         if key_event.kind == KeyEventKind::Press
-            && key_event.code == KeyCode::Char('.')
-            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && self.keymap.welcome_cycle_animation.matches(key_event)
         {
             tracing::warn!("Welcome background to press '.'");
             let _ = self.animation.pick_random_variant();
@@ -50,12 +50,14 @@ impl WelcomeWidget {
         is_logged_in: bool,
         request_frame: FrameRequester,
         animations_enabled: bool,
+        keymap: Arc<TuiKeymap>,
     ) -> Self {
         Self {
             is_logged_in,
             animation: AsciiAnimation::new(request_frame),
             animations_enabled,
             layout_area: Cell::new(None),
+            keymap,
         }
     }
 
@@ -108,9 +110,13 @@ impl StepStateProvider for WelcomeWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::TuiKeymap;
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
     use pretty_assertions::assert_eq;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use std::sync::Arc;
 
     static VARIANT_A: [&str; 1] = ["frame-a"];
     static VARIANT_B: [&str; 1] = ["frame-b"];
@@ -126,9 +132,13 @@ mod tests {
         })
     }
 
+    fn test_keymap() -> Arc<TuiKeymap> {
+        Arc::new(TuiKeymap::defaults(false, false))
+    }
+
     #[test]
     fn welcome_renders_animation_on_first_draw() {
-        let widget = WelcomeWidget::new(false, FrameRequester::test_dummy(), true);
+        let widget = WelcomeWidget::new(false, FrameRequester::test_dummy(), true, test_keymap());
         let area = Rect::new(0, 0, MIN_ANIMATION_WIDTH, MIN_ANIMATION_HEIGHT);
         let mut buf = Buffer::empty(area);
         let frame_lines = widget.animation.current_frame().lines().count() as u16;
@@ -140,7 +150,7 @@ mod tests {
 
     #[test]
     fn welcome_skips_animation_below_height_breakpoint() {
-        let widget = WelcomeWidget::new(false, FrameRequester::test_dummy(), true);
+        let widget = WelcomeWidget::new(false, FrameRequester::test_dummy(), true, test_keymap());
         let area = Rect::new(0, 0, MIN_ANIMATION_WIDTH, MIN_ANIMATION_HEIGHT - 1);
         let mut buf = Buffer::empty(area);
         (&widget).render(area, &mut buf);
@@ -156,6 +166,7 @@ mod tests {
             animation: AsciiAnimation::with_variants(FrameRequester::test_dummy(), &VARIANTS, 0),
             animations_enabled: true,
             layout_area: Cell::new(None),
+            keymap: test_keymap(),
         };
 
         let before = widget.animation.current_frame();

@@ -91,7 +91,6 @@ use crate::ui_consts::FOOTER_INDENT_COLS;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
@@ -141,6 +140,8 @@ use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::prompt_args::prompt_argument_names;
 use crate::bottom_pane::prompt_args::prompt_command_with_arg_placeholders;
 use crate::bottom_pane::prompt_args::prompt_has_numeric_placeholders;
+use crate::keymap::TextAreaKeymap;
+use crate::keymap::TuiKeymap;
 use crate::render::Insets;
 use crate::render::RectExt;
 use crate::render::renderable::Renderable;
@@ -173,6 +174,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -291,6 +293,7 @@ pub(crate) struct ChatComposer {
     connectors_snapshot: Option<ConnectorsSnapshot>,
     dismissed_mention_popup_token: Option<String>,
     mention_paths: HashMap<String, String>,
+    keymap: Arc<TuiKeymap>,
     /// When enabled, `Enter` submits immediately and `Tab` requests queuing behavior.
     steer_enabled: bool,
     collaboration_modes_enabled: bool,
@@ -350,9 +353,10 @@ impl ChatComposer {
         config: ChatComposerConfig,
     ) -> Self {
         let use_shift_enter_hint = enhanced_keys_supported;
+        let keymap = Arc::new(TuiKeymap::defaults(enhanced_keys_supported, false));
 
         let mut this = Self {
-            textarea: TextArea::new(),
+            textarea: TextArea::new_with_keymap(TextAreaKeymap::from_tui(&keymap)),
             textarea_state: RefCell::new(TextAreaState::default()),
             active_popup: ActivePopup::None,
             app_event_tx,
@@ -383,6 +387,7 @@ impl ChatComposer {
             connectors_snapshot: None,
             dismissed_mention_popup_token: None,
             mention_paths: HashMap::new(),
+            keymap,
             steer_enabled: false,
             collaboration_modes_enabled: false,
             config,
@@ -445,6 +450,11 @@ impl ChatComposer {
 
     pub fn set_personality_command_enabled(&mut self, enabled: bool) {
         self.personality_command_enabled = enabled;
+    }
+
+    pub fn set_keymap(&mut self, keymap: Arc<TuiKeymap>) {
+        self.textarea.set_keymap(TextAreaKeymap::from_tui(&keymap));
+        self.keymap = keymap;
     }
     /// Centralized feature gating keeps config checks out of call sites.
     fn popups_enabled(&self) -> bool {
@@ -997,6 +1007,10 @@ impl ChatComposer {
         result
     }
 
+    pub(crate) fn submit(&mut self, should_queue: bool) -> InputResult {
+        self.handle_submission(should_queue).0
+    }
+
     /// Return true if either the slash-command popup or the file-search popup is active.
     pub(crate) fn popup_active(&self) -> bool {
         !matches!(self.active_popup, ActivePopup::None)
@@ -1007,7 +1021,7 @@ impl ChatComposer {
         if self.handle_shortcut_overlay_key(&key_event) {
             return (InputResult::None, true);
         }
-        if key_event.code == KeyCode::Esc {
+        if self.keymap.popup_cancel.matches(key_event) {
             let next_mode = esc_hint_mode(self.footer_mode, self.is_task_running);
             if next_mode != self.footer_mode {
                 self.footer_mode = next_mode;
@@ -1020,94 +1034,74 @@ impl ChatComposer {
             unreachable!();
         };
 
-        match key_event {
-            KeyEvent {
-                code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                popup.move_up();
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                popup.move_down();
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
-                // Dismiss the slash popup; keep the current input untouched.
-                self.active_popup = ActivePopup::None;
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Tab, ..
-            } => {
-                // Ensure popup filtering/selection reflects the latest composer text
-                // before applying completion.
-                let first_line = self.textarea.text().lines().next().unwrap_or("");
-                popup.on_composer_text_change(first_line.to_string());
-                if let Some(sel) = popup.selected_item() {
-                    let mut cursor_target: Option<usize> = None;
-                    match sel {
-                        CommandItem::Builtin(cmd) => {
-                            if cmd == SlashCommand::Skills {
-                                self.textarea.set_text_clearing_elements("");
-                                return (InputResult::Command(cmd), true);
-                            }
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_up.matches(key_event) {
+            popup.move_up();
+            return (InputResult::None, true);
+        }
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_down.matches(key_event) {
+            popup.move_down();
+            return (InputResult::None, true);
+        }
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_cancel.matches(key_event) {
+            // Dismiss the slash popup; keep the current input untouched.
+            self.active_popup = ActivePopup::None;
+            return (InputResult::None, true);
+        }
+        if key_event.kind == KeyEventKind::Press {
+            if let Some(chord) = self.keymap.popup_accept.match_chord(key_event) {
+                if matches!(chord.key, KeyCode::Tab | KeyCode::BackTab) {
+                    // Ensure popup filtering/selection reflects the latest composer text
+                    // before applying completion.
+                    let first_line = self.textarea.text().lines().next().unwrap_or("");
+                    popup.on_composer_text_change(first_line.to_string());
+                    if let Some(sel) = popup.selected_item() {
+                        let mut cursor_target: Option<usize> = None;
+                        match sel {
+                            CommandItem::Builtin(cmd) => {
+                                if cmd == SlashCommand::Skills {
+                                    self.textarea.set_text_clearing_elements("");
+                                    return (InputResult::Command(cmd), true);
+                                }
 
-                            let starts_with_cmd = first_line
-                                .trim_start()
-                                .starts_with(&format!("/{}", cmd.command()));
-                            if !starts_with_cmd {
-                                self.textarea
-                                    .set_text_clearing_elements(&format!("/{} ", cmd.command()));
+                                let starts_with_cmd = first_line
+                                    .trim_start()
+                                    .starts_with(&format!("/{}", cmd.command()));
+                                if !starts_with_cmd {
+                                    self.textarea.set_text_clearing_elements(&format!(
+                                        "/{} ",
+                                        cmd.command()
+                                    ));
+                                }
+                                if !self.textarea.text().is_empty() {
+                                    cursor_target = Some(self.textarea.text().len());
+                                }
                             }
-                            if !self.textarea.text().is_empty() {
-                                cursor_target = Some(self.textarea.text().len());
-                            }
-                        }
-                        CommandItem::UserPrompt(idx) => {
-                            if let Some(prompt) = popup.prompt(idx) {
-                                match prompt_selection_action(
-                                    prompt,
-                                    first_line,
-                                    PromptSelectionMode::Completion,
-                                    &self.textarea.text_elements(),
-                                ) {
-                                    PromptSelectionAction::Insert { text, cursor } => {
-                                        let target = cursor.unwrap_or(text.len());
-                                        // Inserted prompt text is plain input; discard any elements.
-                                        self.textarea.set_text_clearing_elements(&text);
-                                        cursor_target = Some(target);
+                            CommandItem::UserPrompt(idx) => {
+                                if let Some(prompt) = popup.prompt(idx) {
+                                    match prompt_selection_action(
+                                        prompt,
+                                        first_line,
+                                        PromptSelectionMode::Completion,
+                                        &self.textarea.text_elements(),
+                                    ) {
+                                        PromptSelectionAction::Insert { text, cursor } => {
+                                            let target = cursor.unwrap_or(text.len());
+                                            // Inserted prompt text is plain input; discard any elements.
+                                            self.textarea.set_text_clearing_elements(&text);
+                                            cursor_target = Some(target);
+                                        }
+                                        PromptSelectionAction::Submit { .. } => {}
                                     }
-                                    PromptSelectionAction::Submit { .. } => {}
                                 }
                             }
                         }
+                        if let Some(pos) = cursor_target {
+                            self.textarea.set_cursor(pos);
+                        }
                     }
-                    if let Some(pos) = cursor_target {
-                        self.textarea.set_cursor(pos);
-                    }
+                    return (InputResult::None, true);
                 }
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
+
                 // If the current line starts with a custom prompt name and includes
                 // positional args for a numeric-style template, expand and submit
                 // immediately regardless of the popup selection.
@@ -1186,10 +1180,11 @@ impl ChatComposer {
                     }
                 }
                 // Fallback to default newline handling if no command selected.
-                self.handle_key_event_without_popup(key_event)
+                return self.handle_key_event_without_popup(key_event);
             }
-            input => self.handle_input_basic(input),
         }
+
+        self.handle_input_basic(key_event)
     }
 
     #[inline]
@@ -1295,7 +1290,7 @@ impl ChatComposer {
         if self.handle_shortcut_overlay_key(&key_event) {
             return (InputResult::None, true);
         }
-        if key_event.code == KeyCode::Esc {
+        if self.keymap.popup_cancel.matches(key_event) {
             let next_mode = esc_hint_mode(self.footer_mode, self.is_task_running);
             if next_mode != self.footer_mode {
                 self.footer_mode = next_mode;
@@ -1308,107 +1303,82 @@ impl ChatComposer {
             unreachable!();
         };
 
-        match key_event {
-            KeyEvent {
-                code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                popup.move_up();
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                popup.move_down();
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
-                // Hide popup without modifying text, remember token to avoid immediate reopen.
-                if let Some(tok) = Self::current_at_token(&self.textarea) {
-                    self.dismissed_file_popup_token = Some(tok);
-                }
-                self.active_popup = ActivePopup::None;
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Tab, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                let Some(sel) = popup.selected_match() else {
-                    self.active_popup = ActivePopup::None;
-                    return (InputResult::None, true);
-                };
-
-                let sel_path = sel.to_string_lossy().to_string();
-                // If selected path looks like an image (png/jpeg), attach as image instead of inserting text.
-                let is_image = Self::is_image_path(&sel_path);
-                if is_image {
-                    // Determine dimensions; if that fails fall back to normal path insertion.
-                    let path_buf = PathBuf::from(&sel_path);
-                    match image::image_dimensions(&path_buf) {
-                        Ok((width, height)) => {
-                            tracing::debug!("selected image dimensions={}x{}", width, height);
-                            // Remove the current @token (mirror logic from insert_selected_path without inserting text)
-                            // using the flat text and byte-offset cursor API.
-                            let cursor_offset = self.textarea.cursor();
-                            let text = self.textarea.text();
-                            // Clamp to a valid char boundary to avoid panics when slicing.
-                            let safe_cursor = Self::clamp_to_char_boundary(text, cursor_offset);
-                            let before_cursor = &text[..safe_cursor];
-                            let after_cursor = &text[safe_cursor..];
-
-                            // Determine token boundaries in the full text.
-                            let start_idx = before_cursor
-                                .char_indices()
-                                .rfind(|(_, c)| c.is_whitespace())
-                                .map(|(idx, c)| idx + c.len_utf8())
-                                .unwrap_or(0);
-                            let end_rel_idx = after_cursor
-                                .char_indices()
-                                .find(|(_, c)| c.is_whitespace())
-                                .map(|(idx, _)| idx)
-                                .unwrap_or(after_cursor.len());
-                            let end_idx = safe_cursor + end_rel_idx;
-
-                            self.textarea.replace_range(start_idx..end_idx, "");
-                            self.textarea.set_cursor(start_idx);
-
-                            self.attach_image(path_buf);
-                            // Add a trailing space to keep typing fluid.
-                            self.textarea.insert_str(" ");
-                        }
-                        Err(err) => {
-                            tracing::trace!("image dimensions lookup failed: {err}");
-                            // Fallback to plain path insertion if metadata read fails.
-                            self.insert_selected_path(&sel_path);
-                        }
-                    }
-                } else {
-                    // Non-image: inserting file path.
-                    self.insert_selected_path(&sel_path);
-                }
-                // No selection: treat Enter as closing the popup/session.
-                self.active_popup = ActivePopup::None;
-                (InputResult::None, true)
-            }
-            input => self.handle_input_basic(input),
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_up.matches(key_event) {
+            popup.move_up();
+            return (InputResult::None, true);
         }
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_down.matches(key_event) {
+            popup.move_down();
+            return (InputResult::None, true);
+        }
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_cancel.matches(key_event) {
+            // Hide popup without modifying text, remember token to avoid immediate reopen.
+            if let Some(tok) = Self::current_at_token(&self.textarea) {
+                self.dismissed_file_popup_token = Some(tok);
+            }
+            self.active_popup = ActivePopup::None;
+            return (InputResult::None, true);
+        }
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_accept.matches(key_event) {
+            let Some(sel) = popup.selected_match() else {
+                self.active_popup = ActivePopup::None;
+                return (InputResult::None, true);
+            };
+
+            let sel_path = sel.to_string_lossy().to_string();
+            // If selected path looks like an image (png/jpeg), attach as image instead of inserting text.
+            let is_image = Self::is_image_path(&sel_path);
+            if is_image {
+                // Determine dimensions; if that fails fall back to normal path insertion.
+                let path_buf = PathBuf::from(&sel_path);
+                match image::image_dimensions(&path_buf) {
+                    Ok((width, height)) => {
+                        tracing::debug!("selected image dimensions={}x{}", width, height);
+                        // Remove the current @token (mirror logic from insert_selected_path without inserting text)
+                        // using the flat text and byte-offset cursor API.
+                        let cursor_offset = self.textarea.cursor();
+                        let text = self.textarea.text();
+                        // Clamp to a valid char boundary to avoid panics when slicing.
+                        let safe_cursor = Self::clamp_to_char_boundary(text, cursor_offset);
+                        let before_cursor = &text[..safe_cursor];
+                        let after_cursor = &text[safe_cursor..];
+
+                        // Determine token boundaries in the full text.
+                        let start_idx = before_cursor
+                            .char_indices()
+                            .rfind(|(_, c)| c.is_whitespace())
+                            .map(|(idx, c)| idx + c.len_utf8())
+                            .unwrap_or(0);
+                        let end_rel_idx = after_cursor
+                            .char_indices()
+                            .find(|(_, c)| c.is_whitespace())
+                            .map(|(idx, _)| idx)
+                            .unwrap_or(after_cursor.len());
+                        let end_idx = safe_cursor + end_rel_idx;
+
+                        self.textarea.replace_range(start_idx..end_idx, "");
+                        self.textarea.set_cursor(start_idx);
+
+                        self.attach_image(path_buf);
+                        // Add a trailing space to keep typing fluid.
+                        self.textarea.insert_str(" ");
+                    }
+                    Err(err) => {
+                        tracing::trace!("image dimensions lookup failed: {err}");
+                        // Fallback to plain path insertion if metadata read fails.
+                        self.insert_selected_path(&sel_path);
+                    }
+                }
+            } else {
+                // Non-image: inserting file path.
+                self.insert_selected_path(&sel_path);
+            }
+            // No selection: treat Enter as closing the popup/session.
+            self.active_popup = ActivePopup::None;
+            return (InputResult::None, true);
+        }
+
+        self.handle_input_basic(key_event)
     }
 
     fn handle_key_event_with_skill_popup(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
@@ -1421,70 +1391,34 @@ impl ChatComposer {
             unreachable!();
         };
 
-        let mut selected_mention: Option<(String, Option<String>)> = None;
-        let mut close_popup = false;
-
-        let result = match key_event {
-            KeyEvent {
-                code: KeyCode::Up, ..
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_up.matches(key_event) {
+            popup.move_up();
+            return (InputResult::None, true);
+        }
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_down.matches(key_event) {
+            popup.move_down();
+            return (InputResult::None, true);
+        }
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_cancel.matches(key_event) {
+            if let Some(tok) = self.current_mention_token() {
+                self.dismissed_mention_popup_token = Some(tok);
             }
-            | KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                popup.move_up();
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                popup.move_down();
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
-                if let Some(tok) = self.current_mention_token() {
-                    self.dismissed_mention_popup_token = Some(tok);
-                }
-                self.active_popup = ActivePopup::None;
-                (InputResult::None, true)
-            }
-            KeyEvent {
-                code: KeyCode::Tab, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                if let Some(mention) = popup.selected_mention() {
-                    selected_mention = Some((mention.insert_text.clone(), mention.path.clone()));
-                }
-                close_popup = true;
-                (InputResult::None, true)
-            }
-            input => self.handle_input_basic(input),
-        };
-
-        if close_popup {
-            if let Some((insert_text, path)) = selected_mention {
-                if let Some(path) = path.as_deref() {
+            self.active_popup = ActivePopup::None;
+            return (InputResult::None, true);
+        }
+        if key_event.kind == KeyEventKind::Press && self.keymap.popup_accept.matches(key_event) {
+            if let Some(mention) = popup.selected_mention() {
+                let insert_text = mention.insert_text.clone();
+                if let Some(path) = mention.path.as_deref() {
                     self.record_mention_path(&insert_text, path);
                 }
                 self.insert_selected_mention(&insert_text);
             }
             self.active_popup = ActivePopup::None;
+            return (InputResult::None, true);
         }
 
-        result
+        self.handle_input_basic(key_event)
     }
 
     fn is_image_path(path: &str) -> bool {
@@ -2212,65 +2146,63 @@ impl ChatComposer {
         } else {
             self.footer_mode = reset_mode_after_activity(self.footer_mode);
         }
-        match key_event {
-            KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: crossterm::event::KeyModifiers::CONTROL,
-                kind: KeyEventKind::Press,
-                ..
-            } if self.is_empty() => (InputResult::None, false),
-            // -------------------------------------------------------------
-            // History navigation (Up / Down) – only when the composer is not
-            // empty or when the cursor is at the correct position, to avoid
-            // interfering with normal cursor movement.
-            // -------------------------------------------------------------
-            KeyEvent {
-                code: KeyCode::Up | KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('p') | KeyCode::Char('n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                if self
-                    .history
-                    .should_handle_navigation(self.textarea.text(), self.textarea.cursor())
-                {
-                    let replace_entry = match key_event.code {
-                        KeyCode::Up => self.history.navigate_up(&self.app_event_tx),
-                        KeyCode::Down => self.history.navigate_down(&self.app_event_tx),
-                        KeyCode::Char('p') => self.history.navigate_up(&self.app_event_tx),
-                        KeyCode::Char('n') => self.history.navigate_down(&self.app_event_tx),
-                        _ => unreachable!(),
-                    };
-                    if let Some(entry) = replace_entry {
-                        self.set_text_content(
-                            entry.text,
-                            entry.text_elements,
-                            entry.local_image_paths,
-                        );
-                        return (InputResult::None, true);
-                    }
-                }
-                self.handle_input_basic(key_event)
-            }
-            KeyEvent {
-                code: KeyCode::Tab,
-                modifiers: KeyModifiers::NONE,
-                kind: KeyEventKind::Press,
-                ..
-            } if self.is_task_running => self.handle_submission(true),
-            KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                let should_queue = !self.steer_enabled;
-                self.handle_submission(should_queue)
-            }
-            input => self.handle_input_basic(input),
+        if key_event.kind == KeyEventKind::Press
+            && self
+                .keymap
+                .chat_quit_or_interrupt_secondary
+                .matches(key_event)
+            && self.is_empty()
+        {
+            return (InputResult::None, false);
         }
+
+        let history_direction = if self.keymap.text_move_up.matches(key_event) {
+            Some(true)
+        } else if self.keymap.text_move_down.matches(key_event) {
+            Some(false)
+        } else {
+            None
+        };
+
+        if let Some(is_up) = history_direction {
+            if self
+                .history
+                .should_handle_navigation(self.textarea.text(), self.textarea.cursor())
+            {
+                let replace_entry = if is_up {
+                    self.history.navigate_up(&self.app_event_tx)
+                } else {
+                    self.history.navigate_down(&self.app_event_tx)
+                };
+                if let Some(entry) = replace_entry {
+                    self.set_text_content(
+                        entry.text,
+                        entry.text_elements,
+                        entry.local_image_paths,
+                    );
+                    return (InputResult::None, true);
+                }
+            }
+            return self.handle_input_basic(key_event);
+        }
+
+        if key_event.kind == KeyEventKind::Press
+            && self.keymap.composer_queue.matches(key_event)
+            && self.is_task_running
+        {
+            return self.handle_submission(true);
+        }
+
+        if key_event.kind == KeyEventKind::Press && self.keymap.composer_submit.matches(key_event) {
+            let should_queue = !self.steer_enabled;
+            return self.handle_submission(should_queue);
+        }
+
+        if self.keymap.composer_newline.matches(key_event) {
+            return self.handle_input_basic(key_event);
+        }
+
+        self.handle_input_basic(key_event)
     }
 
     /// Applies any due `PasteBurst` flush at time `now`.
@@ -2489,8 +2421,7 @@ impl ChatComposer {
             return false;
         }
 
-        let toggles = matches!(key_event.code, KeyCode::Char('?'))
-            && !has_ctrl_or_alt(key_event.modifiers)
+        let toggles = self.keymap.composer_toggle_shortcuts.matches(*key_event)
             && self.is_empty()
             && !self.is_in_paste_burst();
 
@@ -3405,6 +3336,7 @@ fn prompt_selection_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
     use image::ImageBuffer;
     use image::Rgba;
     use pretty_assertions::assert_eq;

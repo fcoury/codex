@@ -89,7 +89,7 @@ impl ChatWidget {
             })
             .collect();
 
-        let view = SkillsToggleView::new(items, self.app_event_tx.clone());
+        let view = SkillsToggleView::new(items, self.app_event_tx.clone(), self.keymap.clone());
         self.bottom_pane.show_view(Box::new(view));
     }
 

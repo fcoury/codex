@@ -6,6 +6,9 @@ use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Span;
 
+use crate::keymap::KeyBindingSet;
+use crate::keymap::KeyChord;
+
 #[cfg(test)]
 const ALT_PREFIX: &str = "⌥ + ";
 #[cfg(all(not(test), target_os = "macos"))]
@@ -91,6 +94,12 @@ impl From<&KeyBinding> for Span<'static> {
     }
 }
 
+impl From<&KeyChord> for KeyBinding {
+    fn from(chord: &KeyChord) -> Self {
+        KeyBinding::new(chord.key, chord.modifiers)
+    }
+}
+
 fn key_hint_style() -> Style {
     Style::default().dim()
 }
@@ -109,4 +118,24 @@ pub(crate) fn is_altgr(mods: KeyModifiers) -> bool {
 #[inline]
 pub(crate) fn is_altgr(_mods: KeyModifiers) -> bool {
     false
+}
+
+pub(crate) fn bindings_from_set(set: &KeyBindingSet) -> Vec<KeyBinding> {
+    set.0.iter().map(KeyBinding::from).collect()
+}
+
+pub(crate) fn primary_binding(set: &KeyBindingSet) -> Option<KeyBinding> {
+    set.0.first().map(KeyBinding::from)
+}
+
+#[allow(dead_code)]
+pub(crate) fn join_bindings(bindings: &[KeyBinding]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, binding) in bindings.iter().enumerate() {
+        if i > 0 {
+            spans.push(" / ".into());
+        }
+        spans.push(Span::from(binding));
+    }
+    spans
 }

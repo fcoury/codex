@@ -1,7 +1,6 @@
 use codex_core::AuthManager;
 use codex_core::config::Config;
 use codex_core::git_info::get_git_repo_root;
-use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use ratatui::buffer::Buffer;
@@ -14,6 +13,7 @@ use ratatui::widgets::WidgetRef;
 use codex_protocol::config_types::ForcedLoginMethod;
 
 use crate::LoginStatus;
+use crate::keymap::TuiKeymap;
 use crate::onboarding::auth::AuthModeWidget;
 use crate::onboarding::auth::SignInOption;
 use crate::onboarding::auth::SignInState;
@@ -55,6 +55,7 @@ pub(crate) struct OnboardingScreen {
     steps: Vec<Step>,
     is_done: bool,
     should_exit: bool,
+    keymap: Arc<TuiKeymap>,
 }
 
 pub(crate) struct OnboardingScreenArgs {
@@ -63,6 +64,7 @@ pub(crate) struct OnboardingScreenArgs {
     pub login_status: LoginStatus,
     pub auth_manager: Arc<AuthManager>,
     pub config: Config,
+    pub keymap: Arc<TuiKeymap>,
 }
 
 pub(crate) struct OnboardingResult {
@@ -78,6 +80,7 @@ impl OnboardingScreen {
             login_status,
             auth_manager,
             config,
+            keymap,
         } = args;
         let cwd = config.cwd.clone();
         let forced_chatgpt_workspace_id = config.forced_chatgpt_workspace_id.clone();
@@ -89,6 +92,7 @@ impl OnboardingScreen {
             !matches!(login_status, LoginStatus::NotAuthenticated),
             tui.frame_requester(),
             config.animations,
+            keymap.clone(),
         )));
         if show_login_screen {
             let highlighted_mode = match forced_login_method {
@@ -107,6 +111,7 @@ impl OnboardingScreen {
                 forced_chatgpt_workspace_id,
                 forced_login_method,
                 animations_enabled: config.animations,
+                keymap: keymap.clone(),
             }))
         }
         let is_git_repo = get_git_repo_root(&cwd).is_some();
@@ -124,6 +129,7 @@ impl OnboardingScreen {
                 selection: None,
                 highlighted,
                 error: None,
+                keymap: keymap.clone(),
             }))
         }
         // TODO: add git warning.
@@ -132,6 +138,7 @@ impl OnboardingScreen {
             steps,
             is_done: false,
             should_exit: false,
+            keymap,
         }
     }
 
@@ -215,25 +222,17 @@ impl KeyboardHandler for OnboardingScreen {
             return;
         }
         let is_api_key_entry_active = self.is_api_key_entry_active();
-        let should_quit = match key_event {
-            KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: crossterm::event::KeyModifiers::CONTROL,
-                kind: KeyEventKind::Press,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: crossterm::event::KeyModifiers::CONTROL,
-                kind: KeyEventKind::Press,
-                ..
-            } => true,
-            KeyEvent {
-                code: KeyCode::Char('q'),
-                kind: KeyEventKind::Press,
-                ..
-            } => !is_api_key_entry_active,
-            _ => false,
+        let should_quit = if key_event.kind == KeyEventKind::Press
+            && self.keymap.onboarding_exit.matches(key_event)
+        {
+            true
+        } else if key_event.kind == KeyEventKind::Press
+            && !is_api_key_entry_active
+            && self.keymap.onboarding_quit.matches(key_event)
+        {
+            true
+        } else {
+            false
         };
         if should_quit {
             if self.is_auth_in_progress() {

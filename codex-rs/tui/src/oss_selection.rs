@@ -1,6 +1,10 @@
 use std::io;
+use std::sync::Arc;
 use std::sync::LazyLock;
 
+use crate::key_hint;
+use crate::key_hint::primary_binding;
+use crate::keymap::TuiKeymap;
 use codex_core::DEFAULT_LMSTUDIO_PORT;
 use codex_core::DEFAULT_OLLAMA_PORT;
 use codex_core::LMSTUDIO_OSS_PROVIDER_ID;
@@ -56,7 +60,6 @@ enum ProviderStatus {
 struct SelectOption {
     label: Line<'static>,
     description: &'static str,
-    key: KeyCode,
     provider_id: &'static str,
 }
 
@@ -65,13 +68,11 @@ static OSS_SELECT_OPTIONS: LazyLock<Vec<SelectOption>> = LazyLock::new(|| {
         SelectOption {
             label: Line::from(vec!["L".underlined(), "M Studio".into()]),
             description: "Local LM Studio server (default port 1234)",
-            key: KeyCode::Char('l'),
             provider_id: LMSTUDIO_OSS_PROVIDER_ID,
         },
         SelectOption {
             label: Line::from(vec!["O".underlined(), "llama".into()]),
             description: "Local Ollama server (Responses API, default port 11434)",
-            key: KeyCode::Char('o'),
             provider_id: OLLAMA_OSS_PROVIDER_ID,
         },
     ]
@@ -89,10 +90,16 @@ pub struct OssSelectionWidget<'a> {
     done: bool,
 
     selection: Option<String>,
+
+    keymap: Arc<TuiKeymap>,
 }
 
 impl OssSelectionWidget<'_> {
-    fn new(lmstudio_status: ProviderStatus, ollama_status: ProviderStatus) -> io::Result<Self> {
+    fn new(
+        lmstudio_status: ProviderStatus,
+        ollama_status: ProviderStatus,
+        keymap: Arc<TuiKeymap>,
+    ) -> io::Result<Self> {
         let providers = vec![
             ProviderOption {
                 name: "LM Studio".to_string(),
@@ -131,8 +138,19 @@ impl OssSelectionWidget<'_> {
         contents.push(Line::from("  ● Running  ○ Not Running").add_modifier(Modifier::DIM));
 
         contents.push(Line::from(""));
+        let confirm =
+            primary_binding(&keymap.oss_confirm).unwrap_or_else(|| key_hint::plain(KeyCode::Enter));
+        let cancel = primary_binding(&keymap.oss_cancel)
+            .unwrap_or_else(|| key_hint::ctrl(KeyCode::Char('c')));
         contents.push(
-            Line::from("  Press Enter to select • Ctrl+C to exit").add_modifier(Modifier::DIM),
+            Line::from(vec![
+                "  Press ".dim(),
+                confirm.into(),
+                " to select • ".dim(),
+                cancel.into(),
+                " to exit".dim(),
+            ])
+            .add_modifier(Modifier::DIM),
         );
 
         let confirmation_prompt = Paragraph::new(contents).wrap(Wrap { trim: false });
@@ -143,6 +161,7 @@ impl OssSelectionWidget<'_> {
             selected_option: 0,
             done: false,
             selection: None,
+            keymap,
         })
     }
 
@@ -167,49 +186,25 @@ impl OssSelectionWidget<'_> {
         }
     }
 
-    /// Normalize a key for comparison.
-    /// - For `KeyCode::Char`, converts to lowercase for case-insensitive matching.
-    /// - Other key codes are returned unchanged.
-    fn normalize_keycode(code: KeyCode) -> KeyCode {
-        match code {
-            KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
-            other => other,
-        }
-    }
-
     fn handle_select_key(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Char('c')
-                if key_event
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                self.send_decision("__CANCELLED__".to_string());
-            }
-            KeyCode::Left => {
-                self.selected_option = (self.selected_option + self.select_options.len() - 1)
-                    % self.select_options.len();
-            }
-            KeyCode::Right => {
-                self.selected_option = (self.selected_option + 1) % self.select_options.len();
-            }
-            KeyCode::Enter => {
-                let opt = &self.select_options[self.selected_option];
-                self.send_decision(opt.provider_id.to_string());
-            }
-            KeyCode::Esc => {
-                self.send_decision(LMSTUDIO_OSS_PROVIDER_ID.to_string());
-            }
-            other => {
-                let normalized = Self::normalize_keycode(other);
-                if let Some(opt) = self
-                    .select_options
-                    .iter()
-                    .find(|opt| Self::normalize_keycode(opt.key) == normalized)
-                {
-                    self.send_decision(opt.provider_id.to_string());
-                }
-            }
+        if self.keymap.oss_cancel.matches(key_event) {
+            self.send_decision("__CANCELLED__".to_string());
+        } else if self.keymap.oss_left.matches(key_event) {
+            self.selected_option =
+                (self.selected_option + self.select_options.len() - 1) % self.select_options.len();
+        } else if self.keymap.oss_right.matches(key_event) {
+            self.selected_option = (self.selected_option + 1) % self.select_options.len();
+        } else if self.keymap.oss_confirm.matches(key_event) {
+            let opt = &self.select_options[self.selected_option];
+            self.send_decision(opt.provider_id.to_string());
+        } else if self.keymap.oss_default.matches(key_event) {
+            self.send_decision(LMSTUDIO_OSS_PROVIDER_ID.to_string());
+        } else if self.keymap.oss_select_l.matches(key_event) {
+            self.send_decision(LMSTUDIO_OSS_PROVIDER_ID.to_string());
+        } else if self.keymap.oss_select_o.matches(key_event) {
+            self.send_decision(OLLAMA_OSS_PROVIDER_ID.to_string());
+        } else if self.keymap.oss_select_c.matches(key_event) {
+            self.send_decision(OLLAMA_CHAT_PROVIDER_ID.to_string());
         }
     }
 
@@ -287,7 +282,10 @@ fn get_status_symbol_and_color(status: &ProviderStatus) -> (&'static str, Color)
     }
 }
 
-pub async fn select_oss_provider(codex_home: &std::path::Path) -> io::Result<String> {
+pub async fn select_oss_provider(
+    codex_home: &std::path::Path,
+    keymap: Arc<TuiKeymap>,
+) -> io::Result<String> {
     // Check provider statuses first
     let lmstudio_status = check_lmstudio_status().await;
     let ollama_status = check_ollama_status().await;
@@ -307,7 +305,7 @@ pub async fn select_oss_provider(codex_home: &std::path::Path) -> io::Result<Str
         }
     }
 
-    let mut widget = OssSelectionWidget::new(lmstudio_status, ollama_status)?;
+    let mut widget = OssSelectionWidget::new(lmstudio_status, ollama_status, keymap)?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

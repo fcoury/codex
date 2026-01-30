@@ -40,8 +40,6 @@ use codex_core::protocol::Op;
 use codex_protocol::ThreadId;
 use codex_protocol::user_input::TextElement;
 use color_eyre::eyre::Result;
-use crossterm::event::KeyCode;
-use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 
 /// Aggregates all backtrack-related state used by the App.
@@ -109,35 +107,27 @@ impl App {
     ) -> Result<bool> {
         if self.backtrack.overlay_preview_active {
             match event {
-                TuiEvent::Key(KeyEvent {
-                    code: KeyCode::Esc,
-                    kind: KeyEventKind::Press | KeyEventKind::Repeat,
-                    ..
-                }) => {
+                TuiEvent::Key(key_event)
+                    if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                        && (self.keymap.backtrack_overlay_prev.matches(key_event)
+                            || self.keymap.pager_backtrack_prev.matches(key_event)) =>
+                {
                     self.overlay_step_backtrack(tui, event)?;
                     Ok(true)
                 }
-                TuiEvent::Key(KeyEvent {
-                    code: KeyCode::Left,
-                    kind: KeyEventKind::Press | KeyEventKind::Repeat,
-                    ..
-                }) => {
-                    self.overlay_step_backtrack(tui, event)?;
-                    Ok(true)
-                }
-                TuiEvent::Key(KeyEvent {
-                    code: KeyCode::Right,
-                    kind: KeyEventKind::Press | KeyEventKind::Repeat,
-                    ..
-                }) => {
+                TuiEvent::Key(key_event)
+                    if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                        && (self.keymap.backtrack_overlay_next.matches(key_event)
+                            || self.keymap.pager_backtrack_next.matches(key_event)) =>
+                {
                     self.overlay_step_backtrack_forward(tui, event)?;
                     Ok(true)
                 }
-                TuiEvent::Key(KeyEvent {
-                    code: KeyCode::Enter,
-                    kind: KeyEventKind::Press,
-                    ..
-                }) => {
+                TuiEvent::Key(key_event)
+                    if key_event.kind == KeyEventKind::Press
+                        && (self.keymap.backtrack_overlay_confirm.matches(key_event)
+                            || self.keymap.pager_backtrack_confirm.matches(key_event)) =>
+                {
                     self.overlay_confirm_backtrack(tui);
                     Ok(true)
                 }
@@ -147,11 +137,10 @@ impl App {
                     Ok(true)
                 }
             }
-        } else if let TuiEvent::Key(KeyEvent {
-            code: KeyCode::Esc,
-            kind: KeyEventKind::Press | KeyEventKind::Repeat,
-            ..
-        }) = event
+        } else if let TuiEvent::Key(key_event) = event
+            && matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && (self.keymap.backtrack_overlay_prev.matches(key_event)
+                || self.keymap.pager_backtrack_prev.matches(key_event))
         {
             // First Esc in transcript overlay: begin backtrack preview at latest user message.
             self.begin_overlay_backtrack_preview(tui);
@@ -220,7 +209,10 @@ impl App {
     /// Open transcript overlay (enters alternate screen and shows full transcript).
     pub(crate) fn open_transcript_overlay(&mut self, tui: &mut tui::Tui) {
         let _ = tui.enter_alt_screen();
-        self.overlay = Some(Overlay::new_transcript(self.transcript_cells.clone()));
+        self.overlay = Some(Overlay::new_transcript(
+            self.transcript_cells.clone(),
+            self.keymap.clone(),
+        ));
         tui.frame_requester().schedule_frame();
     }
 

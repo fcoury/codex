@@ -46,6 +46,7 @@ use cwd_prompt::CwdSelection;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::error;
 use tracing_appender::non_blocking;
 use tracing_subscriber::EnvFilter;
@@ -111,9 +112,11 @@ mod version;
 
 mod wrapping;
 
+mod keymap;
 #[cfg(test)]
 pub mod test_backend;
 
+use crate::keymap::TuiKeymap;
 use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
 use crate::onboarding::onboarding_screen::run_onboarding_app;
 use crate::tui::Tui;
@@ -237,7 +240,21 @@ pub async fn run_main(
             Some(provider)
         } else {
             // No provider configured, prompt the user
-            let provider = oss_selection::select_oss_provider(&codex_home).await?;
+            let oss_keymap = match TuiKeymap::from_keybindings(
+                config_toml
+                    .tui
+                    .as_ref()
+                    .and_then(|tui| tui.keybindings.as_ref()),
+                false,
+                is_wsl(),
+            ) {
+                Ok(keymap) => Arc::new(keymap),
+                Err(err) => {
+                    eprintln!("Error loading keybindings: {err}");
+                    std::process::exit(1);
+                }
+            };
+            let provider = oss_selection::select_oss_provider(&codex_home, oss_keymap).await?;
             if provider == "__CANCELLED__" {
                 return Err(std::io::Error::other(
                     "OSS provider selection was cancelled by user",
@@ -433,6 +450,17 @@ async fn run_ratatui_app(
     terminal.clear()?;
 
     let mut tui = Tui::new(terminal);
+    let enhanced_keys_supported = tui.enhanced_keys_supported();
+    let is_wsl = is_wsl();
+    let keymap = match TuiKeymap::from_config(&initial_config, enhanced_keys_supported, is_wsl) {
+        Ok(keymap) => Arc::new(keymap),
+        Err(err) => {
+            crate::tui::restore()?;
+            eprintln!("Error loading keybindings: {err}");
+            std::process::exit(1);
+        }
+    };
+    tui.set_global_suspend(keymap.global_suspend.clone());
 
     #[cfg(not(debug_assertions))]
     {
@@ -440,7 +468,13 @@ async fn run_ratatui_app(
 
         let skip_update_prompt = cli.prompt.as_ref().is_some_and(|prompt| !prompt.is_empty());
         if !skip_update_prompt {
-            match update_prompt::run_update_prompt_if_needed(&mut tui, &initial_config).await? {
+            match update_prompt::run_update_prompt_if_needed(
+                &mut tui,
+                &initial_config,
+                keymap.clone(),
+            )
+            .await?
+            {
                 UpdatePromptOutcome::Continue => {}
                 UpdatePromptOutcome::RunUpdate(action) => {
                     crate::tui::restore()?;
@@ -478,6 +512,7 @@ async fn run_ratatui_app(
                 login_status,
                 auth_manager: auth_manager.clone(),
                 config: initial_config.clone(),
+                keymap: keymap.clone(),
             },
             &mut tui,
         )
@@ -573,6 +608,7 @@ async fn run_ratatui_app(
                 &mut tui,
                 &config.codex_home,
                 &config.model_provider_id,
+                keymap.clone(),
                 cli.fork_show_all,
             )
             .await?
@@ -631,6 +667,7 @@ async fn run_ratatui_app(
             &mut tui,
             &config.codex_home,
             &config.model_provider_id,
+            keymap.clone(),
             cli.resume_show_all,
         )
         .await?
@@ -661,8 +698,15 @@ async fn run_ratatui_app(
     };
     let fallback_cwd = match action_and_path_if_resume_or_fork {
         Some((action, path)) => {
-            resolve_cwd_for_resume_or_fork(&mut tui, &current_cwd, path, action, allow_prompt)
-                .await?
+            resolve_cwd_for_resume_or_fork(
+                &mut tui,
+                &current_cwd,
+                path,
+                action,
+                allow_prompt,
+                keymap.clone(),
+            )
+            .await?
         }
         None => None,
     };
@@ -703,6 +747,7 @@ async fn run_ratatui_app(
         prompt,
         images,
         session_selection,
+        keymap,
         feedback,
         should_show_trust_screen, // Proxy to: is it a first run in this directory?
     )
@@ -771,13 +816,20 @@ pub(crate) async fn resolve_cwd_for_resume_or_fork(
     path: &Path,
     action: CwdPromptAction,
     allow_prompt: bool,
+    keymap: Arc<TuiKeymap>,
 ) -> color_eyre::Result<Option<PathBuf>> {
     let Some(history_cwd) = read_session_cwd(path).await else {
         return Ok(None);
     };
     if allow_prompt && cwds_differ(current_cwd, &history_cwd) {
-        let selection =
-            cwd_prompt::run_cwd_selection_prompt(tui, action, current_cwd, &history_cwd).await?;
+        let selection = cwd_prompt::run_cwd_selection_prompt(
+            tui,
+            action,
+            current_cwd,
+            &history_cwd,
+            keymap.clone(),
+        )
+        .await?;
         return Ok(Some(match selection {
             CwdSelection::Current => current_cwd.to_path_buf(),
             CwdSelection::Session => history_cwd,
@@ -923,6 +975,16 @@ fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool 
     }
 
     login_status == LoginStatus::NotAuthenticated
+}
+
+#[cfg(target_os = "linux")]
+fn is_wsl() -> bool {
+    crate::clipboard_paste::is_probably_wsl()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_wsl() -> bool {
+    false
 }
 
 #[cfg(test)]

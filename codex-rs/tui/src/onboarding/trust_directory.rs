@@ -13,8 +13,11 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
+use std::sync::Arc;
 
 use crate::key_hint;
+use crate::key_hint::primary_binding;
+use crate::keymap::TuiKeymap;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
 use crate::render::Insets;
@@ -31,6 +34,7 @@ pub(crate) struct TrustDirectoryWidget {
     pub selection: Option<TrustDirectorySelection>,
     pub highlighted: TrustDirectorySelection,
     pub error: Option<String>,
+    pub keymap: Arc<TuiKeymap>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +111,9 @@ impl WidgetRef for &TrustDirectoryWidget {
         column.push(
             Line::from(vec![
                 "Press ".dim(),
-                key_hint::plain(KeyCode::Enter).into(),
+                primary_binding(&self.keymap.trust_confirm)
+                    .unwrap_or_else(|| key_hint::plain(KeyCode::Enter))
+                    .into(),
                 " to continue".dim(),
             ])
             .inset(Insets::tlbr(0, 2, 0, 0)),
@@ -123,20 +129,27 @@ impl KeyboardHandler for TrustDirectoryWidget {
             return;
         }
 
-        match key_event.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.highlighted = TrustDirectorySelection::Trust;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.highlighted = TrustDirectorySelection::DontTrust;
-            }
-            KeyCode::Char('1') | KeyCode::Char('y') => self.handle_trust(),
-            KeyCode::Char('2') | KeyCode::Char('n') => self.handle_dont_trust(),
-            KeyCode::Enter => match self.highlighted {
+        if self.keymap.trust_up.matches(key_event) {
+            self.highlighted = TrustDirectorySelection::Trust;
+            return;
+        }
+        if self.keymap.trust_down.matches(key_event) {
+            self.highlighted = TrustDirectorySelection::DontTrust;
+            return;
+        }
+        if self.keymap.trust_select_trust.matches(key_event) {
+            self.handle_trust();
+            return;
+        }
+        if self.keymap.trust_select_dont_trust.matches(key_event) {
+            self.handle_dont_trust();
+            return;
+        }
+        if self.keymap.trust_confirm.matches(key_event) {
+            match self.highlighted {
                 TrustDirectorySelection::Trust => self.handle_trust(),
                 TrustDirectorySelection::DontTrust => self.handle_dont_trust(),
-            },
-            _ => {}
+            }
         }
     }
 }
@@ -183,6 +196,7 @@ mod tests {
     use crate::test_backend::VT100Backend;
 
     use super::*;
+    use crate::keymap::TuiKeymap;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyEventKind;
@@ -190,7 +204,12 @@ mod tests {
     use pretty_assertions::assert_eq;
     use ratatui::Terminal;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn test_keymap() -> Arc<TuiKeymap> {
+        Arc::new(TuiKeymap::defaults(false, false))
+    }
 
     #[test]
     fn release_event_does_not_change_selection() {
@@ -202,6 +221,7 @@ mod tests {
             selection: None,
             highlighted: TrustDirectorySelection::DontTrust,
             error: None,
+            keymap: test_keymap(),
         };
 
         let release = KeyEvent {
@@ -226,6 +246,7 @@ mod tests {
             selection: None,
             highlighted: TrustDirectorySelection::Trust,
             error: None,
+            keymap: test_keymap(),
         };
 
         let mut terminal = Terminal::new(VT100Backend::new(70, 14)).expect("terminal");

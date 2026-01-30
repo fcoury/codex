@@ -11,6 +11,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::history_cell::UserHistoryCell;
+use crate::keymap::TuiKeymap;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
@@ -824,6 +825,7 @@ async fn helpers_are_available_and_do_not_panic() {
         app_event_tx: tx,
         initial_user_message: None,
         enhanced_keys_supported: false,
+        keymap: Arc::new(TuiKeymap::defaults(false, false)),
         auth_manager,
         models_manager: thread_manager.get_models_manager(),
         feedback: codex_feedback::CodexFeedback::new(),
@@ -872,6 +874,7 @@ async fn make_chatwidget_manual(
         cfg.model = Some(model.to_string());
     }
     let otel_manager = test_otel_manager(&cfg, resolved_model.as_str());
+    let keymap = Arc::new(TuiKeymap::defaults(false, false));
     let mut bottom = BottomPane::new(BottomPaneParams {
         app_event_tx: app_event_tx.clone(),
         frame_requester: FrameRequester::test_dummy(),
@@ -881,6 +884,7 @@ async fn make_chatwidget_manual(
         disable_paste_burst: false,
         animations_enabled: cfg.animations,
         skills: None,
+        keymap: keymap.clone(),
     });
     bottom.set_steer_enabled(true);
     bottom.set_collaboration_modes_enabled(cfg.features.enabled(Feature::CollaborationModes));
@@ -901,6 +905,7 @@ async fn make_chatwidget_manual(
         app_event_tx,
         codex_op_tx: op_tx,
         bottom_pane: bottom,
+        keymap: keymap.clone(),
         active_cell: None,
         active_cell_revision: 0,
         config: cfg,
@@ -2638,6 +2643,7 @@ async fn collaboration_modes_defaults_to_code_on_startup() {
         app_event_tx: AppEventSender::new(unbounded_channel::<AppEvent>().0),
         initial_user_message: None,
         enhanced_keys_supported: false,
+        keymap: Arc::new(TuiKeymap::defaults(false, false)),
         auth_manager,
         models_manager: thread_manager.get_models_manager(),
         feedback: codex_feedback::CodexFeedback::new(),
@@ -2684,6 +2690,7 @@ async fn experimental_mode_plan_applies_on_startup() {
         app_event_tx: AppEventSender::new(unbounded_channel::<AppEvent>().0),
         initial_user_message: None,
         enhanced_keys_supported: false,
+        keymap: Arc::new(TuiKeymap::defaults(false, false)),
         auth_manager,
         models_manager: thread_manager.get_models_manager(),
         feedback: codex_feedback::CodexFeedback::new(),
@@ -3303,7 +3310,11 @@ async fn experimental_features_popup_snapshot() {
             enabled: true,
         },
     ];
-    let view = ExperimentalFeaturesView::new(features, chat.app_event_tx.clone());
+    let view = ExperimentalFeaturesView::new(
+        features,
+        chat.app_event_tx.clone(),
+        Arc::new(TuiKeymap::defaults(false, false)),
+    );
     chat.bottom_pane.show_view(Box::new(view));
 
     let popup = render_bottom_popup(&chat, 80);
@@ -3323,6 +3334,7 @@ async fn experimental_features_toggle_saves_on_exit() {
             enabled: false,
         }],
         chat.app_event_tx.clone(),
+        Arc::new(TuiKeymap::defaults(false, false)),
     );
     chat.bottom_pane.show_view(Box::new(view));
 

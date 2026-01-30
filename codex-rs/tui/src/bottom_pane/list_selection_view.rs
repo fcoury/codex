@@ -16,6 +16,8 @@ use super::selection_popup_common::render_menu_surface;
 use super::selection_popup_common::wrap_styled_line;
 use crate::app_event_sender::AppEventSender;
 use crate::key_hint::KeyBinding;
+use crate::key_hint::is_altgr;
+use crate::keymap::TuiKeymap;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
 
@@ -31,6 +33,7 @@ use super::selection_popup_common::measure_rows_height_with_col_width_mode;
 use super::selection_popup_common::render_rows;
 use super::selection_popup_common::render_rows_stable_col_widths;
 use super::selection_popup_common::render_rows_with_col_width_mode;
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
 /// One selectable item in the generic selection list.
@@ -109,6 +112,7 @@ pub(crate) struct ListSelectionView {
     state: ScrollState,
     complete: bool,
     app_event_tx: AppEventSender,
+    keymap: Arc<TuiKeymap>,
     is_searchable: bool,
     search_query: String,
     search_placeholder: Option<String>,
@@ -127,7 +131,11 @@ impl ListSelectionView {
     /// When search is enabled, rows without `search_value` will disappear as
     /// soon as the query is non-empty, which can look like dropped data unless
     /// callers intentionally populate that field.
-    pub fn new(params: SelectionViewParams, app_event_tx: AppEventSender) -> Self {
+    pub fn new(
+        params: SelectionViewParams,
+        app_event_tx: AppEventSender,
+        keymap: Arc<TuiKeymap>,
+    ) -> Self {
         let mut header = params.header;
         if params.title.is_some() || params.subtitle.is_some() {
             let title = params.title.map(|title| Line::from(title.bold()));
@@ -157,6 +165,7 @@ impl ListSelectionView {
             last_selected_actual_idx: None,
             header,
             initial_selected_idx: params.initial_selected_idx,
+            keymap,
         };
         s.apply_filter();
         s
@@ -360,98 +369,61 @@ impl ListSelectionView {
 
 impl BottomPaneView for ListSelectionView {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event {
-            // Some terminals (or configurations) send Control key chords as
-            // C0 control characters without reporting the CONTROL modifier.
-            // Handle fallbacks for Ctrl-P/N here so navigation works everywhere.
-            KeyEvent {
-                code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('\u{0010}'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } /* ^P */ => self.move_up(),
-            KeyEvent {
-                code: KeyCode::Char('k'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } if !self.is_searchable => self.move_up(),
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('\u{000e}'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } /* ^N */ => self.move_down(),
-            KeyEvent {
-                code: KeyCode::Char('j'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } if !self.is_searchable => self.move_down(),
-            KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            } if self.is_searchable => {
-                self.search_query.pop();
-                self.apply_filter();
-            }
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
-                self.on_ctrl_c();
-            }
-            KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                ..
-            } if self.is_searchable
-                && !modifiers.contains(KeyModifiers::CONTROL)
-                && !modifiers.contains(KeyModifiers::ALT) =>
-            {
+        let is_text_input = matches!(key_event.code, KeyCode::Char(_))
+            && (matches!(
+                key_event.modifiers,
+                KeyModifiers::NONE | KeyModifiers::SHIFT
+            ) || is_altgr(key_event.modifiers));
+
+        if self.keymap.list_cancel.matches(key_event) {
+            self.on_ctrl_c();
+            return;
+        }
+
+        if self.keymap.list_accept.matches(key_event) {
+            self.accept();
+            return;
+        }
+
+        if self.keymap.list_up.matches(key_event) && (!self.is_searchable || !is_text_input) {
+            self.move_up();
+            return;
+        }
+
+        if self.keymap.list_down.matches(key_event) && (!self.is_searchable || !is_text_input) {
+            self.move_down();
+            return;
+        }
+
+        if self.is_searchable && self.keymap.list_search_backspace.matches(key_event) {
+            self.search_query.pop();
+            self.apply_filter();
+            return;
+        }
+
+        if self.is_searchable && is_text_input {
+            if let KeyCode::Char(c) = key_event.code {
                 self.search_query.push(c);
                 self.apply_filter();
             }
-            KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                ..
-            } if !self.is_searchable
-                && !modifiers.contains(KeyModifiers::CONTROL)
-                && !modifiers.contains(KeyModifiers::ALT) =>
-            {
-                if let Some(idx) = c
+            return;
+        }
+
+        if !self.is_searchable && self.keymap.list_pick_index.matches(key_event) {
+            if let KeyCode::Char(c) = key_event.code
+                && let Some(idx) = c
                     .to_digit(10)
                     .map(|d| d as usize)
                     .and_then(|d| d.checked_sub(1))
-                    && idx < self.items.len()
-                    && self
-                        .items
-                        .get(idx)
-                        .is_some_and(|item| item.disabled_reason.is_none() && !item.is_disabled)
-                {
-                    self.state.selected_idx = Some(idx);
-                    self.accept();
-                }
+                && idx < self.items.len()
+                && self
+                    .items
+                    .get(idx)
+                    .is_some_and(|item| item.disabled_reason.is_none() && !item.is_disabled)
+            {
+                self.state.selected_idx = Some(idx);
+                self.accept();
             }
-            KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => self.accept(),
-            _ => {}
         }
     }
 
@@ -671,11 +643,17 @@ mod tests {
     use super::*;
     use crate::app_event::AppEvent;
     use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+    use crate::keymap::TuiKeymap;
     use crossterm::event::KeyCode;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
+    use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
+
+    fn test_keymap() -> Arc<TuiKeymap> {
+        Arc::new(TuiKeymap::defaults(false, false))
+    }
 
     fn make_selection_view(subtitle: Option<&str>) -> ListSelectionView {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
@@ -705,6 +683,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         )
     }
 
@@ -824,6 +803,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
         assert_snapshot!(
             "list_selection_footer_note_wraps",
@@ -852,6 +832,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
         view.set_search_query("filters".to_string());
 
@@ -885,6 +866,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
 
         let rendered = render_lines_with_width(&view, 60);
@@ -943,6 +925,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
         let mut missing: Vec<u16> = Vec::new();
         for width in 60..=90 {
@@ -977,6 +960,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
         let rendered = render_lines_with_width(&view, 24);
         assert!(
@@ -1025,6 +1009,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
         assert_snapshot!(
             "list_selection_model_picker_width_80",
@@ -1052,6 +1037,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
         assert_snapshot!(
             "list_selection_narrow_width_preserves_rows",

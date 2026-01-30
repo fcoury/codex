@@ -2,6 +2,8 @@
 
 use crate::history_cell::padded_emoji;
 use crate::key_hint;
+use crate::key_hint::primary_binding;
+use crate::keymap::TuiKeymap;
 use crate::render::Insets;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
@@ -25,6 +27,7 @@ use ratatui::style::Stylize as _;
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
+use std::sync::Arc;
 use tokio_stream::StreamExt;
 
 pub(crate) enum UpdatePromptOutcome {
@@ -35,6 +38,7 @@ pub(crate) enum UpdatePromptOutcome {
 pub(crate) async fn run_update_prompt_if_needed(
     tui: &mut Tui,
     config: &Config,
+    keymap: Arc<TuiKeymap>,
 ) -> Result<UpdatePromptOutcome> {
     let Some(latest_version) = updates::get_upgrade_version_for_popup(config) else {
         return Ok(UpdatePromptOutcome::Continue);
@@ -43,8 +47,12 @@ pub(crate) async fn run_update_prompt_if_needed(
         return Ok(UpdatePromptOutcome::Continue);
     };
 
-    let mut screen =
-        UpdatePromptScreen::new(tui.frame_requester(), latest_version.clone(), update_action);
+    let mut screen = UpdatePromptScreen::new(
+        tui.frame_requester(),
+        latest_version.clone(),
+        update_action,
+        keymap,
+    );
     tui.draw(u16::MAX, |frame| {
         frame.render_widget_ref(&screen, frame.area());
     })?;
@@ -97,6 +105,7 @@ struct UpdatePromptScreen {
     update_action: UpdateAction,
     highlighted: UpdateSelection,
     selection: Option<UpdateSelection>,
+    keymap: Arc<TuiKeymap>,
 }
 
 impl UpdatePromptScreen {
@@ -104,6 +113,7 @@ impl UpdatePromptScreen {
         request_frame: FrameRequester,
         latest_version: String,
         update_action: UpdateAction,
+        keymap: Arc<TuiKeymap>,
     ) -> Self {
         Self {
             request_frame,
@@ -112,6 +122,7 @@ impl UpdatePromptScreen {
             update_action,
             highlighted: UpdateSelection::UpdateNow,
             selection: None,
+            keymap,
         }
     }
 
@@ -119,21 +130,36 @@ impl UpdatePromptScreen {
         if key_event.kind == KeyEventKind::Release {
             return;
         }
-        if key_event.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key_event.code, KeyCode::Char('c') | KeyCode::Char('d'))
-        {
+        if self.keymap.update_exit.matches(key_event) {
             self.select(UpdateSelection::NotNow);
             return;
         }
-        match key_event.code {
-            KeyCode::Up | KeyCode::Char('k') => self.set_highlight(self.highlighted.prev()),
-            KeyCode::Down | KeyCode::Char('j') => self.set_highlight(self.highlighted.next()),
-            KeyCode::Char('1') => self.select(UpdateSelection::UpdateNow),
-            KeyCode::Char('2') => self.select(UpdateSelection::NotNow),
-            KeyCode::Char('3') => self.select(UpdateSelection::DontRemind),
-            KeyCode::Enter => self.select(self.highlighted),
-            KeyCode::Esc => self.select(UpdateSelection::NotNow),
-            _ => {}
+        if self.keymap.update_cancel.matches(key_event) {
+            self.select(UpdateSelection::NotNow);
+            return;
+        }
+        if self.keymap.update_select_1.matches(key_event) {
+            self.select(UpdateSelection::UpdateNow);
+            return;
+        }
+        if self.keymap.update_select_2.matches(key_event) {
+            self.select(UpdateSelection::NotNow);
+            return;
+        }
+        if self.keymap.update_select_3.matches(key_event) {
+            self.select(UpdateSelection::DontRemind);
+            return;
+        }
+        if self.keymap.update_up.matches(key_event) {
+            self.set_highlight(self.highlighted.prev());
+            return;
+        }
+        if self.keymap.update_down.matches(key_event) {
+            self.set_highlight(self.highlighted.next());
+            return;
+        }
+        if self.keymap.update_confirm.matches(key_event) {
+            self.select(self.highlighted);
         }
     }
 
@@ -230,7 +256,9 @@ impl WidgetRef for &UpdatePromptScreen {
         column.push(
             Line::from(vec![
                 "Press ".dim(),
-                key_hint::plain(KeyCode::Enter).into(),
+                primary_binding(&self.keymap.update_confirm)
+                    .unwrap_or_else(|| key_hint::plain(KeyCode::Enter))
+                    .into(),
                 " to continue".dim(),
             ])
             .inset(Insets::tlbr(0, 2, 0, 0)),
@@ -242,18 +270,21 @@ impl WidgetRef for &UpdatePromptScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::TuiKeymap;
     use crate::test_backend::VT100Backend;
     use crate::tui::FrameRequester;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
+    use std::sync::Arc;
 
     fn new_prompt() -> UpdatePromptScreen {
         UpdatePromptScreen::new(
             FrameRequester::test_dummy(),
             "9.9.9".into(),
             UpdateAction::NpmGlobalLatest,
+            Arc::new(TuiKeymap::defaults(false, false)),
         )
     }
 
