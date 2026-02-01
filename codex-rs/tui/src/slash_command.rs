@@ -33,6 +33,7 @@ pub enum SlashCommand {
     Diff,
     Mention,
     Status,
+    Statusline,
     Mcp,
     Apps,
     Logout,
@@ -63,6 +64,7 @@ impl SlashCommand {
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
             SlashCommand::Status => "show current session configuration and token usage",
+            SlashCommand::Statusline => "configure a custom status line script",
             SlashCommand::Ps => "list background terminals",
             SlashCommand::Model => "choose what model and reasoning effort to use",
             SlashCommand::Personality => "choose a communication style for Codex",
@@ -120,6 +122,7 @@ impl SlashCommand {
             SlashCommand::Plan => true,
             SlashCommand::Collab => true,
             SlashCommand::Agent => true,
+            SlashCommand::Statusline => false,
         }
     }
 
