@@ -71,6 +71,7 @@ pub(crate) struct FooterProps {
     pub(crate) context_window_used_tokens: Option<i64>,
     pub(crate) status_line_value: Option<StatusLineValue>,
     pub(crate) status_line_enabled: bool,
+    pub(crate) status_line_preview: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -274,6 +275,19 @@ fn left_side_line(
         line.push_span(collaboration_mode_indicator.styled_span(state.show_cycle_hint));
     }
 
+    line
+}
+
+fn status_line_preview_line(
+    preview: &str,
+    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    show_cycle_hint: bool,
+) -> Line<'static> {
+    let mut line = Line::from(preview.to_string());
+    if let Some(collaboration_mode_indicator) = collaboration_mode_indicator {
+        line.push_span(" · ".dim());
+        line.push_span(collaboration_mode_indicator.styled_span(show_cycle_hint));
+    }
     line
 }
 
@@ -570,6 +584,18 @@ fn footer_from_props_lines(
         )
     {
         return vec![status_line.as_line()];
+    }
+    if let Some(preview) = props.status_line_preview.as_deref()
+        && matches!(
+            props.mode,
+            FooterMode::ComposerEmpty | FooterMode::ComposerHasDraft
+        )
+    {
+        return vec![status_line_preview_line(
+            preview,
+            collaboration_mode_indicator,
+            show_cycle_hint,
+        )];
     }
 
     match props.mode {
@@ -1318,6 +1344,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1336,6 +1363,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1354,6 +1382,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1372,6 +1401,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1390,6 +1420,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1408,6 +1439,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1426,6 +1458,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1444,6 +1477,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1462,6 +1496,7 @@ mod tests {
                 context_window_used_tokens: Some(123_456),
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1480,6 +1515,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1498,6 +1534,7 @@ mod tests {
                 context_window_used_tokens: None,
                 status_line_value: None,
                 status_line_enabled: false,
+                status_line_preview: None,
             },
         );
 
@@ -1514,6 +1551,7 @@ mod tests {
             context_window_used_tokens: None,
             status_line_value: None,
             status_line_enabled: false,
+            status_line_preview: None,
         };
 
         snapshot_footer_with_mode_indicator(
@@ -1543,6 +1581,7 @@ mod tests {
             context_window_used_tokens: None,
             status_line_value: None,
             status_line_enabled: false,
+            status_line_preview: None,
         };
 
         snapshot_footer_with_mode_indicator(
@@ -1568,6 +1607,7 @@ mod tests {
                 spans: None,
             }),
             status_line_enabled: true,
+            status_line_preview: None,
         };
 
         snapshot_footer("footer_status_line_overrides_shortcuts", props);
@@ -1585,6 +1625,7 @@ mod tests {
             context_window_used_tokens: None,
             status_line_value: None, // command timed out / empty
             status_line_enabled: true,
+            status_line_preview: None,
         };
 
         snapshot_footer_with_mode_indicator(
@@ -1607,6 +1648,7 @@ mod tests {
             context_window_used_tokens: None,
             status_line_value: None,
             status_line_enabled: false,
+            status_line_preview: None,
         };
 
         snapshot_footer_with_mode_indicator(
@@ -1629,6 +1671,7 @@ mod tests {
             context_window_used_tokens: None,
             status_line_value: None,
             status_line_enabled: true,
+            status_line_preview: None,
         };
 
         // has status line and no collaboration mode
@@ -1656,6 +1699,7 @@ mod tests {
                 spans: None,
             }),
             status_line_enabled: true,
+            status_line_preview: None,
         };
 
         snapshot_footer_with_mode_indicator(
@@ -1685,6 +1729,7 @@ mod tests {
                 spans: None,
             }),
             status_line_enabled: true,
+            status_line_preview: None,
         };
 
         let screen =
