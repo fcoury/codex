@@ -589,6 +589,7 @@ pub(crate) struct ChatWidget {
     status_line_branch: Option<String>,
     status_line_branch_cwd: Option<PathBuf>,
     status_line_branch_pending: bool,
+    status_line_branch_lookup_complete: bool,
     external_editor_state: ExternalEditorState,
     total_lines_added: usize,
     total_lines_removed: usize,
@@ -818,7 +819,7 @@ impl ChatWidget {
         let cwd = self.status_line_cwd().to_path_buf();
         self.sync_status_line_branch_state(&cwd);
 
-        if items.contains(&StatusLineItem::GitBranch) && self.status_line_branch.is_none() {
+        if items.contains(&StatusLineItem::GitBranch) && !self.status_line_branch_lookup_complete {
             self.request_status_line_branch(cwd);
         }
 
@@ -855,6 +856,7 @@ impl ChatWidget {
         }
         self.status_line_branch = branch;
         self.status_line_branch_pending = false;
+        self.status_line_branch_lookup_complete = true;
     }
 
     fn restore_retry_status_header_if_present(&mut self) {
@@ -2389,6 +2391,7 @@ impl ChatWidget {
             status_line_branch: None,
             status_line_branch_cwd: None,
             status_line_branch_pending: false,
+            status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
             total_lines_added: 0,
             total_lines_removed: 0,
@@ -2548,6 +2551,7 @@ impl ChatWidget {
             status_line_branch: None,
             status_line_branch_cwd: None,
             status_line_branch_pending: false,
+            status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
             total_lines_added: 0,
             total_lines_removed: 0,
@@ -2696,6 +2700,7 @@ impl ChatWidget {
             status_line_branch: None,
             status_line_branch_cwd: None,
             status_line_branch_pending: false,
+            status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
             total_lines_added: 0,
             total_lines_removed: 0,
@@ -3940,6 +3945,7 @@ impl ChatWidget {
         self.status_line_branch_cwd = Some(cwd.to_path_buf());
         self.status_line_branch = None;
         self.status_line_branch_pending = false;
+        self.status_line_branch_lookup_complete = false;
     }
 
     fn request_status_line_branch(&mut self, cwd: PathBuf) {
