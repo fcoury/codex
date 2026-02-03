@@ -96,7 +96,6 @@ mod skills_helpers;
 mod slash_command;
 mod status;
 mod status_indicator_widget;
-mod status_line;
 mod streaming;
 mod style;
 mod terminal_palette;
