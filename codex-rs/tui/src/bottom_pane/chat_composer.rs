@@ -1007,10 +1007,6 @@ impl ChatComposer {
         result
     }
 
-    pub(crate) fn submit(&mut self, should_queue: bool) -> InputResult {
-        self.handle_submission(should_queue).0
-    }
-
     /// Return true if either the slash-command popup or the file-search popup is active.
     pub(crate) fn popup_active(&self) -> bool {
         !matches!(self.active_popup, ActivePopup::None)
@@ -1407,14 +1403,17 @@ impl ChatComposer {
             return (InputResult::None, true);
         }
         if key_event.kind == KeyEventKind::Press && self.keymap.popup_accept.matches(key_event) {
-            if let Some(mention) = popup.selected_mention() {
-                let insert_text = mention.insert_text.clone();
-                if let Some(path) = mention.path.as_deref() {
+            // Extract data from popup while it's still borrowed, then close and use the data.
+            let mention_data = popup
+                .selected_mention()
+                .map(|m| (m.insert_text.clone(), m.path.clone()));
+            self.active_popup = ActivePopup::None;
+            if let Some((insert_text, path)) = mention_data {
+                if let Some(path) = path.as_deref() {
                     self.record_mention_path(&insert_text, path);
                 }
                 self.insert_selected_mention(&insert_text);
             }
-            self.active_popup = ActivePopup::None;
             return (InputResult::None, true);
         }
 
@@ -2175,11 +2174,7 @@ impl ChatComposer {
                     self.history.navigate_down(&self.app_event_tx)
                 };
                 if let Some(entry) = replace_entry {
-                    self.set_text_content(
-                        entry.text,
-                        entry.text_elements,
-                        entry.local_image_paths,
-                    );
+                    self.set_text_content(entry.text, entry.text_elements, entry.local_image_paths);
                     return (InputResult::None, true);
                 }
             }

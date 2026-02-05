@@ -1176,8 +1176,8 @@ fn default_bindings(
         "features_down",
         vec!["Down".to_string(), "Ctrl+N".to_string(), "j".to_string()],
     );
-    m.insert("features_toggle", vec!["Enter".to_string()]);
-    m.insert("features_cancel", vec!["Esc".to_string()]);
+    m.insert("features_toggle", vec!["Space".to_string()]);
+    m.insert("features_cancel", vec!["Enter".to_string()]);
 
     m.insert("resume_exit", vec!["Ctrl+C".to_string()]);
     m.insert("resume_start_fresh", vec!["Esc".to_string()]);

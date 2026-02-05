@@ -203,8 +203,6 @@ impl OssSelectionWidget<'_> {
             self.send_decision(LMSTUDIO_OSS_PROVIDER_ID.to_string());
         } else if self.keymap.oss_select_o.matches(key_event) {
             self.send_decision(OLLAMA_OSS_PROVIDER_ID.to_string());
-        } else if self.keymap.oss_select_c.matches(key_event) {
-            self.send_decision(OLLAMA_CHAT_PROVIDER_ID.to_string());
         }
     }
 

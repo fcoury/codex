@@ -32,6 +32,7 @@ use codex_core::skills::model::SkillMetadata;
 use codex_file_search::FileMatch;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::user_input::TextElement;
+use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -744,10 +745,10 @@ impl BottomPane {
         let modal = RequestUserInputOverlay::new(
             request,
             self.app_event_tx.clone(),
-            self.keymap.clone(),
             self.has_input_focus,
             self.enhanced_keys_supported,
             self.disable_paste_burst,
+            self.keymap.clone(),
         );
         self.pause_status_timer_for_modal();
         self.set_composer_input_enabled(
@@ -1416,6 +1417,7 @@ mod tests {
             disable_paste_burst: false,
             animations_enabled: true,
             skills: Some(Vec::new()),
+            keymap: test_keymap(),
         });
 
         let on_ctrl_c_calls = Rc::new(Cell::new(0));

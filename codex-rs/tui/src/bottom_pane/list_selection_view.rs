@@ -752,6 +752,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
 
         let before_scroll = render_lines_with_width(&view, width);
@@ -1082,6 +1083,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
 
         let before_scroll = render_lines_with_width(&view, 96);
@@ -1116,6 +1118,7 @@ mod tests {
                 ..Default::default()
             },
             tx,
+            test_keymap(),
         );
 
         let before_scroll = render_lines_with_width(&view, width);

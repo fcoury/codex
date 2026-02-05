@@ -1926,6 +1926,7 @@ mod tests {
             true,
             None,
             SessionPickerAction::Resume,
+            test_keymap(),
         );
 
         let now = Utc::now();
