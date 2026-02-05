@@ -1374,19 +1374,6 @@ mod tests {
         Arc::new(TuiKeymap::defaults(false, false))
     }
 
-    fn head_with_ts_and_user_text(ts: &str, texts: &[&str]) -> Vec<serde_json::Value> {
-        vec![
-            json!({ "timestamp": ts }),
-            json!({
-                "type": "message",
-                "role": "user",
-                "content": texts
-                    .iter()
-                    .map(|t| json!({ "type": "input_text", "text": *t }))
-                    .collect::<Vec<_>>()
-            }),
-        ]
-    }
     fn make_item(path: &str, ts: &str, preview: &str) -> ThreadItem {
         ThreadItem {
             path: PathBuf::from(path),
@@ -2146,6 +2133,7 @@ mod tests {
             true,
             None,
             SessionPickerAction::Resume,
+            test_keymap(),
         );
 
         state.start_initial_load();
