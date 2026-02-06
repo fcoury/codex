@@ -616,8 +616,8 @@ pub(crate) struct ChatWidget {
 
     /// Raw markdown of the most recently completed agent response.
     ///
-    /// Set from `TurnCompleteEvent.last_agent_message`; cleared on turn start.
-    last_agent_markdown: Option<String>,
+    /// Set from `AgentMessageEvent.message`; cleared on turn start.
+    pub(crate) last_agent_markdown: Option<String>,
     /// Per-turn agent markdown, indexed by agent turn number within the session.
     ///
     /// Populated from `TurnCompleteEvent.last_agent_message` each time a turn
@@ -4075,17 +4075,15 @@ impl ChatWidget {
     /// Copy the last agent response (raw markdown) to the system clipboard.
     pub(crate) fn copy_last_agent_markdown(&mut self) {
         match &self.last_agent_markdown {
-            Some(md) if !md.is_empty() => {
-                match crate::clipboard_copy::copy_to_clipboard(md) {
-                    Ok(()) => self.add_to_history(history_cell::new_info_event(
-                        "Copied to clipboard".into(),
-                        None,
-                    )),
-                    Err(e) => self.add_to_history(history_cell::new_error_event(format!(
-                        "Copy failed: {e}"
-                    ))),
+            Some(md) if !md.is_empty() => match crate::clipboard_copy::copy_to_clipboard(md) {
+                Ok(()) => self.add_to_history(history_cell::new_info_event(
+                    "Copied last message to clipboard".into(),
+                    None,
+                )),
+                Err(e) => {
+                    self.add_to_history(history_cell::new_error_event(format!("Copy failed: {e}")))
                 }
-            }
+            },
             _ => self.add_to_history(history_cell::new_error_event(
                 "No agent response to copy".into(),
             )),

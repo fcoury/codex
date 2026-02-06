@@ -146,7 +146,7 @@ impl App {
                     Ok(true)
                 }
                 TuiEvent::Key(KeyEvent {
-                    code: KeyCode::Left,
+                    code: KeyCode::Left | KeyCode::Char('h'),
                     kind: KeyEventKind::Press | KeyEventKind::Repeat,
                     ..
                 }) => {
@@ -154,7 +154,7 @@ impl App {
                     Ok(true)
                 }
                 TuiEvent::Key(KeyEvent {
-                    code: KeyCode::Right,
+                    code: KeyCode::Right | KeyCode::Char('l'),
                     kind: KeyEventKind::Press | KeyEventKind::Repeat,
                     ..
                 }) => {
@@ -547,9 +547,19 @@ impl App {
         })
     }
 
-    /// Trim `transcript_cells` to preserve only content before the selected user message.
+    /// Trim `transcript_cells` to preserve only content before the selected user message,
+    /// and keep `agent_turn_markdowns` in sync so overlay copy indices remain valid.
     fn trim_transcript_for_backtrack(&mut self, nth_user_message: usize) {
         trim_transcript_cells_to_nth_user(&mut self.transcript_cells, nth_user_message);
+        // Keep the markdown vector aligned with the remaining agent groups.
+        let remaining = agent_group_count(&self.transcript_cells);
+        self.chat_widget.agent_turn_markdowns.truncate(remaining);
+        // Clear the quick-copy cache — the last response may have been rolled back.
+        self.chat_widget.last_agent_markdown = self
+            .chat_widget
+            .agent_turn_markdowns
+            .last()
+            .cloned();
     }
 
     // --- Agent browse mode ---
@@ -667,27 +677,26 @@ impl App {
         self.close_transcript_overlay(tui);
 
         match text {
-            Some(t) if !t.is_empty() => {
-                match crate::clipboard_copy::copy_to_clipboard(&t) {
-                    Ok(()) => {
-                        self.chat_widget.add_to_history(
-                            crate::history_cell::new_info_event(
-                                "Copied to clipboard".into(),
-                                None,
-                            ),
-                        );
-                    }
-                    Err(e) => {
-                        self.chat_widget.add_to_history(
-                            crate::history_cell::new_error_event(format!("Copy failed: {e}")),
-                        );
-                    }
+            Some(t) if !t.is_empty() => match crate::clipboard_copy::copy_to_clipboard(&t) {
+                Ok(()) => {
+                    self.chat_widget
+                        .add_to_history(crate::history_cell::new_info_event(
+                            "Copied message to clipboard".into(),
+                            None,
+                        ));
                 }
-            }
+                Err(e) => {
+                    self.chat_widget
+                        .add_to_history(crate::history_cell::new_error_event(format!(
+                            "Copy failed: {e}"
+                        )));
+                }
+            },
             _ => {
-                self.chat_widget.add_to_history(
-                    crate::history_cell::new_error_event("No message to copy".into()),
-                );
+                self.chat_widget
+                    .add_to_history(crate::history_cell::new_error_event(
+                        "No message to copy".into(),
+                    ));
             }
         }
         tui.frame_requester().schedule_frame();

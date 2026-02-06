@@ -31,7 +31,6 @@ use crate::tui;
 use crate::tui::TuiEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
-use std::ops::Range;
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
 use ratatui::layout::Rect;
@@ -45,6 +44,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
+use std::ops::Range;
 
 pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
@@ -118,27 +118,39 @@ pub(crate) enum BrowseMode {
 
 // Common pager navigation hints rendered on the first line
 const PAGER_KEY_HINTS: &[(&[KeyBinding], &str)] = &[
-    (&[KEY_UP, KEY_DOWN], "to scroll"),
-    (&[KEY_PAGE_UP, KEY_PAGE_DOWN], "to page"),
-    (&[KEY_HOME, KEY_END], "to jump"),
+    (&[KEY_UP, KEY_DOWN], "scroll"),
+    (&[KEY_PAGE_UP, KEY_PAGE_DOWN], "page"),
+    (&[KEY_HOME, KEY_END], "jump"),
 ];
 
-// Render a single line of key hints from (key(s), description) pairs.
-fn render_key_hints(area: Rect, buf: &mut Buffer, pairs: &[(&[KeyBinding], &str)]) {
+/// Render a single line of key hints from (key(s), description) pairs.
+///
+/// An optional `prefix` is rendered bold at the start of the line (e.g. a mode
+/// indicator like `[user]`).
+fn render_key_hints(
+    area: Rect,
+    buf: &mut Buffer,
+    pairs: &[(&[KeyBinding], &str)],
+    prefix: Option<&str>,
+) {
     let mut spans: Vec<Span<'static>> = vec![" ".into()];
-    let mut first = true;
+    if let Some(pfx) = prefix {
+        spans.push(Span::styled(pfx.to_string(), Style::default().bold().dim()));
+        spans.push(" ".into());
+    }
+    let mut first = prefix.is_none();
     for (keys, desc) in pairs {
         if !first {
-            spans.push("   ".into());
+            spans.push(Span::styled(" · ", Style::default().dim()));
         }
         for (i, key) in keys.iter().enumerate() {
             if i > 0 {
-                spans.push("/".into());
+                spans.push(Span::styled("/", Style::default().dim()));
             }
             spans.push(Span::from(key));
         }
         spans.push(" ".into());
-        spans.push(Span::from(desc.to_string()));
+        spans.push(Span::styled(desc.to_string(), Style::default().dim()));
         first = false;
     }
     Paragraph::new(vec![Line::from(spans).dim()]).render_ref(area, buf);
@@ -496,8 +508,7 @@ impl TranscriptOverlay {
             .enumerate()
             .flat_map(|(i, c)| {
                 let mut v: Vec<Box<dyn Renderable>> = Vec::new();
-                let is_highlighted =
-                    highlight_cells.is_some_and(|range| range.contains(&i));
+                let is_highlighted = highlight_cells.is_some_and(|range| range.contains(&i));
                 let mut cell_renderable = if c.as_any().is::<UserHistoryCell>() {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
@@ -677,29 +688,32 @@ impl TranscriptOverlay {
     fn render_hints(&self, area: Rect, buf: &mut Buffer) {
         let line1 = Rect::new(area.x, area.y, area.width, 1);
         let line2 = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
-        render_key_hints(line1, buf, PAGER_KEY_HINTS);
+        render_key_hints(line1, buf, PAGER_KEY_HINTS, None);
 
-        let mut pairs: Vec<(&[KeyBinding], &str)> = vec![(&[KEY_Q], "to quit")];
-        if self.highlight_cells.is_some() {
+        let mut pairs: Vec<(&[KeyBinding], &str)> = vec![(&[KEY_Q], "quit")];
+        let prefix = if self.highlight_cells.is_some() {
             match self.browse_mode {
                 BrowseMode::UserEdit => {
-                    pairs.push((&[KEY_ESC, KEY_LEFT], "to edit prev"));
-                    pairs.push((&[KEY_RIGHT], "to edit next"));
-                    pairs.push((&[KEY_ENTER], "to edit"));
-                    pairs.push((&[KEY_C], "to copy"));
-                    pairs.push((&[KEY_TAB], "agent msgs"));
+                    pairs.push((&[KEY_ESC, KEY_LEFT], "prev"));
+                    pairs.push((&[KEY_RIGHT], "next"));
+                    pairs.push((&[KEY_ENTER], "edit"));
+                    pairs.push((&[KEY_C], "copy"));
+                    pairs.push((&[KEY_TAB], "agent/user msgs"));
+                    Some("[user]")
                 }
                 BrowseMode::AgentCopy => {
-                    pairs.push((&[KEY_ESC, KEY_LEFT], "prev response"));
-                    pairs.push((&[KEY_RIGHT], "next response"));
-                    pairs.push((&[KEY_C, KEY_ENTER], "to copy"));
-                    pairs.push((&[KEY_TAB], "user msgs"));
+                    pairs.push((&[KEY_ESC, KEY_LEFT], "prev"));
+                    pairs.push((&[KEY_RIGHT], "next"));
+                    pairs.push((&[KEY_C, KEY_ENTER], "copy"));
+                    pairs.push((&[KEY_TAB], "agent/user msgs"));
+                    Some("[agent]")
                 }
             }
         } else {
-            pairs.push((&[KEY_ESC], "to edit prev"));
-        }
-        render_key_hints(line2, buf, &pairs);
+            pairs.push((&[KEY_ESC], "edit prev"));
+            None
+        };
+        render_key_hints(line2, buf, &pairs, prefix);
     }
 
     pub(crate) fn render(&mut self, area: Rect, buf: &mut Buffer) {
@@ -756,9 +770,9 @@ impl StaticOverlay {
     fn render_hints(&self, area: Rect, buf: &mut Buffer) {
         let line1 = Rect::new(area.x, area.y, area.width, 1);
         let line2 = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
-        render_key_hints(line1, buf, PAGER_KEY_HINTS);
-        let pairs: Vec<(&[KeyBinding], &str)> = vec![(&[KEY_Q], "to quit")];
-        render_key_hints(line2, buf, &pairs);
+        render_key_hints(line1, buf, PAGER_KEY_HINTS, None);
+        let pairs: Vec<(&[KeyBinding], &str)> = vec![(&[KEY_Q], "quit")];
+        render_key_hints(line2, buf, &pairs, None);
     }
 
     pub(crate) fn render(&mut self, area: Rect, buf: &mut Buffer) {
@@ -899,8 +913,8 @@ mod tests {
 
         let s = buffer_to_text(&buf, area);
         assert!(
-            s.contains("edit next"),
-            "expected 'edit next' hint in overlay footer, got: {s:?}"
+            s.contains("→ next"),
+            "expected '→ next' hint in overlay footer, got: {s:?}"
         );
     }
 
