@@ -607,6 +607,22 @@ pub(crate) struct ChatWidget {
     // True once we've attempted a branch lookup for the current CWD.
     status_line_branch_lookup_complete: bool,
     external_editor_state: ExternalEditorState,
+
+    /// Whether the terminal supports enhanced keyboard protocol (Kitty).
+    ///
+    /// When true, modifier combinations like Ctrl+Shift+C can be distinguished
+    /// from Ctrl+C and used for copy-to-clipboard.
+    enhanced_keys_supported: bool,
+
+    /// Raw markdown of the most recently completed agent response.
+    ///
+    /// Set from `TurnCompleteEvent.last_agent_message`; cleared on turn start.
+    last_agent_markdown: Option<String>,
+    /// Per-turn agent markdown, indexed by agent turn number within the session.
+    ///
+    /// Populated from `TurnCompleteEvent.last_agent_message` each time a turn
+    /// completes. Used by the backtrack overlay to copy earlier agent messages.
+    pub(crate) agent_turn_markdowns: Vec<String>,
 }
 
 /// Snapshot of active-cell state that affects transcript overlay rendering.
@@ -1102,6 +1118,12 @@ impl ChatWidget {
     }
 
     fn on_agent_message(&mut self, message: String) {
+        // Capture raw markdown for copy-as-markdown. AgentMessage events are
+        // persisted in rollouts (unlike TurnComplete), so this works on resume.
+        if !message.is_empty() {
+            self.last_agent_markdown = Some(message.clone());
+            self.agent_turn_markdowns.push(message.clone());
+        }
         // If we have a stream_controller, then the final agent message is redundant and will be a
         // duplicate of what has already been streamed.
         if self.stream_controller.is_none() && !message.is_empty() {
@@ -1212,6 +1234,7 @@ impl ChatWidget {
 
     fn on_task_started(&mut self) {
         self.agent_turn_running = true;
+        self.last_agent_markdown = None;
         self.saw_plan_update_this_turn = false;
         self.saw_plan_item_this_turn = false;
         self.plan_delta_buffer.clear();
@@ -2540,6 +2563,9 @@ impl ChatWidget {
             status_line_branch_pending: false,
             status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
+            enhanced_keys_supported,
+            last_agent_markdown: None,
+            agent_turn_markdowns: Vec::new(),
         };
 
         widget.prefetch_rate_limits();
@@ -2701,6 +2727,9 @@ impl ChatWidget {
             status_line_branch_pending: false,
             status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
+            enhanced_keys_supported,
+            last_agent_markdown: None,
+            agent_turn_markdowns: Vec::new(),
         };
 
         widget.prefetch_rate_limits();
@@ -2851,6 +2880,9 @@ impl ChatWidget {
             status_line_branch_pending: false,
             status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
+            enhanced_keys_supported,
+            last_agent_markdown: None,
+            agent_turn_markdowns: Vec::new(),
         };
 
         widget.prefetch_rate_limits();
@@ -2883,6 +2915,32 @@ impl ChatWidget {
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event {
+            // Ctrl+Shift+C — copy last agent response (enhanced terminals only).
+            // Must be checked before the Ctrl+C arm since `.contains(CONTROL)` also
+            // matches CONTROL|SHIFT.
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if self.enhanced_keys_supported
+                && modifiers.contains(KeyModifiers::CONTROL)
+                && modifiers.contains(KeyModifiers::SHIFT)
+                && c.eq_ignore_ascii_case(&'c') =>
+            {
+                self.copy_last_agent_markdown();
+                return;
+            }
+            // Alt+C — copy last agent response (universal, all terminals).
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::ALT,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                self.copy_last_agent_markdown();
+                return;
+            }
             KeyEvent {
                 code: KeyCode::Char(c),
                 modifiers,
@@ -3228,6 +3286,9 @@ impl ChatWidget {
             // SlashCommand::Undo => {
             //     self.app_event_tx.send(AppEvent::CodexOp(Op::Undo));
             // }
+            SlashCommand::Copy => {
+                self.copy_last_agent_markdown();
+            }
             SlashCommand::Diff => {
                 self.add_diff_in_progress();
                 let tx = self.app_event_tx.clone();
@@ -4008,6 +4069,27 @@ impl ChatWidget {
     }
 
     pub(crate) fn on_diff_complete(&mut self) {
+        self.request_redraw();
+    }
+
+    /// Copy the last agent response (raw markdown) to the system clipboard.
+    pub(crate) fn copy_last_agent_markdown(&mut self) {
+        match &self.last_agent_markdown {
+            Some(md) if !md.is_empty() => {
+                match crate::clipboard_copy::copy_to_clipboard(md) {
+                    Ok(()) => self.add_to_history(history_cell::new_info_event(
+                        "Copied to clipboard".into(),
+                        None,
+                    )),
+                    Err(e) => self.add_to_history(history_cell::new_error_event(format!(
+                        "Copy failed: {e}"
+                    ))),
+                }
+            }
+            _ => self.add_to_history(history_cell::new_error_event(
+                "No agent response to copy".into(),
+            )),
+        }
         self.request_redraw();
     }
 

@@ -966,6 +966,9 @@ async fn make_chatwidget_manual(
         status_line_branch_pending: false,
         status_line_branch_lookup_complete: false,
         external_editor_state: ExternalEditorState::Closed,
+        enhanced_keys_supported: false,
+        last_agent_markdown: None,
+        agent_turn_markdowns: Vec::new(),
     };
     widget.set_model(&resolved_model);
     (widget, rx, op_rx)

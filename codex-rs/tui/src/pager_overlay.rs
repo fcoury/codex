@@ -31,6 +31,7 @@ use crate::tui;
 use crate::tui::TuiEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use std::ops::Range;
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
 use ratatui::layout::Rect;
@@ -102,6 +103,18 @@ const KEY_ESC: KeyBinding = key_hint::plain(KeyCode::Esc);
 const KEY_ENTER: KeyBinding = key_hint::plain(KeyCode::Enter);
 const KEY_CTRL_T: KeyBinding = key_hint::ctrl(KeyCode::Char('t'));
 const KEY_CTRL_C: KeyBinding = key_hint::ctrl(KeyCode::Char('c'));
+const KEY_C: KeyBinding = key_hint::plain(KeyCode::Char('c'));
+const KEY_TAB: KeyBinding = key_hint::plain(KeyCode::Tab);
+
+/// Browse mode for the backtrack overlay: user messages (edit) or agent messages (copy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum BrowseMode {
+    /// Navigate user messages for editing/rollback (existing behavior).
+    #[default]
+    UserEdit,
+    /// Navigate agent messages for copying as markdown.
+    AgentCopy,
+}
 
 // Common pager navigation hints rendered on the first line
 const PAGER_KEY_HINTS: &[(&[KeyBinding], &str)] = &[
@@ -427,7 +440,13 @@ pub(crate) struct TranscriptOverlay {
     view: PagerView,
     /// Committed transcript cells (does not include the live tail).
     cells: Vec<Arc<dyn HistoryCell>>,
-    highlight_cell: Option<usize>,
+    /// Range of cell indices to highlight (reversed video) in the transcript.
+    ///
+    /// A single cell uses `Some(i..i+1)`, while an agent message group spanning
+    /// multiple consecutive `AgentMessageCell`s uses a wider range.
+    highlight_cells: Option<Range<usize>>,
+    /// Current browse mode, used for footer hint rendering.
+    browse_mode: BrowseMode,
     /// Cache key for the render-only live tail appended after committed cells.
     live_tail_key: Option<LiveTailKey>,
     is_done: bool,
@@ -461,7 +480,8 @@ impl TranscriptOverlay {
                 usize::MAX,
             ),
             cells: transcript_cells,
-            highlight_cell: None,
+            highlight_cells: None,
+            browse_mode: BrowseMode::default(),
             live_tail_key: None,
             is_done: false,
         }
@@ -469,17 +489,19 @@ impl TranscriptOverlay {
 
     fn render_cells(
         cells: &[Arc<dyn HistoryCell>],
-        highlight_cell: Option<usize>,
+        highlight_cells: Option<&Range<usize>>,
     ) -> Vec<Box<dyn Renderable>> {
         cells
             .iter()
             .enumerate()
             .flat_map(|(i, c)| {
                 let mut v: Vec<Box<dyn Renderable>> = Vec::new();
+                let is_highlighted =
+                    highlight_cells.is_some_and(|range| range.contains(&i));
                 let mut cell_renderable = if c.as_any().is::<UserHistoryCell>() {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
-                        style: if highlight_cell == Some(i) {
+                        style: if is_highlighted {
                             user_message_style().reversed()
                         } else {
                             user_message_style()
@@ -488,7 +510,11 @@ impl TranscriptOverlay {
                 } else {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
-                        style: Style::default(),
+                        style: if is_highlighted {
+                            Style::default().reversed()
+                        } else {
+                            Style::default()
+                        },
                     })) as Box<dyn Renderable>
                 };
                 if !c.is_stream_continuation() && i > 0 {
@@ -518,7 +544,7 @@ impl TranscriptOverlay {
         let had_prior_cells = !self.cells.is_empty();
         let tail_renderable = self.take_live_tail_renderable();
         self.cells.push(cell);
-        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cells.as_ref());
         if let Some(tail) = tail_renderable {
             let tail = if !had_prior_cells
                 && self
@@ -587,12 +613,27 @@ impl TranscriptOverlay {
         }
     }
 
+    /// Highlight a single cell (for user messages) — convenience wrapper.
     pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
-        self.highlight_cell = cell;
+        self.highlight_cells = cell.map(|i| i..i + 1);
         self.rebuild_renderables();
-        if let Some(idx) = self.highlight_cell {
-            self.view.scroll_chunk_into_view(idx);
+        if let Some(ref range) = self.highlight_cells {
+            self.view.scroll_chunk_into_view(range.start);
         }
+    }
+
+    /// Highlight a range of cells (for agent message groups spanning multiple cells).
+    pub(crate) fn set_highlight_cells(&mut self, range: Option<Range<usize>>) {
+        self.highlight_cells = range;
+        self.rebuild_renderables();
+        if let Some(ref range) = self.highlight_cells {
+            self.view.scroll_chunk_into_view(range.start);
+        }
+    }
+
+    /// Set the browse mode for footer hint rendering.
+    pub(crate) fn set_browse_mode(&mut self, mode: BrowseMode) {
+        self.browse_mode = mode;
     }
 
     /// Returns whether the underlying pager view is currently pinned to the bottom.
@@ -605,7 +646,7 @@ impl TranscriptOverlay {
 
     fn rebuild_renderables(&mut self) {
         let tail_renderable = self.take_live_tail_renderable();
-        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cells.as_ref());
         if let Some(tail) = tail_renderable {
             self.view.renderables.push(tail);
         }
@@ -639,10 +680,22 @@ impl TranscriptOverlay {
         render_key_hints(line1, buf, PAGER_KEY_HINTS);
 
         let mut pairs: Vec<(&[KeyBinding], &str)> = vec![(&[KEY_Q], "to quit")];
-        if self.highlight_cell.is_some() {
-            pairs.push((&[KEY_ESC, KEY_LEFT], "to edit prev"));
-            pairs.push((&[KEY_RIGHT], "to edit next"));
-            pairs.push((&[KEY_ENTER], "to edit message"));
+        if self.highlight_cells.is_some() {
+            match self.browse_mode {
+                BrowseMode::UserEdit => {
+                    pairs.push((&[KEY_ESC, KEY_LEFT], "to edit prev"));
+                    pairs.push((&[KEY_RIGHT], "to edit next"));
+                    pairs.push((&[KEY_ENTER], "to edit"));
+                    pairs.push((&[KEY_C], "to copy"));
+                    pairs.push((&[KEY_TAB], "agent msgs"));
+                }
+                BrowseMode::AgentCopy => {
+                    pairs.push((&[KEY_ESC, KEY_LEFT], "prev response"));
+                    pairs.push((&[KEY_RIGHT], "next response"));
+                    pairs.push((&[KEY_C, KEY_ENTER], "to copy"));
+                    pairs.push((&[KEY_TAB], "user msgs"));
+                }
+            }
         } else {
             pairs.push((&[KEY_ESC], "to edit prev"));
         }

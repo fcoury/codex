@@ -28,8 +28,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::app::App;
+use crate::history_cell::AgentMessageCell;
 use crate::history_cell::SessionInfoCell;
 use crate::history_cell::UserHistoryCell;
+use crate::pager_overlay::BrowseMode;
 use crate::pager_overlay::Overlay;
 use crate::tui;
 use crate::tui::TuiEvent;
@@ -43,6 +45,7 @@ use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use std::ops::Range;
 
 /// Aggregates all backtrack-related state used by the App.
 #[derive(Default)]
@@ -58,6 +61,13 @@ pub(crate) struct BacktrackState {
     /// This is an index into the filtered "user messages since the last session start" view,
     /// not an index into `transcript_cells`. `usize::MAX` indicates "no selection".
     pub(crate) nth_user_message: usize,
+    /// Whether we are browsing user messages (edit) or agent messages (copy).
+    pub(crate) browse_mode: BrowseMode,
+    /// Index of the currently highlighted agent message group.
+    ///
+    /// Like `nth_user_message`, this is an index into the filtered "agent groups since the last
+    /// session start" view. `usize::MAX` indicates "no selection".
+    pub(crate) nth_agent_message: usize,
     /// True when the transcript overlay is showing a backtrack preview.
     pub(crate) overlay_preview_active: bool,
     /// Pending rollback request awaiting confirmation from core.
@@ -109,6 +119,24 @@ impl App {
     ) -> Result<bool> {
         if self.backtrack.overlay_preview_active {
             match event {
+                // Tab: toggle between user-edit and agent-copy modes.
+                TuiEvent::Key(KeyEvent {
+                    code: KeyCode::Tab,
+                    kind: KeyEventKind::Press,
+                    ..
+                }) => {
+                    self.toggle_browse_mode(tui);
+                    Ok(true)
+                }
+                // 'c': copy highlighted message in either mode.
+                TuiEvent::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    kind: KeyEventKind::Press,
+                    ..
+                }) => {
+                    self.overlay_copy_highlighted(tui);
+                    Ok(true)
+                }
                 TuiEvent::Key(KeyEvent {
                     code: KeyCode::Esc,
                     kind: KeyEventKind::Press | KeyEventKind::Repeat,
@@ -138,7 +166,10 @@ impl App {
                     kind: KeyEventKind::Press,
                     ..
                 }) => {
-                    self.overlay_confirm_backtrack(tui);
+                    match self.backtrack.browse_mode {
+                        BrowseMode::UserEdit => self.overlay_confirm_backtrack(tui),
+                        BrowseMode::AgentCopy => self.overlay_copy_highlighted(tui),
+                    }
                     Ok(true)
                 }
                 // Catchall: forward any other events to the overlay widget.
@@ -401,10 +432,13 @@ impl App {
         }
     }
 
-    /// Handle Esc in overlay backtrack preview: step selection if armed, else forward.
+    /// Handle Esc/Left in overlay backtrack preview: step selection if armed, else forward.
     fn overlay_step_backtrack(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         if self.backtrack.base_id.is_some() {
-            self.step_backtrack_and_highlight(tui);
+            match self.backtrack.browse_mode {
+                BrowseMode::UserEdit => self.step_backtrack_and_highlight(tui),
+                BrowseMode::AgentCopy => self.step_agent_and_highlight(tui),
+            }
         } else {
             self.overlay_forward_event(tui, event)?;
         }
@@ -418,7 +452,10 @@ impl App {
         event: TuiEvent,
     ) -> Result<()> {
         if self.backtrack.base_id.is_some() {
-            self.step_forward_backtrack_and_highlight(tui);
+            match self.backtrack.browse_mode {
+                BrowseMode::UserEdit => self.step_forward_backtrack_and_highlight(tui),
+                BrowseMode::AgentCopy => self.step_forward_agent_and_highlight(tui),
+            }
         } else {
             self.overlay_forward_event(tui, event)?;
         }
@@ -438,6 +475,8 @@ impl App {
         self.backtrack.primed = false;
         self.backtrack.base_id = None;
         self.backtrack.nth_user_message = usize::MAX;
+        self.backtrack.nth_agent_message = usize::MAX;
+        self.backtrack.browse_mode = BrowseMode::default();
         // In case a hint is somehow still visible (e.g., race with overlay open/close).
         self.chat_widget.clear_esc_backtrack_hint();
     }
@@ -512,6 +551,147 @@ impl App {
     fn trim_transcript_for_backtrack(&mut self, nth_user_message: usize) {
         trim_transcript_cells_to_nth_user(&mut self.transcript_cells, nth_user_message);
     }
+
+    // --- Agent browse mode ---
+
+    /// Toggle between user-edit and agent-copy browse modes.
+    fn toggle_browse_mode(&mut self, tui: &mut tui::Tui) {
+        let new_mode = match self.backtrack.browse_mode {
+            BrowseMode::UserEdit => BrowseMode::AgentCopy,
+            BrowseMode::AgentCopy => BrowseMode::UserEdit,
+        };
+        self.backtrack.browse_mode = new_mode;
+        if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+            t.set_browse_mode(new_mode);
+        }
+        // Highlight the latest message of the new type.
+        match new_mode {
+            BrowseMode::UserEdit => {
+                let count = user_count(&self.transcript_cells);
+                if let Some(last) = count.checked_sub(1) {
+                    self.backtrack.nth_user_message = usize::MAX; // force re-select
+                    self.apply_backtrack_selection_internal(last);
+                }
+            }
+            BrowseMode::AgentCopy => {
+                let count = agent_group_count(&self.transcript_cells);
+                if let Some(last) = count.checked_sub(1) {
+                    self.backtrack.nth_agent_message = usize::MAX; // force re-select
+                    self.apply_agent_selection_internal(last);
+                } else {
+                    // No agent messages — clear highlight.
+                    if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+                        t.set_highlight_cells(None);
+                    }
+                }
+            }
+        }
+        tui.frame_requester().schedule_frame();
+    }
+
+    /// Step selection to the next older agent message group and update overlay.
+    fn step_agent_and_highlight(&mut self, tui: &mut tui::Tui) {
+        let count = agent_group_count(&self.transcript_cells);
+        if count == 0 {
+            return;
+        }
+
+        let last_index = count.saturating_sub(1);
+        let next = if self.backtrack.nth_agent_message == usize::MAX {
+            last_index
+        } else if self.backtrack.nth_agent_message == 0 {
+            0
+        } else {
+            self.backtrack
+                .nth_agent_message
+                .saturating_sub(1)
+                .min(last_index)
+        };
+
+        self.apply_agent_selection_internal(next);
+        tui.frame_requester().schedule_frame();
+    }
+
+    /// Step selection to the next newer agent message group and update overlay.
+    fn step_forward_agent_and_highlight(&mut self, tui: &mut tui::Tui) {
+        let count = agent_group_count(&self.transcript_cells);
+        if count == 0 {
+            return;
+        }
+
+        let last_index = count.saturating_sub(1);
+        let next = if self.backtrack.nth_agent_message == usize::MAX {
+            last_index
+        } else {
+            self.backtrack
+                .nth_agent_message
+                .saturating_add(1)
+                .min(last_index)
+        };
+
+        self.apply_agent_selection_internal(next);
+        tui.frame_requester().schedule_frame();
+    }
+
+    /// Apply an agent group selection to the overlay and internal counter.
+    fn apply_agent_selection_internal(&mut self, nth_agent: usize) {
+        if let Some(range) = nth_agent_group_range(&self.transcript_cells, nth_agent) {
+            self.backtrack.nth_agent_message = nth_agent;
+            if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+                t.set_highlight_cells(Some(range));
+            }
+        } else {
+            self.backtrack.nth_agent_message = usize::MAX;
+            if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+                t.set_highlight_cells(None);
+            }
+        }
+    }
+
+    /// Copy the currently highlighted message to clipboard and close overlay.
+    fn overlay_copy_highlighted(&mut self, tui: &mut tui::Tui) {
+        let text = match self.backtrack.browse_mode {
+            BrowseMode::UserEdit => {
+                let nth = self.backtrack.nth_user_message;
+                nth_user_position(&self.transcript_cells, nth)
+                    .and_then(|idx| self.transcript_cells.get(idx))
+                    .and_then(|cell| cell.as_any().downcast_ref::<UserHistoryCell>())
+                    .map(|cell| cell.message.clone())
+            }
+            BrowseMode::AgentCopy => {
+                let nth = self.backtrack.nth_agent_message;
+                self.chat_widget.agent_turn_markdowns.get(nth).cloned()
+            }
+        };
+
+        self.close_transcript_overlay(tui);
+
+        match text {
+            Some(t) if !t.is_empty() => {
+                match crate::clipboard_copy::copy_to_clipboard(&t) {
+                    Ok(()) => {
+                        self.chat_widget.add_to_history(
+                            crate::history_cell::new_info_event(
+                                "Copied to clipboard".into(),
+                                None,
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        self.chat_widget.add_to_history(
+                            crate::history_cell::new_error_event(format!("Copy failed: {e}")),
+                        );
+                    }
+                }
+            }
+            _ => {
+                self.chat_widget.add_to_history(
+                    crate::history_cell::new_error_event("No message to copy".into()),
+                );
+            }
+        }
+        tui.frame_requester().schedule_frame();
+    }
 }
 
 fn trim_transcript_cells_to_nth_user(
@@ -557,6 +737,65 @@ fn user_positions_iter(
         .enumerate()
         .skip(start)
         .filter_map(move |(idx, cell)| (type_of(cell) == user_type).then_some(idx))
+}
+
+// --- Agent group helpers ---
+
+/// Count the number of agent message groups (each starting with `is_first_line == true`).
+fn agent_group_count(cells: &[Arc<dyn crate::history_cell::HistoryCell>]) -> usize {
+    agent_group_positions_iter(cells).count()
+}
+
+/// Iterate cell indices where an agent message group starts (`is_first_line == true`).
+fn agent_group_positions_iter(
+    cells: &[Arc<dyn crate::history_cell::HistoryCell>],
+) -> impl Iterator<Item = usize> + '_ {
+    let session_start_type = TypeId::of::<SessionInfoCell>();
+    let type_of = |cell: &Arc<dyn crate::history_cell::HistoryCell>| cell.as_any().type_id();
+
+    let start = cells
+        .iter()
+        .rposition(|cell| type_of(cell) == session_start_type)
+        .map_or(0, |idx| idx + 1);
+
+    cells
+        .iter()
+        .enumerate()
+        .skip(start)
+        .filter_map(move |(idx, cell)| {
+            let is_agent = cell.as_any().downcast_ref::<AgentMessageCell>().is_some();
+            // An agent group starts where is_stream_continuation is false (i.e., is_first_line).
+            (is_agent && !cell.is_stream_continuation()).then_some(idx)
+        })
+}
+
+/// Return the cell index range for the nth agent message group.
+///
+/// A group starts at the cell with `is_first_line == true` and extends through consecutive
+/// `AgentMessageCell`s that have `is_stream_continuation() == true`.
+fn nth_agent_group_range(
+    cells: &[Arc<dyn crate::history_cell::HistoryCell>],
+    nth: usize,
+) -> Option<Range<usize>> {
+    let start_idx = agent_group_positions_iter(cells)
+        .enumerate()
+        .find_map(|(i, idx)| (i == nth).then_some(idx))?;
+
+    // Extend through continuation cells.
+    let mut end_idx = start_idx + 1;
+    while end_idx < cells.len() && cells[end_idx].is_stream_continuation() {
+        // Ensure it's actually an AgentMessageCell continuation, not some other continuation.
+        if cells[end_idx]
+            .as_any()
+            .downcast_ref::<AgentMessageCell>()
+            .is_some()
+        {
+            end_idx += 1;
+        } else {
+            break;
+        }
+    }
+    Some(start_idx..end_idx)
 }
 
 #[cfg(test)]
