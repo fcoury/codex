@@ -1,7 +1,14 @@
+//! Shared style helpers for cross-widget UI surfaces.
+//!
+//! The terminal's own background remains authoritative. Theme configuration can
+//! optionally provide explicit backgrounds (`message_bg`) or, when absent, we
+//! synthesize one by blending against the detected terminal background.
+
 use crate::color::blend;
 use crate::color::is_light;
 use crate::terminal_palette::best_color;
 use crate::terminal_palette::default_bg;
+use crate::theme;
 use ratatui::style::Color;
 use ratatui::style::Style;
 
@@ -30,10 +37,16 @@ pub fn proposed_plan_style_for(terminal_bg: Option<(u8, u8, u8)>) -> Style {
 
 #[allow(clippy::disallowed_methods)]
 pub fn user_message_bg(terminal_bg: (u8, u8, u8)) -> Color {
+    let theme = theme::current();
+    // If configured, use an explicit background directly.
+    if let Some(bg) = theme.message_bg {
+        return bg;
+    }
+    // Otherwise derive a subtle overlay from the terminal background.
     let (top, alpha) = if is_light(terminal_bg) {
-        ((0, 0, 0), 0.04)
+        ((0, 0, 0), theme.message_bg_blend * 0.33)
     } else {
-        ((255, 255, 255), 0.12)
+        ((255, 255, 255), theme.message_bg_blend)
     };
     best_color(blend(top, terminal_bg, alpha))
 }

@@ -114,6 +114,7 @@ mod wrapping;
 
 #[cfg(test)]
 pub mod test_backend;
+mod theme;
 
 use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
 use crate::onboarding::onboarding_screen::run_onboarding_app;
@@ -285,6 +286,9 @@ pub async fn run_main(
     )
     .await;
     set_default_client_residency_requirement(config.enforce_residency.value());
+
+    let resolved_theme = theme::resolve_theme(&config.tui_theme);
+    theme::set_theme(resolved_theme);
 
     if let Some(warning) = add_dir_warning_message(&cli.add_dir, config.sandbox_policy.get()) {
         #[allow(clippy::print_stderr)]
