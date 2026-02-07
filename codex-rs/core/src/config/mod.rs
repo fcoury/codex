@@ -82,6 +82,7 @@ pub mod edit;
 pub mod profile;
 pub mod schema;
 pub mod service;
+pub mod theme;
 pub mod types;
 pub use constraint::Constrained;
 pub use constraint::ConstraintError;
@@ -91,6 +92,8 @@ pub use service::ConfigService;
 pub use service::ConfigServiceError;
 
 pub use codex_git::GhostSnapshotConfig;
+
+pub use theme::ThemeConfig;
 
 /// Maximum number of bytes of the documentation that will be embedded. Larger
 /// files are *silently truncated* to this size so we do not take up too much of
@@ -231,6 +234,12 @@ pub struct Config {
 
     /// Ordered list of status line item identifiers for the TUI.
     pub tui_status_line: Option<Vec<String>>,
+
+    /// Resolved TUI theme configuration from `[tui.theme]`.
+    ///
+    /// This is always populated (defaults when unset) so the TUI can resolve a
+    /// concrete active theme without additional option handling.
+    pub tui_theme: ThemeConfig,
 
     /// The directory that should be treated as the current working directory
     /// for the session. All relative paths inside the business-logic layer are
@@ -1795,6 +1804,11 @@ impl Config {
                 .map(|t| t.alternate_screen)
                 .unwrap_or_default(),
             tui_status_line: cfg.tui.as_ref().and_then(|t| t.status_line.clone()),
+            tui_theme: cfg
+                .tui
+                .as_ref()
+                .and_then(|t| t.theme.clone())
+                .unwrap_or_default(),
             otel: {
                 let t: OtelConfigToml = cfg.otel.unwrap_or_default();
                 let log_user_prompt = t.log_user_prompt.unwrap_or(false);
@@ -2033,8 +2047,26 @@ persistence = "none"
                 experimental_mode: None,
                 alternate_screen: AltScreenMode::Auto,
                 status_line: None,
+                theme: None,
             }
         );
+    }
+
+    #[test]
+    fn tui_theme_name_is_loaded() -> std::io::Result<()> {
+        let cfg = r#"
+[tui.theme]
+name = "ocean"
+"#;
+        let parsed = toml::from_str::<ConfigToml>(cfg).expect("TUI theme config should parse");
+        let temp_dir = TempDir::new()?;
+        let config = Config::load_from_base_config_with_overrides(
+            parsed,
+            ConfigOverrides::default(),
+            temp_dir.path().to_path_buf(),
+        )?;
+        assert_eq!(config.tui_theme.name, Some("ocean".to_string()));
+        Ok(())
     }
 
     #[test]
@@ -4060,6 +4092,7 @@ model_verbosity = "high"
                 feedback_enabled: true,
                 tui_alternate_screen: AltScreenMode::Auto,
                 tui_status_line: None,
+                tui_theme: ThemeConfig::default(),
                 otel: OtelConfig::default(),
             },
             o3_profile_config
@@ -4148,6 +4181,7 @@ model_verbosity = "high"
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
             tui_status_line: None,
+            tui_theme: ThemeConfig::default(),
             otel: OtelConfig::default(),
         };
 
@@ -4251,6 +4285,7 @@ model_verbosity = "high"
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
             tui_status_line: None,
+            tui_theme: ThemeConfig::default(),
             otel: OtelConfig::default(),
         };
 
@@ -4340,6 +4375,7 @@ model_verbosity = "high"
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
             tui_status_line: None,
+            tui_theme: ThemeConfig::default(),
             otel: OtelConfig::default(),
         };
 

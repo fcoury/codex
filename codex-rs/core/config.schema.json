@@ -1012,6 +1012,222 @@
       },
       "type": "object"
     },
+    "ThemeColor": {
+      "description": "A single theme color value.\n\nOn the wire this serializes as a string: - `Named`: `\"cyan\"`, `\"light_blue\"`, `\"default\"`, etc. - `Hex`: `\"#RRGGBB\"` (exactly six hex digits).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A named terminal color keyword.",
+          "properties": {
+            "Named": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Named"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A six-digit hex color (`#RRGGBB`).",
+          "properties": {
+            "Hex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Hex"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ThemeConfig": {
+      "additionalProperties": false,
+      "description": "Top-level TUI theme config loaded from `[tui.theme]`.",
+      "properties": {
+        "name": {
+          "description": "Optional built-in theme name.\n\nSupported names are defined by the TUI resolver in `tui/src/theme.rs`.",
+          "type": "string"
+        },
+        "palette": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemePalette"
+            }
+          ],
+          "description": "Optional palette overrides applied after built-in selection."
+        },
+        "styles": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeStyleOverrides"
+            }
+          ],
+          "description": "Optional component style overrides applied after palette resolution."
+        }
+      },
+      "type": "object"
+    },
+    "ThemePalette": {
+      "additionalProperties": false,
+      "description": "Palette-level color overrides applied on top of the selected built-in theme.",
+      "properties": {
+        "accent": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeColor"
+            }
+          ],
+          "description": "General accent color used for key highlights."
+        },
+        "brand": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeColor"
+            }
+          ],
+          "description": "Brand color used for command labels and emphasis."
+        },
+        "error": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeColor"
+            }
+          ],
+          "description": "Error/negative color."
+        },
+        "info": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeColor"
+            }
+          ],
+          "description": "Informational color."
+        },
+        "message_bg": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeColor"
+            }
+          ],
+          "description": "Optional explicit background for message blocks."
+        },
+        "selection_bg": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeColor"
+            }
+          ],
+          "description": "Optional explicit background for selected rows/areas."
+        },
+        "success": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeColor"
+            }
+          ],
+          "description": "Success/positive color."
+        }
+      },
+      "type": "object"
+    },
+    "ThemeStyle": {
+      "additionalProperties": false,
+      "description": "Style overrides for a specific text component.",
+      "properties": {
+        "bg": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeColor"
+            }
+          ],
+          "description": "Optional background color override."
+        },
+        "bold": {
+          "default": false,
+          "description": "Add bold text.",
+          "type": "boolean"
+        },
+        "dim": {
+          "default": false,
+          "description": "Add dim text.",
+          "type": "boolean"
+        },
+        "fg": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeColor"
+            }
+          ],
+          "description": "Optional foreground color override."
+        },
+        "italic": {
+          "default": false,
+          "description": "Add italic text.",
+          "type": "boolean"
+        },
+        "underlined": {
+          "default": false,
+          "description": "Add underlined text.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ThemeStyleOverrides": {
+      "additionalProperties": false,
+      "description": "Component-style overrides for themeable UI surfaces.",
+      "properties": {
+        "diff_added": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeStyle"
+            }
+          ],
+          "description": "Style override for \"added\" diff lines."
+        },
+        "diff_removed": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeStyle"
+            }
+          ],
+          "description": "Style override for \"removed\" diff lines."
+        },
+        "markdown_blockquote": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeStyle"
+            }
+          ],
+          "description": "Style override for markdown blockquotes."
+        },
+        "markdown_code": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeStyle"
+            }
+          ],
+          "description": "Style override for inline/fenced markdown code text."
+        },
+        "markdown_link": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeStyle"
+            }
+          ],
+          "description": "Style override for markdown links."
+        },
+        "message_bg_blend": {
+          "description": "Blend amount used when no explicit `message_bg` is set.\n\n`0.0` disables blending; larger values increase contrast against the terminal background.",
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
     "ToolsToml": {
       "additionalProperties": false,
       "properties": {
@@ -1092,6 +1308,15 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "theme": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThemeConfig"
+            }
+          ],
+          "default": null,
+          "description": "Optional TUI theme configuration from `[tui.theme]`.\n\nResolution order at runtime is: 1. selected built-in theme (`name`) 2. `palette` color overrides 3. `styles` component overrides"
         }
       },
       "type": "object"

@@ -3,6 +3,7 @@
 // Note this file should generally be restricted to simple struct/enum
 // definitions that do not contain business logic.
 
+use crate::config::ThemeConfig;
 use crate::config_loader::RequirementSource;
 pub use codex_protocol::config_types::AltScreenMode;
 pub use codex_protocol::config_types::ModeKind;
@@ -538,6 +539,15 @@ pub struct Tui {
     /// When set, the TUI renders the selected items as the status line.
     #[serde(default)]
     pub status_line: Option<Vec<String>>,
+
+    /// Optional TUI theme configuration from `[tui.theme]`.
+    ///
+    /// Resolution order at runtime is:
+    /// 1. selected built-in theme (`name`)
+    /// 2. `palette` color overrides
+    /// 3. `styles` component overrides
+    #[serde(default)]
+    pub theme: Option<ThemeConfig>,
 }
 
 const fn default_true() -> bool {
