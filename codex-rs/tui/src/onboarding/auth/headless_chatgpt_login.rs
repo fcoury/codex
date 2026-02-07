@@ -6,6 +6,8 @@ use codex_login::run_login_server;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
+use ratatui::style::Modifier;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -15,6 +17,7 @@ use std::sync::RwLock;
 use tokio::sync::Notify;
 
 use crate::shimmer::shimmer_spans;
+use crate::theme;
 use crate::tui::FrameRequester;
 
 use super::AuthModeWidget;
@@ -158,7 +161,10 @@ pub(super) fn render_device_code_login(
         lines.push("".into());
         lines.push(Line::from(vec![
             "  ".into(),
-            device_code.verification_url.as_str().cyan().underlined(),
+            device_code
+                .verification_url
+                .as_str()
+                .set_style(theme::current().markdown_link),
         ]));
         lines.push("".into());
         lines.push(
@@ -167,7 +173,10 @@ pub(super) fn render_device_code_login(
         lines.push("".into());
         lines.push(Line::from(vec![
             "  ".into(),
-            device_code.user_code.as_str().cyan().bold(),
+            device_code
+                .user_code
+                .as_str()
+                .set_style(theme::accent().add_modifier(Modifier::BOLD)),
         ]));
         lines.push("".into());
         lines.push(

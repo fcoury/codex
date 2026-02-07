@@ -36,10 +36,12 @@ use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::render::line_utils::prefix_lines;
 use crate::status::format_tokens_compact;
+use crate::theme;
 use crate::ui_consts::FOOTER_INDENT_COLS;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -103,8 +105,10 @@ impl CollaborationModeIndicator {
     fn styled_span(self, show_cycle_hint: bool) -> Span<'static> {
         let label = self.label(show_cycle_hint);
         match self {
-            CollaborationModeIndicator::Plan => Span::from(label).magenta(),
-            CollaborationModeIndicator::PairProgramming => Span::from(label).cyan(),
+            CollaborationModeIndicator::Plan => Span::from(label).set_style(theme::brand()),
+            CollaborationModeIndicator::PairProgramming => {
+                Span::from(label).set_style(theme::accent())
+            }
             CollaborationModeIndicator::Execute => Span::from(label).dim(),
         }
     }

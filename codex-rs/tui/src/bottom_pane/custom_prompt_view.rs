@@ -3,6 +3,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -13,6 +14,7 @@ use ratatui::widgets::Widget;
 use std::cell::RefCell;
 
 use crate::render::renderable::Renderable;
+use crate::theme;
 
 use super::popup_consts::standard_popup_hint_line;
 
@@ -137,7 +139,8 @@ impl Renderable for CustomPromptView {
                 width: area.width,
                 height: 1,
             };
-            let spans: Vec<Span<'static>> = vec![gutter(), context_label.clone().cyan()];
+            let spans: Vec<Span<'static>> =
+                vec![gutter(), context_label.clone().set_style(theme::accent())];
             Paragraph::new(Line::from(spans)).render(context_area, buf);
             input_y = input_y.saturating_add(1);
         }
@@ -243,5 +246,5 @@ impl CustomPromptView {
 }
 
 fn gutter() -> Span<'static> {
-    "▌ ".cyan()
+    "▌ ".set_style(theme::accent())
 }

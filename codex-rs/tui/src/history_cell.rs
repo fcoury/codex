@@ -29,6 +29,7 @@ use crate::style::proposed_plan_style;
 use crate::style::user_message_style;
 use crate::text_formatting::format_and_truncate_tool_result;
 use crate::text_formatting::truncate_text;
+use crate::theme;
 use crate::tooltips;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 use crate::update_action::UpdateAction;
@@ -60,7 +61,6 @@ use codex_protocol::user_input::TextElement;
 use image::DynamicImage;
 use image::ImageReader;
 use ratatui::prelude::*;
-use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Styled;
@@ -247,7 +247,7 @@ impl HistoryCell for UserHistoryCell {
             .max(1);
 
         let style = user_message_style();
-        let element_style = style.fg(Color::Cyan);
+        let element_style = style.fg(theme::current().accent);
 
         let wrapped = if self.text_elements.is_empty() {
             word_wrap_lines(
@@ -421,19 +421,23 @@ impl HistoryCell for UpdateAvailableHistoryCell {
         use ratatui_macros::line;
         use ratatui_macros::text;
         let update_instruction = if let Some(update_action) = self.update_action {
-            line!["Run ", update_action.command_str().cyan(), " to update."]
+            line![
+                "Run ",
+                update_action.command_str().set_style(theme::accent()),
+                " to update."
+            ]
         } else {
             line![
                 "See ",
-                "https://github.com/openai/codex".cyan().underlined(),
+                "https://github.com/openai/codex".set_style(theme::current().markdown_link),
                 " for installation options."
             ]
         };
 
         let content = text![
             line![
-                padded_emoji("✨").bold().cyan(),
-                "Update available!".bold().cyan(),
+                padded_emoji("✨").set_style(theme::accent().add_modifier(Modifier::BOLD)),
+                "Update available!".set_style(theme::accent().add_modifier(Modifier::BOLD)),
                 " ",
                 format!("{CODEX_CLI_VERSION} -> {}", self.latest_version).bold(),
             ],
@@ -441,8 +445,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
             "",
             "See full release notes:",
             "https://github.com/openai/codex/releases/latest"
-                .cyan()
-                .underlined(),
+                .set_style(theme::current().markdown_link),
         ];
 
         let inner_width = content
@@ -632,10 +635,17 @@ impl HistoryCell for UnifiedExecProcessesCell {
             if needs_suffix && budget > truncation_suffix_width {
                 let available = budget.saturating_sub(truncation_suffix_width);
                 let (truncated, _, _) = take_prefix_by_width(&snippet, available);
-                out.push(vec![prefix.dim(), truncated.cyan(), truncation_suffix.dim()].into());
+                out.push(
+                    vec![
+                        prefix.dim(),
+                        truncated.set_style(theme::accent()),
+                        truncation_suffix.dim(),
+                    ]
+                    .into(),
+                );
             } else {
                 let (truncated, _, _) = take_prefix_by_width(&snippet, budget);
-                out.push(vec![prefix.dim(), truncated.cyan()].into());
+                out.push(vec![prefix.dim(), truncated.set_style(theme::accent())].into());
             }
 
             let chunk_prefix_first = "    ↳ ";
@@ -689,7 +699,7 @@ impl HistoryCell for UnifiedExecProcessesCell {
 pub(crate) fn new_unified_exec_processes_output(
     processes: Vec<UnifiedExecProcessDetails>,
 ) -> CompositeHistoryCell {
-    let command = PlainHistoryCell::new(vec!["/ps".magenta().into()]);
+    let command = PlainHistoryCell::new(vec!["/ps".set_style(theme::brand()).into()]);
     let summary = UnifiedExecProcessesCell::new(processes);
     CompositeHistoryCell::new(vec![Box::new(command), Box::new(summary)])
 }
@@ -718,7 +728,7 @@ pub fn new_approval_decision_cell(
         Approved => {
             let snippet = Span::from(exec_snippet(&command)).dim();
             (
-                "✔ ".green(),
+                Span::from("✔ ").set_style(theme::success()),
                 vec![
                     "You ".into(),
                     "approved".bold(),
@@ -733,7 +743,7 @@ pub fn new_approval_decision_cell(
         } => {
             let snippet = Span::from(exec_snippet(&proposed_execpolicy_amendment.command)).dim();
             (
-                "✔ ".green(),
+                Span::from("✔ ").set_style(theme::success()),
                 vec![
                     "You ".into(),
                     "approved".bold(),
@@ -745,7 +755,7 @@ pub fn new_approval_decision_cell(
         ApprovedForSession => {
             let snippet = Span::from(exec_snippet(&command)).dim();
             (
-                "✔ ".green(),
+                Span::from("✔ ").set_style(theme::success()),
                 vec![
                     "You ".into(),
                     "approved".bold(),
@@ -758,7 +768,7 @@ pub fn new_approval_decision_cell(
         Denied => {
             let snippet = Span::from(exec_snippet(&command)).dim();
             (
-                "✗ ".red(),
+                Span::from("✗ ").set_style(theme::error()),
                 vec![
                     "You ".into(),
                     "did not approve".bold(),
@@ -770,7 +780,7 @@ pub fn new_approval_decision_cell(
         Abort => {
             let snippet = Span::from(exec_snippet(&command)).dim();
             (
-                "✗ ".red(),
+                Span::from("✗ ").set_style(theme::error()),
                 vec![
                     "You ".into(),
                     "canceled".bold(),
@@ -791,7 +801,7 @@ pub fn new_approval_decision_cell(
 /// Cyan history cell line showing the current review status.
 pub(crate) fn new_review_status_line(message: String) -> PlainHistoryCell {
     PlainHistoryCell {
-        lines: vec![Line::from(message.cyan())],
+        lines: vec![Line::from(message.set_style(theme::accent()))],
     }
 }
 
@@ -1003,7 +1013,7 @@ pub(crate) fn new_session_info(
         }
         if requested_model != model {
             let lines = vec![
-                "model changed:".magenta().bold().into(),
+                Line::from("model changed:".set_style(theme::current().brand_bold())),
                 format!("requested: {requested_model}").into(),
                 format!("used: {model}").into(),
             ];
@@ -1143,7 +1153,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
                 spans.push(Span::from(reasoning));
             }
             spans.push("   ".dim());
-            spans.push(CHANGE_MODEL_HINT_COMMAND.cyan());
+            spans.push(CHANGE_MODEL_HINT_COMMAND.set_style(theme::accent()));
             spans.push(CHANGE_MODEL_HINT_EXPLANATION.dim());
             spans
         };
@@ -1286,8 +1296,8 @@ impl HistoryCell for McpToolCallCell {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let status = self.success();
         let bullet = match status {
-            Some(true) => "•".green().bold(),
-            Some(false) => "•".red().bold(),
+            Some(true) => "•".set_style(theme::current().success_bold()),
+            Some(false) => "•".set_style(theme::current().error_bold()),
             None => spinner(Some(self.start_time), self.animations_enabled),
         };
         let header_text = if status.is_some() {
@@ -1538,7 +1548,11 @@ fn decode_mcp_image(block: &serde_json::Value) -> Option<DynamicImage> {
 
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn new_warning_event(message: String) -> PrefixedWrappedHistoryCell {
-    PrefixedWrappedHistoryCell::new(message.yellow(), "⚠ ".yellow(), "  ")
+    PrefixedWrappedHistoryCell::new(
+        message.set_style(theme::error()),
+        "⚠ ".set_style(theme::current().error_bold()),
+        "  ",
+    )
 }
 
 #[derive(Debug)]
@@ -1557,7 +1571,13 @@ pub(crate) fn new_deprecation_notice(
 impl HistoryCell for DeprecationNoticeCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(vec!["⚠ ".red().bold(), self.summary.clone().red()].into());
+        lines.push(
+            vec![
+                "⚠ ".set_style(theme::current().error_bold()),
+                self.summary.clone().set_style(theme::error()),
+            ]
+            .into(),
+        );
 
         let wrap_width = width.saturating_sub(4).max(1) as usize;
 
@@ -1576,7 +1596,7 @@ impl HistoryCell for DeprecationNoticeCell {
 /// Render a summary of configured MCP servers from the current `Config`.
 pub(crate) fn empty_mcp_output() -> PlainHistoryCell {
     let lines: Vec<Line<'static>> = vec![
-        "/mcp".magenta().into(),
+        "/mcp".set_style(theme::brand()).into(),
         "".into(),
         vec!["🔌  ".into(), "MCP Tools".bold()].into(),
         "".into(),
@@ -1602,7 +1622,7 @@ pub(crate) fn new_mcp_tools_output(
     auth_statuses: &HashMap<String, McpAuthStatus>,
 ) -> PlainHistoryCell {
     let mut lines: Vec<Line<'static>> = vec![
-        "/mcp".magenta().into(),
+        "/mcp".set_style(theme::brand()).into(),
         "".into(),
         vec!["🔌  ".into(), "MCP Tools".bold()].into(),
         "".into(),
@@ -1632,7 +1652,7 @@ pub(crate) fn new_mcp_tools_output(
         let mut header: Vec<Span<'static>> = vec!["  • ".into(), server.clone().into()];
         if !cfg.enabled {
             header.push(" ".into());
-            header.push("(disabled)".red());
+            header.push("(disabled)".set_style(theme::error()));
             lines.push(header.into());
             if let Some(reason) = cfg.disabled_reason.as_ref().map(ToString::to_string) {
                 lines.push(vec!["    • Reason: ".into(), reason.dim()].into());
@@ -1641,7 +1661,13 @@ pub(crate) fn new_mcp_tools_output(
             continue;
         }
         lines.push(header.into());
-        lines.push(vec!["    • Status: ".into(), "enabled".green()].into());
+        lines.push(
+            vec![
+                "    • Status: ".into(),
+                "enabled".set_style(theme::success()),
+            ]
+            .into(),
+        );
         lines.push(vec!["    • Auth: ".into(), auth_status.to_string().into()].into());
 
         match &cfg.transport {
@@ -1772,7 +1798,8 @@ pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
     // Use a hair space (U+200A) to create a subtle, near-invisible separation
     // before the text. VS16 is intentionally omitted to keep spacing tighter
     // in terminals like Ghostty.
-    let lines: Vec<Line<'static>> = vec![vec![format!("■ {message}").red()].into()];
+    let lines: Vec<Line<'static>> =
+        vec![vec![format!("■ {message}").set_style(theme::error())].into()];
     PlainHistoryCell { lines }
 }
 
@@ -1802,7 +1829,7 @@ impl HistoryCell for RequestUserInputResultCell {
         let mut header = vec!["•".dim(), " ".into(), "Questions".bold()];
         header.push(format!(" {answered}/{total} answered").dim());
         if self.interrupted {
-            header.push(" (interrupted)".cyan());
+            header.push(" (interrupted)".set_style(theme::accent()));
         }
 
         let mut lines: Vec<Line<'static>> = vec![header.into()];
@@ -1834,7 +1861,7 @@ impl HistoryCell for RequestUserInputResultCell {
                     width,
                     "    answer: ".dim(),
                     "            ".dim(),
-                    Style::default().fg(Color::Cyan),
+                    theme::accent(),
                 ));
                 continue;
             }
@@ -1847,22 +1874,14 @@ impl HistoryCell for RequestUserInputResultCell {
                     width,
                     "    answer: ".dim(),
                     "            ".dim(),
-                    Style::default().fg(Color::Cyan),
+                    theme::accent(),
                 ));
             }
             if let Some(note) = note {
                 let (label, continuation, style) = if question.options.is_some() {
-                    (
-                        "    note: ".dim(),
-                        "          ".dim(),
-                        Style::default().fg(Color::Cyan),
-                    )
+                    ("    note: ".dim(), "          ".dim(), theme::accent())
                 } else {
-                    (
-                        "    answer: ".dim(),
-                        "            ".dim(),
-                        Style::default().fg(Color::Cyan),
-                    )
+                    ("    answer: ".dim(), "            ".dim(), theme::accent())
                 };
                 lines.extend(wrap_with_prefix(&note, width, label, continuation, style));
             }
@@ -1873,9 +1892,9 @@ impl HistoryCell for RequestUserInputResultCell {
             lines.extend(wrap_with_prefix(
                 &summary,
                 width,
-                "  ↳ ".cyan().dim(),
+                "  ↳ ".set_style(theme::accent().add_modifier(Modifier::DIM)),
                 "    ".dim(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                theme::accent().add_modifier(Modifier::DIM),
             ));
         }
 
@@ -2003,7 +2022,7 @@ impl HistoryCell for PlanUpdateCell {
         let render_step = |status: &StepStatus, text: &str| -> Vec<Line<'static>> {
             let (box_str, step_style) = match status {
                 StepStatus::Completed => ("✔ ", Style::default().crossed_out().dim()),
-                StepStatus::InProgress => ("□ ", Style::default().cyan().bold()),
+                StepStatus::InProgress => ("□ ", theme::accent().add_modifier(Modifier::BOLD)),
                 StepStatus::Pending => ("□ ", Style::default().dim()),
             };
             let wrap_width = (width as usize)
@@ -2061,7 +2080,9 @@ pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Failure title
-    lines.push(Line::from("✘ Failed to apply patch".magenta().bold()));
+    lines.push(Line::from(
+        "✘ Failed to apply patch".set_style(theme::current().brand_bold()),
+    ));
 
     if !stderr.trim().is_empty() {
         let output = output_lines(
@@ -2280,9 +2301,9 @@ fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
         .unwrap_or_default();
 
     let invocation_spans = vec![
-        invocation.server.clone().cyan(),
+        Span::from(invocation.server.clone()).set_style(theme::accent()),
         ".".into(),
-        invocation.tool.cyan(),
+        Span::from(invocation.tool).set_style(theme::accent()),
         "(".into(),
         args_str.dim(),
         ")".into(),
@@ -2619,7 +2640,11 @@ mod tests {
             "echo something really long to ensure wrapping happens".dim(),
             " this time".bold(),
         ]);
-        let cell = PrefixedWrappedHistoryCell::new(summary, "✔ ".green(), "  ");
+        let cell = PrefixedWrappedHistoryCell::new(
+            summary,
+            Span::from("✔ ").set_style(theme::success()),
+            "  ",
+        );
         let rendered = render_lines(&cell.display_lines(24));
         assert_eq!(
             rendered,

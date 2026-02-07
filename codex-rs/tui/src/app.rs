@@ -29,6 +29,7 @@ use crate::pager_overlay::Overlay;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
 use crate::resume_picker::SessionSelection;
+use crate::theme;
 use crate::tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
@@ -76,6 +77,7 @@ use color_eyre::eyre::WrapErr;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -1331,7 +1333,10 @@ impl App {
                 if let Some(summary) = summary {
                     let mut lines: Vec<Line<'static>> = vec![summary.usage_line.clone().into()];
                     if let Some(command) = summary.resume_command {
-                        let spans = vec!["To continue this session, run ".into(), command.cyan()];
+                        let spans = vec![
+                            "To continue this session, run ".into(),
+                            command.set_style(theme::accent()),
+                        ];
                         lines.push(spans.into());
                     }
                     self.chat_widget.add_plain_history_lines(lines);
@@ -1411,7 +1416,7 @@ impl App {
                                     if let Some(command) = summary.resume_command {
                                         let spans = vec![
                                             "To continue this session, run ".into(),
-                                            command.cyan(),
+                                            command.set_style(theme::accent()),
                                         ];
                                         lines.push(spans.into());
                                     }
@@ -1443,7 +1448,7 @@ impl App {
                     self.chat_widget.thread_name(),
                 );
                 self.chat_widget
-                    .add_plain_history_lines(vec!["/fork".magenta().into()]);
+                    .add_plain_history_lines(vec!["/fork".set_style(theme::brand()).into()]);
                 if let Some(path) = self.chat_widget.rollout_path() {
                     // Fresh threads expose a precomputed path, but the file is
                     // materialized lazily on first user message.
@@ -1471,7 +1476,7 @@ impl App {
                                     if let Some(command) = summary.resume_command {
                                         let spans = vec![
                                             "To continue this session, run ".into(),
-                                            command.cyan(),
+                                            command.set_style(theme::accent()),
                                         ];
                                         lines.push(spans.into());
                                     }

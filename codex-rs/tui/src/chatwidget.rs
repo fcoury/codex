@@ -42,6 +42,7 @@ use crate::status::RateLimitWindowDisplay;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::text_formatting::proper_join;
+use crate::theme;
 use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_backend_client::Client as BackendClient;
@@ -135,9 +136,9 @@ use crossterm::event::KeyModifiers;
 use rand::Rng;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -1073,9 +1074,9 @@ impl ChatWidget {
                 let line: Line<'static> = vec![
                     "• ".dim(),
                     "Thread forked from ".into(),
-                    name.cyan(),
+                    name.set_style(theme::accent()),
                     " (".into(),
-                    forked_from_id_text.clone().cyan(),
+                    forked_from_id_text.clone().set_style(theme::accent()),
                     ")".into(),
                 ]
                 .into();
@@ -1087,7 +1088,7 @@ impl ChatWidget {
                 let line: Line<'static> = vec![
                     "• ".dim(),
                     "Thread forked from ".into(),
-                    forked_from_id_text.clone().cyan(),
+                    forked_from_id_text.clone().set_style(theme::accent()),
                 ]
                 .into();
                 app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
@@ -4745,7 +4746,7 @@ impl ChatWidget {
         let warning = format!(
             "Warning: OPENAI_BASE_URL is set to {base_url}. Selecting models may not be supported or work properly."
         );
-        Some(Line::from(warning.red()))
+        Some(Line::from(warning.set_style(theme::error())))
     }
 
     fn custom_openai_base_url(&self) -> Option<String> {
@@ -5281,7 +5282,7 @@ impl ChatWidget {
         let footer_note = show_elevate_sandbox_hint.then(|| {
             vec![
                 "The non-elevated sandbox protects your files and prevents network access under most circumstances. However, it carries greater risk if prompt injected. To upgrade to the elevated sandbox, run ".dim(),
-                "/setup-elevated-sandbox".cyan(),
+                "/setup-elevated-sandbox".set_style(theme::accent()),
                 ".".dim(),
             ]
             .into()
@@ -5403,7 +5404,7 @@ impl ChatWidget {
             "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. "
                 .into(),
             "Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior."
-                .fg(Color::Red),
+                .set_style(theme::error()),
         ]);
         header_children.push(Box::new(title_line));
         header_children.push(Box::new(
@@ -5489,7 +5490,7 @@ impl ChatWidget {
                 "We couldn't complete the world-writable scan, so protections cannot be verified. "
                     .into(),
                 format!("The Windows sandbox cannot guarantee protection in {mode_label}.")
-                    .fg(Color::Red),
+                    .set_style(theme::error()),
             ])
         } else {
             Line::from(vec![
@@ -6290,9 +6291,9 @@ impl ChatWidget {
         let line = vec![
             "• ".into(),
             "Thread renamed to ".into(),
-            name.cyan(),
+            name.set_style(theme::accent()),
             ", to resume this thread run ".into(),
-            resume_cmd.cyan(),
+            resume_cmd.set_style(theme::accent()),
         ];
         PlainHistoryCell::new(vec![line.into()])
     }

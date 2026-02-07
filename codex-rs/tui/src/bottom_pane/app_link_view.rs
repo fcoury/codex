@@ -4,6 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Block;
@@ -17,6 +18,7 @@ use crate::key_hint;
 use crate::render::Insets;
 use crate::render::RectExt as _;
 use crate::style::user_message_style;
+use crate::theme;
 use crate::wrapping::word_wrap_lines;
 
 pub(crate) struct AppLinkView {
@@ -92,7 +94,9 @@ impl AppLinkView {
         }
 
         lines.push(Line::from(vec!["Open:".dim()]));
-        let url_line = Line::from(vec![self.url.clone().cyan().underlined()]);
+        let url_line = Line::from(vec![
+            self.url.clone().set_style(theme::current().markdown_link),
+        ]);
         lines.extend(word_wrap_lines(vec![url_line], usable_width));
 
         lines

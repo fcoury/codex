@@ -22,6 +22,7 @@ use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableExt as _;
 use crate::selection_list::selection_option_row;
+use crate::theme;
 
 use super::onboarding_screen::StepState;
 pub(crate) struct TrustDirectoryWidget {
@@ -97,7 +98,7 @@ impl WidgetRef for &TrustDirectoryWidget {
         if let Some(error) = &self.error {
             column.push(
                 Paragraph::new(error.to_string())
-                    .red()
+                    .style(theme::error())
                     .wrap(Wrap { trim: true })
                     .inset(Insets::tlbr(0, 2, 0, 0)),
             );

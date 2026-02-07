@@ -1,4 +1,5 @@
 use crate::render::line_utils::line_to_static;
+use crate::theme;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use pulldown_cmark::CodeBlockKind;
@@ -10,6 +11,7 @@ use pulldown_cmark::Parser;
 use pulldown_cmark::Tag;
 use pulldown_cmark::TagEnd;
 use ratatui::style::Style;
+use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::text::Text;
@@ -33,7 +35,7 @@ struct MarkdownStyles {
 
 impl Default for MarkdownStyles {
     fn default() -> Self {
-        use ratatui::style::Stylize;
+        let theme = theme::current();
 
         Self {
             h1: Style::new().bold().underlined(),
@@ -42,14 +44,14 @@ impl Default for MarkdownStyles {
             h4: Style::new().italic(),
             h5: Style::new().italic(),
             h6: Style::new().italic(),
-            code: Style::new().cyan(),
+            code: theme.markdown_code,
             emphasis: Style::new().italic(),
             strong: Style::new().bold(),
             strikethrough: Style::new().crossed_out(),
-            ordered_list_marker: Style::new().light_blue(),
+            ordered_list_marker: theme.info_style(),
             unordered_list_marker: Style::new(),
-            link: Style::new().cyan().underlined(),
-            blockquote: Style::new().green(),
+            link: theme.markdown_link,
+            blockquote: theme.markdown_blockquote,
         }
     }
 }

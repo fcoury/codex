@@ -1,6 +1,7 @@
 use crate::history_cell::PlainHistoryCell;
 use crate::render::line_utils::prefix_lines;
 use crate::text_formatting::truncate_text;
+use crate::theme;
 use codex_core::protocol::AgentStatus;
 use codex_core::protocol::CollabAgentInteractionEndEvent;
 use codex_core::protocol::CollabAgentSpawnEndEvent;
@@ -10,6 +11,8 @@ use codex_core::protocol::CollabResumeEndEvent;
 use codex_core::protocol::CollabWaitingBeginEvent;
 use codex_core::protocol::CollabWaitingEndEvent;
 use codex_protocol::ThreadId;
+use ratatui::style::Modifier;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -148,11 +151,14 @@ fn status_line(status: &AgentStatus) -> Line<'static> {
 fn status_span(status: &AgentStatus) -> Span<'static> {
     match status {
         AgentStatus::PendingInit => Span::from("pending init").dim(),
-        AgentStatus::Running => Span::from("running").cyan().bold(),
-        AgentStatus::Completed(_) => Span::from("completed").green(),
-        AgentStatus::Errored(_) => Span::from("errored").red(),
+        AgentStatus::Running => Span::from("running")
+            .set_style(theme::current().accent_style().add_modifier(Modifier::BOLD)),
+        AgentStatus::Completed(_) => {
+            Span::from("completed").set_style(theme::current().success_style())
+        }
+        AgentStatus::Errored(_) => Span::from("errored").set_style(theme::current().error_style()),
         AgentStatus::Shutdown => Span::from("shutdown").dim(),
-        AgentStatus::NotFound => Span::from("not found").red(),
+        AgentStatus::NotFound => Span::from("not found").set_style(theme::current().error_style()),
     }
 }
 
@@ -209,31 +215,24 @@ fn wait_complete_lines(statuses: &HashMap<ThreadId, AgentStatus>) -> Vec<Line<'s
         "pending init",
         ratatui::prelude::Stylize::dim,
     );
-    push_status_count(&mut summary, running, "running", |span| span.cyan().bold());
-    push_status_count(
-        &mut summary,
-        completed,
-        "completed",
-        ratatui::prelude::Stylize::green,
-    );
-    push_status_count(
-        &mut summary,
-        errored,
-        "errored",
-        ratatui::prelude::Stylize::red,
-    );
+    push_status_count(&mut summary, running, "running", |span| {
+        span.set_style(theme::current().accent_style().add_modifier(Modifier::BOLD))
+    });
+    push_status_count(&mut summary, completed, "completed", |span| {
+        span.set_style(theme::current().success_style())
+    });
+    push_status_count(&mut summary, errored, "errored", |span| {
+        span.set_style(theme::current().error_style())
+    });
     push_status_count(
         &mut summary,
         shutdown,
         "shutdown",
         ratatui::prelude::Stylize::dim,
     );
-    push_status_count(
-        &mut summary,
-        not_found,
-        "not found",
-        ratatui::prelude::Stylize::red,
-    );
+    push_status_count(&mut summary, not_found, "not found", |span| {
+        span.set_style(theme::current().error_style())
+    });
 
     let mut entries: Vec<(String, &AgentStatus)> = statuses
         .iter()

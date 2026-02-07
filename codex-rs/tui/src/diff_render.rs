@@ -1,9 +1,9 @@
 use diffy::Hunk;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line as RtLine;
 use ratatui::text::Span as RtSpan;
@@ -18,6 +18,7 @@ use crate::render::line_utils::prefix_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::InsetRenderable;
 use crate::render::renderable::Renderable;
+use crate::theme;
 use codex_core::git_info::get_git_repo_root;
 use codex_core::protocol::FileChange;
 
@@ -126,9 +127,9 @@ fn collect_rows(changes: &HashMap<PathBuf, FileChange>) -> Vec<Row> {
 fn render_line_count_summary(added: usize, removed: usize) -> Vec<RtSpan<'static>> {
     let mut spans = Vec::new();
     spans.push("(".into());
-    spans.push(format!("+{added}").green());
+    spans.push(format!("+{added}").set_style(theme::current().diff_added));
     spans.push(" ".into());
-    spans.push(format!("-{removed}").red());
+    spans.push(format!("-{removed}").set_style(theme::current().diff_removed));
     spans.push(")".into());
     spans
 }
@@ -420,11 +421,11 @@ fn style_context() -> Style {
 }
 
 fn style_add() -> Style {
-    Style::default().fg(Color::Green)
+    theme::current().diff_added
 }
 
 fn style_del() -> Style {
-    Style::default().fg(Color::Red)
+    theme::current().diff_removed
 }
 
 #[cfg(test)]

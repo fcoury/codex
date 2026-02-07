@@ -1,5 +1,6 @@
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RowRenderable;
+use crate::theme;
 use ratatui::style::Style;
 use ratatui::style::Styled as _;
 use ratatui::style::Stylize as _;
@@ -27,7 +28,7 @@ pub(crate) fn selection_option_row_with_dim(
         format!("  {}. ", index + 1)
     };
     let style = if is_selected {
-        Style::default().cyan()
+        theme::accent()
     } else if dim {
         Style::default().dim()
     } else {

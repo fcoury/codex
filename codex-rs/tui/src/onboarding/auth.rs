@@ -18,9 +18,9 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
-use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Block;
@@ -38,6 +38,7 @@ use crate::LoginStatus;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
 use crate::shimmer::shimmer_spans;
+use crate::theme;
 use crate::tui::FrameRequester;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -278,8 +279,9 @@ impl AuthModeWidget {
 
             let line1 = if is_selected {
                 Line::from(vec![
-                    format!("{caret} {index}. ", index = idx + 1).cyan().dim(),
-                    text.to_string().cyan(),
+                    format!("{caret} {index}. ", index = idx + 1)
+                        .set_style(theme::accent().add_modifier(Modifier::DIM)),
+                    text.to_string().set_style(theme::accent()),
                 ])
             } else {
                 format!("  {index}. {text}", index = idx + 1).into()
@@ -287,8 +289,7 @@ impl AuthModeWidget {
 
             let line2 = if is_selected {
                 Line::from(format!("     {description}"))
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::DIM)
+                    .set_style(theme::accent().add_modifier(Modifier::DIM))
             } else {
                 Line::from(format!("     {description}"))
                     .style(Style::default().add_modifier(Modifier::DIM))
@@ -349,7 +350,7 @@ impl AuthModeWidget {
         );
         if let Some(err) = &self.error {
             lines.push("".into());
-            lines.push(err.as_str().red().into());
+            lines.push(err.as_str().set_style(theme::error()).into());
         }
 
         Paragraph::new(lines)
@@ -377,12 +378,15 @@ impl AuthModeWidget {
             lines.push("".into());
             lines.push(Line::from(vec![
                 "  ".into(),
-                state.auth_url.as_str().cyan().underlined(),
+                state
+                    .auth_url
+                    .as_str()
+                    .set_style(theme::current().markdown_link),
             ]));
             lines.push("".into());
             lines.push(Line::from(vec![
                 "  On a remote or headless machine? Press Esc and choose ".into(),
-                "Sign in with Device Code".cyan(),
+                "Sign in with Device Code".set_style(theme::accent()),
                 ".".into(),
             ]));
             lines.push("".into());
@@ -396,7 +400,9 @@ impl AuthModeWidget {
 
     fn render_chatgpt_success_message(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
-            "✓ Signed in with your ChatGPT account".fg(Color::Green).into(),
+            "✓ Signed in with your ChatGPT account"
+                .set_style(theme::success())
+                .into(),
             "".into(),
             "  Before you start:".into(),
             "".into(),
@@ -417,7 +423,7 @@ impl AuthModeWidget {
             ])
             .dim(),
             "".into(),
-            "  Press Enter to continue".fg(Color::Cyan).into(),
+            "  Press Enter to continue".set_style(theme::accent()).into(),
         ];
 
         Paragraph::new(lines)
@@ -428,7 +434,7 @@ impl AuthModeWidget {
     fn render_chatgpt_success(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
             "✓ Signed in with your ChatGPT account"
-                .fg(Color::Green)
+                .set_style(theme::success())
                 .into(),
         ];
 
@@ -439,7 +445,7 @@ impl AuthModeWidget {
 
     fn render_api_key_configured(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
-            "✓ API key configured".fg(Color::Green).into(),
+            "✓ API key configured".set_style(theme::success()).into(),
             "".into(),
             "  Codex will use usage-based billing with your API key.".into(),
         ];
@@ -491,7 +497,7 @@ impl AuthModeWidget {
                     .title("API key")
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(theme::accent()),
             )
             .render(input_area, buf);
 
@@ -501,7 +507,7 @@ impl AuthModeWidget {
         ];
         if let Some(error) = &self.error {
             footer_lines.push("".into());
-            footer_lines.push(error.as_str().red().into());
+            footer_lines.push(error.as_str().set_style(theme::error()).into());
         }
         Paragraph::new(footer_lines)
             .wrap(Wrap { trim: false })

@@ -1,4 +1,5 @@
 use crate::history_cell::PlainHistoryCell;
+use crate::theme;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_core::config::Config;
 use codex_core::config_loader::ConfigLayerStack;
@@ -8,6 +9,7 @@ use codex_core::config_loader::RequirementSource;
 use codex_core::config_loader::ResidencyRequirement;
 use codex_core::config_loader::SandboxModeRequirement;
 use codex_core::config_loader::WebSearchModeRequirement;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 
@@ -16,7 +18,7 @@ pub(crate) fn new_debug_config_output(config: &Config) -> PlainHistoryCell {
 }
 
 fn render_debug_config_lines(stack: &ConfigLayerStack) -> Vec<Line<'static>> {
-    let mut lines = vec!["/debug-config".magenta().into(), "".into()];
+    let mut lines = vec!["/debug-config".set_style(theme::brand()).into(), "".into()];
 
     lines.push(
         "Config layer stack (lowest precedence first):"

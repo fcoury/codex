@@ -26,9 +26,9 @@ use ratatui::layout::Layout;
 use ratatui::layout::Margin;
 use ratatui::layout::Rect;
 use ratatui::prelude::*;
-use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
+use ratatui::style::Styled;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
@@ -36,6 +36,8 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
 use std::time::Duration;
+
+use crate::theme;
 
 #[derive(Clone)]
 struct ProviderOption {
@@ -110,7 +112,7 @@ impl OssSelectionWidget<'_> {
 
         let mut contents: Vec<Line> = vec![
             Line::from(vec![
-                "? ".fg(Color::Blue),
+                "? ".set_style(theme::info()),
                 "Select an open-source provider".bold(),
             ]),
             Line::from(""),
@@ -120,10 +122,10 @@ impl OssSelectionWidget<'_> {
 
         // Add status indicators for each provider
         for provider in &providers {
-            let (status_symbol, status_color) = get_status_symbol_and_color(&provider.status);
+            let (status_symbol, status_style) = get_status_symbol_and_style(&provider.status);
             contents.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(status_symbol, Style::default().fg(status_color)),
+                Span::styled(status_symbol, status_style),
                 Span::raw(format!(" {} ", provider.name)),
             ]));
         }
@@ -243,9 +245,12 @@ impl WidgetRef for &OssSelectionWidget<'_> {
             .enumerate()
             .map(|(idx, opt)| {
                 let style = if idx == self.selected_option {
-                    Style::new().bg(Color::Cyan).fg(Color::Black)
+                    let bg = theme::current()
+                        .selection_bg
+                        .unwrap_or(theme::current().accent);
+                    Style::new().bg(bg)
                 } else {
-                    Style::new().bg(Color::DarkGray)
+                    Style::new().dim()
                 };
                 opt.label.clone().alignment(Alignment::Center).style(style)
             })
@@ -274,16 +279,16 @@ impl WidgetRef for &OssSelectionWidget<'_> {
         }
 
         Line::from(self.select_options[self.selected_option].description)
-            .style(Style::new().italic().fg(Color::DarkGray))
+            .style(Style::new().italic().dim())
             .render(description_area.inner(Margin::new(1, 0)), buf);
     }
 }
 
-fn get_status_symbol_and_color(status: &ProviderStatus) -> (&'static str, Color) {
+fn get_status_symbol_and_style(status: &ProviderStatus) -> (&'static str, Style) {
     match status {
-        ProviderStatus::Running => ("●", Color::Green),
-        ProviderStatus::NotRunning => ("○", Color::Red),
-        ProviderStatus::Unknown => ("?", Color::Yellow),
+        ProviderStatus::Running => ("●", theme::success()),
+        ProviderStatus::NotRunning => ("○", theme::error()),
+        ProviderStatus::Unknown => ("?", theme::info()),
     }
 }
 

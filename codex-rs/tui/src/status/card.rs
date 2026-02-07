@@ -2,6 +2,7 @@ use crate::history_cell::CompositeHistoryCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::with_border_with_inner_width;
+use crate::theme;
 use crate::version::CODEX_CLI_VERSION;
 use chrono::DateTime;
 use chrono::Local;
@@ -16,6 +17,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
 use codex_protocol::openai_models::ReasoningEffort;
 use ratatui::prelude::*;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -91,7 +93,7 @@ pub(crate) fn new_status_output(
     collaboration_mode: Option<&str>,
     reasoning_effort_override: Option<Option<ReasoningEffort>>,
 ) -> CompositeHistoryCell {
-    let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
+    let command = PlainHistoryCell::new(vec!["/status".set_style(theme::brand()).into()]);
     let card = StatusHistoryCell::new(
         config,
         auth_manager,
@@ -413,14 +415,13 @@ impl HistoryCell for StatusHistoryCell {
         let value_width = formatter.value_width(available_inner_width);
 
         let note_first_line = Line::from(vec![
-            Span::from("Visit ").cyan(),
-            "https://chatgpt.com/codex/settings/usage"
-                .cyan()
-                .underlined(),
-            Span::from(" for up-to-date").cyan(),
+            Span::from("Visit ").set_style(theme::accent()),
+            Span::from("https://chatgpt.com/codex/settings/usage")
+                .set_style(theme::current().markdown_link),
+            Span::from(" for up-to-date").set_style(theme::accent()),
         ]);
         let note_second_line = Line::from(vec![
-            Span::from("information on rate limits and credits").cyan(),
+            Span::from("information on rate limits and credits").set_style(theme::accent()),
         ]);
         let note_lines = word_wrap_lines(
             [note_first_line, note_second_line],

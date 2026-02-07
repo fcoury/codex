@@ -21,6 +21,8 @@ use crossterm::event::KeyEventKind;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
+use ratatui::style::Styled;
 use ratatui::style::Stylize as _;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -32,6 +34,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::diff_render::display_path_for;
 use crate::key_hint;
 use crate::text_formatting::truncate_text;
+use crate::theme;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
@@ -872,11 +875,14 @@ fn draw_picker(tui: &mut Tui, state: &PickerState) -> std::io::Result<()> {
 
         // Header
         let header_line: Line = vec![
-            state.action.title().bold().cyan(),
+            state
+                .action
+                .title()
+                .set_style(theme::accent().add_modifier(Modifier::BOLD)),
             "  ".into(),
             "Sort:".dim(),
             " ".into(),
-            sort_key_label(state.sort_key).magenta(),
+            sort_key_label(state.sort_key).set_style(theme::brand()),
         ]
         .into();
         frame.render_widget_ref(header_line, header);
@@ -979,7 +985,9 @@ fn render_list(
                 .dim(),
             )
         } else {
-            Some(Span::from(format!("{branch_label:<max_branch_width$}")).cyan())
+            Some(
+                Span::from(format!("{branch_label:<max_branch_width$}")).set_style(theme::accent()),
+            )
         };
         let cwd_span = if !visibility.show_cwd {
             None
@@ -1797,11 +1805,12 @@ mod tests {
 
             frame.render_widget_ref(
                 Line::from(vec![
-                    "Resume a previous session".bold().cyan(),
+                    "Resume a previous session"
+                        .set_style(theme::accent().add_modifier(Modifier::BOLD)),
                     "  ".into(),
                     "Sort:".dim(),
                     " ".into(),
-                    "Created at".magenta(),
+                    "Created at".set_style(theme::brand()),
                 ]),
                 header,
             );

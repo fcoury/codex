@@ -2,8 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 // Note: Table-based layout previously used Constraint; the manual renderer
 // below no longer requires it.
-use ratatui::style::Color;
-use ratatui::style::Style;
+use ratatui::style::Modifier;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -16,6 +15,7 @@ use crate::key_hint::KeyBinding;
 use crate::render::Insets;
 use crate::render::RectExt as _;
 use crate::style::user_message_style;
+use crate::theme;
 
 use super::scroll_state::ScrollState;
 
@@ -407,7 +407,7 @@ fn render_rows_inner(
             // Match previous behavior: cyan + bold for the selected row.
             // Reset the style first to avoid inheriting dim from keyboard shortcuts.
             full_line.spans.iter_mut().for_each(|span| {
-                span.style = Style::default().fg(Color::Cyan).bold();
+                span.style = theme::accent().add_modifier(Modifier::BOLD);
             });
         }
         if row.is_disabled {
@@ -579,7 +579,7 @@ pub(crate) fn render_rows_single_line(
         let mut full_line = build_full_line(row, desc_col);
         if Some(i) == state.selected_idx && !row.is_disabled {
             full_line.spans.iter_mut().for_each(|span| {
-                span.style = Style::default().fg(Color::Cyan).bold();
+                span.style = theme::accent().add_modifier(Modifier::BOLD);
             });
         }
         if row.is_disabled {
