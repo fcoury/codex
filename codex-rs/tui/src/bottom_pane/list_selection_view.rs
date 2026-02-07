@@ -672,10 +672,12 @@ mod tests {
     use super::*;
     use crate::app_event::AppEvent;
     use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+    use crate::theme;
     use crossterm::event::KeyCode;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
+    use ratatui::style::Styled;
     use tokio::sync::mpsc::unbounded_channel;
 
     fn make_selection_view(subtitle: Option<&str>) -> ListSelectionView {
@@ -813,7 +815,7 @@ mod tests {
         }];
         let footer_note = Line::from(vec![
             "Note: ".dim(),
-            "Use /setup-elevated-sandbox".cyan(),
+            "Use /setup-elevated-sandbox".set_style(theme::accent()),
             " to allow network access.".dim(),
         ]);
         let view = ListSelectionView::new(

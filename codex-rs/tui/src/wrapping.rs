@@ -398,10 +398,10 @@ fn slice_line_spans<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme;
     use itertools::Itertools as _;
     use pretty_assertions::assert_eq;
-    use ratatui::style::Color;
-    use ratatui::style::Stylize;
+    use ratatui::style::Styled;
     use std::string::ToString;
 
     fn concat_line(line: &Line) -> String {
@@ -430,13 +430,13 @@ mod tests {
 
     #[test]
     fn simple_styled_wrap_preserves_styles() {
-        let line = Line::from(vec!["hello ".red(), "world".into()]);
+        let line = Line::from(vec!["hello ".set_style(theme::error()), "world".into()]);
         let out = word_wrap_line(&line, 6);
         assert_eq!(out.len(), 2);
         // First line should carry the red style
         assert_eq!(concat_line(&out[0]), "hello");
         assert_eq!(out[0].spans.len(), 1);
-        assert_eq!(out[0].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(out[0].spans[0].style.fg, Some(theme::current().error));
         // Second line is unstyled
         assert_eq!(concat_line(&out[1]), "world");
         assert_eq!(out[1].spans.len(), 1);
@@ -540,14 +540,13 @@ mod tests {
 
     #[test]
     fn styled_split_within_span_preserves_style() {
-        use ratatui::style::Stylize;
-        let line = Line::from(vec!["abcd".red()]);
+        let line = Line::from(vec!["abcd".set_style(theme::error())]);
         let out = word_wrap_line(&line, 2);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].spans.len(), 1);
         assert_eq!(out[1].spans.len(), 1);
-        assert_eq!(out[0].spans[0].style.fg, Some(Color::Red));
-        assert_eq!(out[1].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(out[0].spans[0].style.fg, Some(theme::current().error));
+        assert_eq!(out[1].spans[0].style.fg, Some(theme::current().error));
         assert_eq!(concat_line(&out[0]), "ab");
         assert_eq!(concat_line(&out[1]), "cd");
     }

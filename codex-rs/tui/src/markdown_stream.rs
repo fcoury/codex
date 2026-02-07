@@ -118,7 +118,7 @@ pub(crate) fn simulate_stream_markdown_for_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
+    use crate::theme;
 
     #[tokio::test]
     async fn no_commit_until_newline() {
@@ -146,7 +146,7 @@ mod tests {
         let l = &out[0];
         assert_eq!(
             l.style.fg,
-            Some(Color::Green),
+            Some(theme::current().success),
             "expected blockquote line fg green, got {:?}",
             l.style.fg
         );
@@ -171,16 +171,16 @@ mod tests {
             })
             .collect();
         assert_eq!(non_blank.len(), 2);
-        assert_eq!(non_blank[0].style.fg, Some(Color::Green));
-        assert_eq!(non_blank[1].style.fg, Some(Color::Green));
+        assert_eq!(non_blank[0].style.fg, Some(theme::current().success));
+        assert_eq!(non_blank[1].style.fg, Some(theme::current().success));
     }
 
     #[tokio::test]
     async fn e2e_stream_blockquote_with_list_items_is_green() {
         let out = super::simulate_stream_markdown_for_tests(&["> - item 1\n> - item 2\n"], true);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].style.fg, Some(Color::Green));
-        assert_eq!(out[1].style.fg, Some(Color::Green));
+        assert_eq!(out[0].style.fg, Some(theme::current().success));
+        assert_eq!(out[1].style.fg, Some(theme::current().success));
     }
 
     #[tokio::test]
@@ -207,7 +207,7 @@ mod tests {
         let has_light_blue = line
             .spans
             .iter()
-            .any(|s| s.style.fg == Some(ratatui::style::Color::LightBlue));
+            .any(|s| s.style.fg == Some(theme::current().info));
         assert!(
             has_light_blue,
             "expected an ordered-list marker span with light blue fg on: {line:?}"
@@ -241,7 +241,7 @@ mod tests {
         for (i, l) in non_blank.iter().enumerate() {
             assert_eq!(
                 l.spans[0].style.fg,
-                Some(Color::Green),
+                Some(theme::current().success),
                 "wrapped line {} should preserve green style, got {:?}",
                 i,
                 l.spans[0].style.fg
@@ -452,7 +452,7 @@ mod tests {
         let marker_span = &line.spans[0];
         assert_eq!(
             marker_span.style.fg,
-            Some(Color::LightBlue),
+            Some(theme::current().info),
             "expected LightBlue 3rd-level ordered marker, got {:?}",
             marker_span.style.fg
         );

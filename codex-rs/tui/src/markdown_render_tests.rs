@@ -1,10 +1,12 @@
 use pretty_assertions::assert_eq;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::text::Text;
 
 use crate::markdown_render::render_markdown_text;
+use crate::theme;
 use insta::assert_snapshot;
 
 #[test]
@@ -59,7 +61,7 @@ fn headings() {
 #[test]
 fn blockquote_single() {
     let text = render_markdown_text("> Blockquote");
-    let expected = Text::from(Line::from_iter(["> ", "Blockquote"]).green());
+    let expected = Text::from(Line::from_iter(["> ", "Blockquote"]).set_style(theme::current().markdown_blockquote));
     assert_eq!(text, expected);
 }
 
@@ -90,9 +92,9 @@ fn blockquote_soft_break() {
 fn blockquote_multiple_with_break() {
     let text = render_markdown_text("> Blockquote 1\n\n> Blockquote 2\n");
     let expected = Text::from_iter([
-        Line::from_iter(["> ", "Blockquote 1"]).green(),
+        Line::from_iter(["> ", "Blockquote 1"]).set_style(theme::current().markdown_blockquote),
         Line::default(),
-        Line::from_iter(["> ", "Blockquote 2"]).green(),
+        Line::from_iter(["> ", "Blockquote 2"]).set_style(theme::current().markdown_blockquote),
     ]);
     assert_eq!(text, expected);
 }
@@ -102,11 +104,11 @@ fn blockquote_three_paragraphs_short_lines() {
     let md = "> one\n>\n> two\n>\n> three\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["> ", "one"]).green(),
-        Line::from_iter(["> "]).green(),
-        Line::from_iter(["> ", "two"]).green(),
-        Line::from_iter(["> "]).green(),
-        Line::from_iter(["> ", "three"]).green(),
+        Line::from_iter(["> ", "one"]).set_style(theme::current().markdown_blockquote),
+        Line::from_iter(["> "]).set_style(theme::current().markdown_blockquote),
+        Line::from_iter(["> ", "two"]).set_style(theme::current().markdown_blockquote),
+        Line::from_iter(["> "]).set_style(theme::current().markdown_blockquote),
+        Line::from_iter(["> ", "three"]).set_style(theme::current().markdown_blockquote),
     ]);
     assert_eq!(text, expected);
 }
@@ -116,9 +118,9 @@ fn blockquote_nested_two_levels() {
     let md = "> Level 1\n>> Level 2\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["> ", "Level 1"]).green(),
-        Line::from_iter(["> "]).green(),
-        Line::from_iter(["> ", "> ", "Level 2"]).green(),
+        Line::from_iter(["> ", "Level 1"]).set_style(theme::current().markdown_blockquote),
+        Line::from_iter(["> "]).set_style(theme::current().markdown_blockquote),
+        Line::from_iter(["> ", "> ", "Level 2"]).set_style(theme::current().markdown_blockquote),
     ]);
     assert_eq!(text, expected);
 }
@@ -128,8 +130,8 @@ fn blockquote_with_list_items() {
     let md = "> - item 1\n> - item 2\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["> ", "- ", "item 1"]).green(),
-        Line::from_iter(["> ", "- ", "item 2"]).green(),
+        Line::from_iter(["> ", "- ", "item 1"]).set_style(theme::current().markdown_blockquote),
+        Line::from_iter(["> ", "- ", "item 2"]).set_style(theme::current().markdown_blockquote),
     ]);
     assert_eq!(text, expected);
 }
@@ -141,16 +143,16 @@ fn blockquote_with_ordered_list() {
     let expected = Text::from_iter([
         Line::from_iter(vec![
             Span::from("> "),
-            "1. ".light_blue(),
+            "1. ".set_style(theme::info()),
             Span::from("first"),
         ])
-        .green(),
+        .set_style(theme::current().markdown_blockquote),
         Line::from_iter(vec![
             Span::from("> "),
-            "2. ".light_blue(),
+            "2. ".set_style(theme::info()),
             Span::from("second"),
         ])
-        .green(),
+        .set_style(theme::current().markdown_blockquote),
     ]);
     assert_eq!(text, expected);
 }
@@ -160,8 +162,8 @@ fn blockquote_list_then_nested_blockquote() {
     let md = "> - parent\n>   > child\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["> ", "- ", "parent"]).green(),
-        Line::from_iter(["> ", "  ", "> ", "child"]).green(),
+        Line::from_iter(["> ", "- ", "parent"]).set_style(theme::current().markdown_blockquote),
+        Line::from_iter(["> ", "  ", "> ", "child"]).set_style(theme::current().markdown_blockquote),
     ]);
     assert_eq!(text, expected);
 }
@@ -371,9 +373,9 @@ fn blockquote_heading_inherits_heading_style() {
                 "# ".bold().underlined(),
                 "test header".bold().underlined(),
             ])
-            .green(),
-            Line::from_iter(["> "]).green(),
-            Line::from_iter(["> ", "in blockquote"]).green(),
+            .set_style(theme::current().markdown_blockquote),
+            Line::from_iter(["> "]).set_style(theme::current().markdown_blockquote),
+            Line::from_iter(["> ", "in blockquote"]).set_style(theme::current().markdown_blockquote),
         ]
     );
 }
@@ -476,8 +478,8 @@ fn list_unordered_multiple() {
 fn list_ordered() {
     let text = render_markdown_text("1. List item 1\n2. List item 2\n");
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "List item 1".into()]),
-        Line::from_iter(["2. ".light_blue(), "List item 2".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "List item 1".into()]),
+        Line::from_iter(["2. ".set_style(theme::info()), "List item 2".into()]),
     ]);
     assert_eq!(text, expected);
 }
@@ -496,8 +498,8 @@ fn list_nested() {
 fn list_ordered_custom_start() {
     let text = render_markdown_text("3. First\n4. Second\n");
     let expected = Text::from_iter([
-        Line::from_iter(["3. ".light_blue(), "First".into()]),
-        Line::from_iter(["4. ".light_blue(), "Second".into()]),
+        Line::from_iter(["3. ".set_style(theme::info()), "First".into()]),
+        Line::from_iter(["4. ".set_style(theme::info()), "Second".into()]),
     ]);
     assert_eq!(text, expected);
 }
@@ -507,10 +509,10 @@ fn nested_unordered_in_ordered() {
     let md = "1. Outer\n    - Inner A\n    - Inner B\n2. Next\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "Outer".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "Outer".into()]),
         Line::from_iter(["    - ", "Inner A"]),
         Line::from_iter(["    - ", "Inner B"]),
-        Line::from_iter(["2. ".light_blue(), "Next".into()]),
+        Line::from_iter(["2. ".set_style(theme::info()), "Next".into()]),
     ]);
     assert_eq!(text, expected);
 }
@@ -521,8 +523,8 @@ fn nested_ordered_in_unordered() {
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
         Line::from_iter(["- ", "Outer"]),
-        Line::from_iter(["    1. ".light_blue(), "One".into()]),
-        Line::from_iter(["    2. ".light_blue(), "Two".into()]),
+        Line::from_iter(["    1. ".set_style(theme::info()), "One".into()]),
+        Line::from_iter(["    2. ".set_style(theme::info()), "Two".into()]),
         Line::from_iter(["- ", "Last"]),
     ]);
     assert_eq!(text, expected);
@@ -533,10 +535,10 @@ fn loose_list_item_multiple_paragraphs() {
     let md = "1. First paragraph\n\n   Second paragraph of same item\n\n2. Next item\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "First paragraph".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "First paragraph".into()]),
         Line::default(),
         Line::from_iter(["   ", "Second paragraph of same item"]),
-        Line::from_iter(["2. ".light_blue(), "Next item".into()]),
+        Line::from_iter(["2. ".set_style(theme::info()), "Next item".into()]),
     ]);
     assert_eq!(text, expected);
 }
@@ -557,10 +559,10 @@ fn deeply_nested_mixed_three_levels() {
     let md = "1. A\n    - B\n        1. C\n2. D\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "A".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "A".into()]),
         Line::from_iter(["    - ", "B"]),
-        Line::from_iter(["        1. ".light_blue(), "C".into()]),
-        Line::from_iter(["2. ".light_blue(), "D".into()]),
+        Line::from_iter(["        1. ".set_style(theme::info()), "C".into()]),
+        Line::from_iter(["2. ".set_style(theme::info()), "D".into()]),
     ]);
     assert_eq!(text, expected);
 }
@@ -570,8 +572,8 @@ fn loose_items_due_to_blank_line_between_items() {
     let md = "1. First\n\n2. Second\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "First".into()]),
-        Line::from_iter(["2. ".light_blue(), "Second".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "First".into()]),
+        Line::from_iter(["2. ".set_style(theme::info()), "Second".into()]),
     ]);
     assert_eq!(text, expected);
 }
@@ -581,8 +583,8 @@ fn mixed_tight_then_loose_in_one_list() {
     let md = "1. Tight\n\n2.\n   Loose\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "Tight".into()]),
-        Line::from_iter(["2. ".light_blue(), "Loose".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "Tight".into()]),
+        Line::from_iter(["2. ".set_style(theme::info()), "Loose".into()]),
     ]);
     assert_eq!(text, expected);
 }
@@ -592,7 +594,7 @@ fn ordered_item_with_indented_continuation_is_tight() {
     let md = "1. Foo\n   Bar\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "Foo".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "Foo".into()]),
         Line::from_iter(["   ", "Bar"]),
     ]);
     assert_eq!(text, expected);
@@ -601,7 +603,7 @@ fn ordered_item_with_indented_continuation_is_tight() {
 #[test]
 fn inline_code() {
     let text = render_markdown_text("Example of `Inline code`");
-    let expected = Line::from_iter(["Example of ".into(), "Inline code".cyan()]).into();
+    let expected = Line::from_iter(["Example of ".into(), "Inline code".set_style(theme::current().markdown_code)]).into();
     assert_eq!(text, expected);
 }
 
@@ -645,7 +647,7 @@ fn link() {
     let expected = Text::from(Line::from_iter([
         "Link".into(),
         " (".into(),
-        "https://example.com".cyan().underlined(),
+        "https://example.com".set_style(theme::current().markdown_link),
         ")".into(),
     ]));
     assert_eq!(text, expected);
@@ -888,9 +890,9 @@ fn nested_five_levels_mixed_lists() {
     let md = "1. First\n   - Second level\n     1. Third level (ordered)\n        - Fourth level (bullet)\n          - Fifth level to test indent consistency\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "First".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "First".into()]),
         Line::from_iter(["    - ", "Second level"]),
-        Line::from_iter(["        1. ".light_blue(), "Third level (ordered)".into()]),
+        Line::from_iter(["        1. ".set_style(theme::info()), "Third level (ordered)".into()]),
         Line::from_iter(["            - ", "Fourth level (bullet)"]),
         Line::from_iter([
             "                - ",
@@ -925,7 +927,7 @@ fn html_in_tight_ordered_item_soft_breaks_with_space() {
     let md = "1. Foo\n   <i>Bar</i>\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "Foo".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "Foo".into()]),
         Line::from_iter(["   ", "<i>", "Bar", "</i>"]),
     ]);
     assert_eq!(text, expected);
@@ -973,7 +975,7 @@ fn ordered_item_continuation_paragraph_is_indented() {
     let md = "1. Intro\n\n   More details about intro\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "Intro".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "Intro".into()]),
         Line::default(),
         Line::from_iter(["   ", "More details about intro"]),
     ]);
@@ -985,11 +987,11 @@ fn nested_item_continuation_paragraph_is_indented() {
     let md = "1. A\n    - B\n\n      Continuation for B\n2. C\n";
     let text = render_markdown_text(md);
     let expected = Text::from_iter([
-        Line::from_iter(["1. ".light_blue(), "A".into()]),
+        Line::from_iter(["1. ".set_style(theme::info()), "A".into()]),
         Line::from_iter(["    - ", "B"]),
         Line::default(),
         Line::from_iter(["      ", "Continuation for B"]),
-        Line::from_iter(["2. ".light_blue(), "C".into()]),
+        Line::from_iter(["2. ".set_style(theme::info()), "C".into()]),
     ]);
     assert_eq!(text, expected);
 }
