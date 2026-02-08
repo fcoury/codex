@@ -73,6 +73,10 @@ pub fn status_line_items_edit(items: &[String]) -> ConfigEdit {
     }
 }
 
+/// Produces config edits that switch to a named built-in theme.
+///
+/// Sets `tui.theme.name` and clears any user-defined palette and style
+/// overrides so the new theme applies cleanly.
 pub fn theme_name_edit(name: &str) -> Vec<ConfigEdit> {
     vec![
         ConfigEdit::SetPath {

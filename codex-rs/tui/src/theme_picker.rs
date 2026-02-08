@@ -5,6 +5,10 @@ use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::theme;
 
+/// Builds [`SelectionViewParams`] for the `/theme` picker dialog.
+///
+/// The returned params list every built-in theme, live-preview on cursor
+/// movement, and restore the original theme if the user cancels.
 pub(crate) fn build_theme_picker_params(
     current_name: Option<&str>,
     has_overrides: bool,
@@ -47,7 +51,7 @@ pub(crate) fn build_theme_picker_params(
         on_selection_changed: Some(Box::new(move |idx, _tx| {
             let names = theme::builtin_theme_names();
             if let Some(name) = names.get(idx)
-                && let Some(t) = theme::builtin_theme(name)
+                && let Some(t) = theme::builtin_theme_for_terminal(name)
             {
                 theme::set_theme(t);
             }

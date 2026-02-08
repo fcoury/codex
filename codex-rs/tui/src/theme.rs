@@ -19,7 +19,11 @@ use strum_macros::EnumString;
 use strum_macros::IntoStaticStr;
 use tracing::warn;
 
+use crate::color::adapt_color_for_terminal;
+use crate::color::blend;
+use crate::color::is_light;
 use crate::terminal_palette::best_color;
+use crate::terminal_palette::default_bg;
 use codex_core::config::theme::ThemeColor;
 use codex_core::config::theme::ThemeConfig;
 use codex_core::config::theme::ThemePalette;
@@ -71,12 +75,37 @@ enum BuiltinTheme {
     Solarized,
     /// Catppuccin Latte-inspired light palette.
     CatppuccinLight,
+    /// Everforest Light-inspired palette.
+    EverforestLight,
+    /// Ayu Light-inspired palette.
+    AyuLight,
 }
 
 impl BuiltinTheme {
     fn from_name(name: &str) -> Option<Self> {
         name.parse::<BuiltinTheme>().ok()
     }
+
+    fn is_dark(self) -> Option<bool> {
+        match self {
+            BuiltinTheme::Default => None,
+            BuiltinTheme::Ocean | BuiltinTheme::RosePine | BuiltinTheme::Solarized => Some(true),
+            BuiltinTheme::CatppuccinLight
+            | BuiltinTheme::EverforestLight
+            | BuiltinTheme::AyuLight => Some(false),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BuiltinPalette {
+    accent: (u8, u8, u8),
+    success: (u8, u8, u8),
+    error: (u8, u8, u8),
+    brand: (u8, u8, u8),
+    info: (u8, u8, u8),
+    message_bg: Option<(u8, u8, u8)>,
+    selection_bg: Option<(u8, u8, u8)>,
 }
 
 impl Theme {
@@ -92,84 +121,105 @@ impl Theme {
         )
     }
 
-    fn builtin_theme(name: &str) -> Theme {
-        BuiltinTheme::from_name(name)
-            .map(Self::from_builtin)
-            .unwrap_or_else(Self::default_theme)
-    }
-
     fn from_builtin(builtin: BuiltinTheme) -> Theme {
         match builtin {
             BuiltinTheme::Default => Self::default_theme(),
-            BuiltinTheme::Ocean => build_theme(
-                hex_color("#7aa2f7"),
-                hex_color("#9ece6a"),
-                hex_color("#f7768e"),
-                hex_color("#bb9af7"),
-                hex_color("#7dcfff"),
-                Some(hex_color("#1a1b26")),
-                Some(hex_color("#283457")),
-            ),
-            BuiltinTheme::RosePine => build_theme(
-                hex_color("#9ccfd8"),
-                hex_color("#31748f"),
-                hex_color("#eb6f92"),
-                hex_color("#c4a7e7"),
-                hex_color("#f6c177"),
-                Some(hex_color("#191724")),
-                Some(hex_color("#26233a")),
-            ),
-            BuiltinTheme::Solarized => build_theme(
-                hex_color("#268bd2"),
-                hex_color("#859900"),
-                hex_color("#dc322f"),
-                hex_color("#d33682"),
-                hex_color("#2aa198"),
-                Some(hex_color("#002b36")),
-                Some(hex_color("#073642")),
-            ),
-            BuiltinTheme::CatppuccinLight => build_theme(
-                hex_color("#1e66f5"),
-                hex_color("#40a02b"),
-                hex_color("#d20f39"),
-                hex_color("#8839ef"),
-                hex_color("#209fb5"),
-                Some(hex_color("#eff1f5")),
-                Some(hex_color("#ccd0da")),
+            BuiltinTheme::Ocean
+            | BuiltinTheme::RosePine
+            | BuiltinTheme::Solarized
+            | BuiltinTheme::CatppuccinLight
+            | BuiltinTheme::EverforestLight
+            | BuiltinTheme::AyuLight => build_theme_from_palette(
+                builtin_palette(builtin).unwrap_or_else(BuiltinPalette::fallback),
             ),
         }
     }
 
+    fn from_builtin_with_terminal(builtin: BuiltinTheme, terminal_bg: (u8, u8, u8)) -> Theme {
+        let Some(palette) = builtin_palette(builtin) else {
+            return Self::default_theme();
+        };
+        let Some(builtin_is_dark) = builtin.is_dark() else {
+            return Self::default_theme();
+        };
+        let terminal_is_dark = !is_light(terminal_bg);
+        if builtin_is_dark == terminal_is_dark {
+            return build_theme_from_palette(palette);
+        }
+        // Polarity mismatch: adapt foregrounds and let backgrounds derive from terminal.
+        let adapted_accent =
+            adapt_color_for_terminal(palette.accent, terminal_bg, terminal_is_dark);
+        let adapted_brand = adapt_color_for_terminal(palette.brand, terminal_bg, terminal_is_dark);
+        let (message_alpha, selection_alpha) = if terminal_is_dark {
+            (0.12, 0.22)
+        } else {
+            (0.08, 0.16)
+        };
+        let adapted = BuiltinPalette {
+            accent: adapted_accent,
+            success: adapt_color_for_terminal(palette.success, terminal_bg, terminal_is_dark),
+            error: adapt_color_for_terminal(palette.error, terminal_bg, terminal_is_dark),
+            brand: adapted_brand,
+            info: adapt_color_for_terminal(palette.info, terminal_bg, terminal_is_dark),
+            // Polarity mismatch: tint backgrounds from the adapted brand.
+            message_bg: Some(blend(adapted_brand, terminal_bg, message_alpha)),
+            selection_bg: Some(blend(adapted_brand, terminal_bg, selection_alpha)),
+        };
+        build_theme_from_palette(adapted)
+    }
+
+    /// Returns a [`Style`] with the accent foreground color.
     pub fn accent_style(&self) -> Style {
         Style::default().fg(self.accent)
     }
 
+    /// Returns a [`Style`] with the success foreground color.
     pub fn success_style(&self) -> Style {
         Style::default().fg(self.success)
     }
 
+    /// Returns a [`Style`] with the error foreground color.
     pub fn error_style(&self) -> Style {
         Style::default().fg(self.error)
     }
 
+    /// Returns a [`Style`] with the brand foreground color.
     pub fn brand_style(&self) -> Style {
         Style::default().fg(self.brand)
     }
 
+    /// Returns a [`Style`] with the info foreground color.
     pub fn info_style(&self) -> Style {
         Style::default().fg(self.info)
     }
 
+    /// Returns a bold [`Style`] with the success foreground color.
     pub fn success_bold(&self) -> Style {
         self.success_style().add_modifier(Modifier::BOLD)
     }
 
+    /// Returns a bold [`Style`] with the error foreground color.
     pub fn error_bold(&self) -> Style {
         self.error_style().add_modifier(Modifier::BOLD)
     }
 
+    /// Returns a bold [`Style`] with the brand foreground color.
     pub fn brand_bold(&self) -> Style {
         self.brand_style().add_modifier(Modifier::BOLD)
+    }
+}
+
+impl BuiltinPalette {
+    fn fallback() -> Self {
+        Self {
+            accent: (0, 255, 255),
+            success: (0, 255, 0),
+            error: (255, 0, 0),
+            brand: (255, 0, 255),
+            info: (135, 206, 250),
+            message_bg: None,
+            selection_bg: None,
+        }
     }
 }
 
@@ -201,16 +251,87 @@ fn build_theme(
     }
 }
 
-/// Converts a `#RRGGBB` literal into a terminal [`Color`].
+fn build_theme_from_palette(palette: BuiltinPalette) -> Theme {
+    build_theme(
+        best_color(palette.accent),
+        best_color(palette.success),
+        best_color(palette.error),
+        best_color(palette.brand),
+        best_color(palette.info),
+        palette.message_bg.map(best_color),
+        palette.selection_bg.map(best_color),
+    )
+}
+
+/// Converts a `#RRGGBB` literal into RGB components.
 ///
 /// Only used for hardcoded builtin palette values, so an invalid literal is a
 /// programmer error surfaced at startup rather than a user-facing failure.
-fn hex_color(hex: &str) -> Color {
-    let (r, g, b) = parse_hex_triplet(hex).unwrap_or_else(|| {
+fn hex_rgb(hex: &str) -> (u8, u8, u8) {
+    parse_hex_triplet(hex).unwrap_or_else(|| {
         tracing::error!("invalid built-in hex color literal: {hex}");
         (0, 0, 0)
-    });
-    best_color((r, g, b))
+    })
+}
+
+fn builtin_palette(builtin: BuiltinTheme) -> Option<BuiltinPalette> {
+    match builtin {
+        BuiltinTheme::Default => None,
+        BuiltinTheme::Ocean => Some(BuiltinPalette {
+            accent: hex_rgb("#7aa2f7"),
+            success: hex_rgb("#9ece6a"),
+            error: hex_rgb("#f7768e"),
+            brand: hex_rgb("#bb9af7"),
+            info: hex_rgb("#7dcfff"),
+            message_bg: Some(hex_rgb("#1a1b26")),
+            selection_bg: Some(hex_rgb("#283457")),
+        }),
+        BuiltinTheme::RosePine => Some(BuiltinPalette {
+            accent: hex_rgb("#9ccfd8"),
+            success: hex_rgb("#31748f"),
+            error: hex_rgb("#eb6f92"),
+            brand: hex_rgb("#c4a7e7"),
+            info: hex_rgb("#f6c177"),
+            message_bg: Some(hex_rgb("#191724")),
+            selection_bg: Some(hex_rgb("#26233a")),
+        }),
+        BuiltinTheme::Solarized => Some(BuiltinPalette {
+            accent: hex_rgb("#268bd2"),
+            success: hex_rgb("#859900"),
+            error: hex_rgb("#dc322f"),
+            brand: hex_rgb("#d33682"),
+            info: hex_rgb("#2aa198"),
+            message_bg: Some(hex_rgb("#002b36")),
+            selection_bg: Some(hex_rgb("#073642")),
+        }),
+        BuiltinTheme::CatppuccinLight => Some(BuiltinPalette {
+            accent: hex_rgb("#1e66f5"),
+            success: hex_rgb("#40a02b"),
+            error: hex_rgb("#d20f39"),
+            brand: hex_rgb("#8839ef"),
+            info: hex_rgb("#209fb5"),
+            message_bg: Some(hex_rgb("#eff1f5")),
+            selection_bg: Some(hex_rgb("#ccd0da")),
+        }),
+        BuiltinTheme::EverforestLight => Some(BuiltinPalette {
+            accent: hex_rgb("#3a94c5"),
+            success: hex_rgb("#8da101"),
+            error: hex_rgb("#f85552"),
+            brand: hex_rgb("#df69ba"),
+            info: hex_rgb("#35a77c"),
+            message_bg: Some(hex_rgb("#f8f5e4")),
+            selection_bg: Some(hex_rgb("#f2efdf")),
+        }),
+        BuiltinTheme::AyuLight => Some(BuiltinPalette {
+            accent: hex_rgb("#36a3d9"),
+            success: hex_rgb("#86b300"),
+            error: hex_rgb("#ff3333"),
+            brand: hex_rgb("#a37acc"),
+            info: hex_rgb("#4cbf99"),
+            message_bg: Some(hex_rgb("#fafafa")),
+            selection_bg: Some(hex_rgb("#f0eee4")),
+        }),
+    }
 }
 
 /// Resolves a named color keyword used in `ThemeColor::Named`.
@@ -272,12 +393,34 @@ fn parse_hex_triplet(hex: &str) -> Option<(u8, u8, u8)> {
 ///
 /// Unknown built-in names fall back to `default` and emit a warning.
 pub fn resolve_theme(config: &ThemeConfig) -> Theme {
-    let mut theme = match config.name.as_deref() {
-        Some(name) => {
-            if BuiltinTheme::from_name(name).is_none() {
-                warn!("Unknown theme name: {name}");
+    resolve_theme_with_terminal_bg(config, default_bg())
+}
+
+fn resolve_theme_with_terminal_bg(
+    config: &ThemeConfig,
+    terminal_bg: Option<(u8, u8, u8)>,
+) -> Theme {
+    let builtin = config.name.as_deref().and_then(BuiltinTheme::from_name);
+    if config.name.is_some() && builtin.is_none() {
+        warn!(
+            "Unknown theme name: {}",
+            config.name.as_deref().unwrap_or_default()
+        );
+    }
+    // Only auto-adapt pure built-ins without user overrides.
+    let should_adapt = builtin.is_some() && config.palette.is_none() && config.styles.is_none();
+    let mut theme = match builtin {
+        Some(builtin) => {
+            if should_adapt {
+                if let Some(bg) = terminal_bg {
+                    // Apply polarity adaptation against the detected terminal background.
+                    Theme::from_builtin_with_terminal(builtin, bg)
+                } else {
+                    Theme::from_builtin(builtin)
+                }
+            } else {
+                Theme::from_builtin(builtin)
             }
-            Theme::builtin_theme(name)
         }
         None => Theme::default_theme(),
     };
@@ -393,30 +536,89 @@ pub fn set_theme(theme: Theme) {
     }
 }
 
+/// Shorthand: accent [`Style`] from the current global theme.
 pub fn accent() -> Style {
     current().accent_style()
 }
 
+/// Shorthand: success [`Style`] from the current global theme.
 pub fn success() -> Style {
     current().success_style()
 }
 
+/// Shorthand: error [`Style`] from the current global theme.
 pub fn error() -> Style {
     current().error_style()
 }
 
+/// Shorthand: brand [`Style`] from the current global theme.
 pub fn brand() -> Style {
     current().brand_style()
 }
 
+/// Shorthand: info [`Style`] from the current global theme.
 pub fn info() -> Style {
     current().info_style()
 }
 
+/// Returns the kebab-case names of every built-in theme.
 pub fn builtin_theme_names() -> Vec<&'static str> {
     BuiltinTheme::iter().map(Into::into).collect()
 }
 
-pub fn builtin_theme(name: &str) -> Option<Theme> {
-    BuiltinTheme::from_name(name).map(Theme::from_builtin)
+/// Looks up a built-in theme by name, adapting it for the detected terminal
+/// background when available.
+pub fn builtin_theme_for_terminal(name: &str) -> Option<Theme> {
+    let builtin = BuiltinTheme::from_name(name)?;
+    let theme = if let Some(bg) = default_bg() {
+        Theme::from_builtin_with_terminal(builtin, bg)
+    } else {
+        Theme::from_builtin(builtin)
+    };
+    Some(theme)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_core::config::theme::ThemeColor;
+    use codex_core::config::theme::ThemePalette;
+    #[test]
+    fn adapts_dark_theme_on_light_terminal() {
+        let config = ThemeConfig {
+            name: Some("ocean".to_string()),
+            palette: None,
+            styles: None,
+        };
+        let theme = resolve_theme_with_terminal_bg(&config, Some((240, 240, 240)));
+        assert!(theme.message_bg.is_some());
+        assert!(theme.selection_bg.is_some());
+    }
+
+    #[test]
+    fn adapts_light_theme_on_dark_terminal() {
+        let config = ThemeConfig {
+            name: Some("catppuccin-light".to_string()),
+            palette: None,
+            styles: None,
+        };
+        let theme = resolve_theme_with_terminal_bg(&config, Some((16, 16, 16)));
+        assert!(theme.message_bg.is_some());
+        assert!(theme.selection_bg.is_some());
+    }
+
+    #[test]
+    fn skips_adaptation_when_palette_overrides() {
+        let config = ThemeConfig {
+            name: Some("ocean".to_string()),
+            palette: Some(ThemePalette {
+                accent: Some(ThemeColor::Named("red".to_string())),
+                ..ThemePalette::default()
+            }),
+            styles: None,
+        };
+        let theme = resolve_theme_with_terminal_bg(&config, Some((240, 240, 240)));
+        assert!(theme.message_bg.is_some());
+        assert!(theme.selection_bg.is_some());
+    }
 }
