@@ -12,6 +12,7 @@ use crate::theme;
 pub(crate) fn build_theme_picker_params(
     current_name: Option<&str>,
     has_overrides: bool,
+    auto_adapt_enabled: bool,
 ) -> SelectionViewParams {
     let original_theme = theme::current();
     let items = theme::builtin_theme_names()
@@ -51,7 +52,7 @@ pub(crate) fn build_theme_picker_params(
         on_selection_changed: Some(Box::new(move |idx, _tx| {
             let names = theme::builtin_theme_names();
             if let Some(name) = names.get(idx)
-                && let Some(t) = theme::builtin_theme_for_terminal(name)
+                && let Some(t) = theme::builtin_theme_for_terminal(name, auto_adapt_enabled)
             {
                 theme::set_theme(t);
             }

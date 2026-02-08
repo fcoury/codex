@@ -3444,9 +3444,11 @@ impl ChatWidget {
             SlashCommand::Theme => {
                 let has_overrides = self.config.tui_theme.palette.is_some()
                     || self.config.tui_theme.styles.is_some();
+                let auto_adapt_enabled = self.config.tui_theme.auto_adapt_enabled();
                 let params = theme_picker::build_theme_picker_params(
                     self.config.tui_theme.name.as_deref(),
                     has_overrides,
+                    auto_adapt_enabled,
                 );
                 self.bottom_pane.show_selection_view(params);
             }

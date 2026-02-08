@@ -147,10 +147,19 @@ pub struct ThemeConfig {
     ///
     /// Supported names are defined by the TUI resolver in `tui/src/theme.rs`.
     pub name: Option<String>,
+    /// Whether to automatically adapt themes for light/dark terminals.
+    #[serde(default)]
+    pub auto_adapt: Option<bool>,
     /// Optional palette overrides applied after built-in selection.
     pub palette: Option<ThemePalette>,
     /// Optional component style overrides applied after palette resolution.
     pub styles: Option<ThemeStyleOverrides>,
+}
+
+impl ThemeConfig {
+    pub fn auto_adapt_enabled(&self) -> bool {
+        self.auto_adapt.unwrap_or(true)
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +253,7 @@ bold = true
         )
         .expect("tui theme should parse");
         assert_eq!(parsed.tui.theme.name, Some("ocean".to_string()));
+        assert!(parsed.tui.theme.auto_adapt_enabled());
         assert_eq!(
             parsed.tui.theme.palette.as_ref().unwrap().accent,
             Some(ThemeColor::Hex("#7aa2f7".to_string()))
@@ -259,5 +269,18 @@ bold = true
                 underlined: false,
             })
         );
+    }
+
+    #[test]
+    fn theme_config_auto_adapt_disabled() {
+        let parsed: RootToml = toml::from_str(
+            r##"
+[tui.theme]
+name = "ocean"
+auto_adapt = false
+"##,
+        )
+        .expect("tui theme should parse");
+        assert!(!parsed.tui.theme.auto_adapt_enabled());
     }
 }

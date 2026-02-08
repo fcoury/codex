@@ -22,6 +22,7 @@ use tracing::warn;
 use crate::color::adapt_color_for_terminal;
 use crate::color::blend;
 use crate::color::is_light;
+use crate::terminal_palette::XTERM_COLORS;
 use crate::terminal_palette::best_color;
 use crate::terminal_palette::default_bg;
 use codex_core::config::theme::ThemeColor;
@@ -377,6 +378,37 @@ fn resolve_theme_color(color: &ThemeColor) -> Option<Color> {
     }
 }
 
+fn resolve_theme_rgb(color: &ThemeColor) -> Option<(u8, u8, u8)> {
+    match color {
+        ThemeColor::Named(name) => resolve_named_color(name).and_then(color_to_rgb),
+        ThemeColor::Hex(hex) => parse_hex_triplet(hex),
+    }
+}
+
+fn color_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Reset => None,
+        Color::Black => Some(XTERM_COLORS[0]),
+        Color::Red => Some(XTERM_COLORS[1]),
+        Color::Green => Some(XTERM_COLORS[2]),
+        Color::Yellow => Some(XTERM_COLORS[3]),
+        Color::Blue => Some(XTERM_COLORS[4]),
+        Color::Magenta => Some(XTERM_COLORS[5]),
+        Color::Cyan => Some(XTERM_COLORS[6]),
+        Color::Gray => Some(XTERM_COLORS[7]),
+        Color::DarkGray => Some(XTERM_COLORS[8]),
+        Color::LightRed => Some(XTERM_COLORS[9]),
+        Color::LightGreen => Some(XTERM_COLORS[10]),
+        Color::LightYellow => Some(XTERM_COLORS[11]),
+        Color::LightBlue => Some(XTERM_COLORS[12]),
+        Color::LightMagenta => Some(XTERM_COLORS[13]),
+        Color::LightCyan => Some(XTERM_COLORS[14]),
+        Color::White => Some(XTERM_COLORS[15]),
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Indexed(i) => XTERM_COLORS.get(i as usize).copied(),
+    }
+}
+
 /// Parses a `#RRGGBB` value into RGB components.
 fn parse_hex_triplet(hex: &str) -> Option<(u8, u8, u8)> {
     let hex = hex.strip_prefix('#')?;
@@ -400,6 +432,7 @@ fn resolve_theme_with_terminal_bg(
     config: &ThemeConfig,
     terminal_bg: Option<(u8, u8, u8)>,
 ) -> Theme {
+    let auto_adapt_enabled = config.auto_adapt_enabled();
     let builtin = config.name.as_deref().and_then(BuiltinTheme::from_name);
     if config.name.is_some() && builtin.is_none() {
         warn!(
@@ -408,7 +441,10 @@ fn resolve_theme_with_terminal_bg(
         );
     }
     // Only auto-adapt pure built-ins without user overrides.
-    let should_adapt = builtin.is_some() && config.palette.is_none() && config.styles.is_none();
+    let should_adapt = auto_adapt_enabled
+        && builtin.is_some()
+        && config.palette.is_none()
+        && config.styles.is_none();
     let mut theme = match builtin {
         Some(builtin) => {
             if should_adapt {
@@ -430,11 +466,85 @@ fn resolve_theme_with_terminal_bg(
         apply_component_styles(&mut theme);
     }
 
+    if maybe_adapt_custom_theme(&mut theme, config, terminal_bg) {
+        apply_component_styles(&mut theme);
+    }
+
     if let Some(styles) = &config.styles {
         apply_style_overrides(&mut theme, styles);
     }
 
     theme
+}
+
+fn maybe_adapt_custom_theme(
+    theme: &mut Theme,
+    config: &ThemeConfig,
+    terminal_bg: Option<(u8, u8, u8)>,
+) -> bool {
+    if !config.auto_adapt_enabled() {
+        return false;
+    }
+    let Some(terminal_bg) = terminal_bg else {
+        return false;
+    };
+    if config.palette.is_none() && config.styles.is_none() {
+        return false;
+    }
+    let intended_bg = config.palette.as_ref().and_then(|palette| {
+        palette
+            .message_bg
+            .as_ref()
+            .and_then(resolve_theme_rgb)
+            .or_else(|| palette.selection_bg.as_ref().and_then(resolve_theme_rgb))
+    });
+    let intended_is_dark = intended_bg.map(|bg| !is_light(bg)).or_else(|| {
+        config
+            .name
+            .as_deref()
+            .and_then(BuiltinTheme::from_name)
+            .and_then(BuiltinTheme::is_dark)
+    });
+    let Some(intended_is_dark) = intended_is_dark else {
+        return false;
+    };
+    let terminal_is_dark = !is_light(terminal_bg);
+    if intended_is_dark == terminal_is_dark {
+        return false;
+    }
+
+    adapt_theme_palette(theme, terminal_bg, terminal_is_dark);
+    true
+}
+
+fn adapt_theme_palette(theme: &mut Theme, terminal_bg: (u8, u8, u8), terminal_is_dark: bool) {
+    let adapted_accent = adapt_theme_color(&mut theme.accent, terminal_bg, terminal_is_dark);
+    let _ = adapt_theme_color(&mut theme.success, terminal_bg, terminal_is_dark);
+    let _ = adapt_theme_color(&mut theme.error, terminal_bg, terminal_is_dark);
+    let adapted_brand = adapt_theme_color(&mut theme.brand, terminal_bg, terminal_is_dark);
+    let _ = adapt_theme_color(&mut theme.info, terminal_bg, terminal_is_dark);
+
+    let tint = adapted_brand.or(adapted_accent);
+    if let Some(tint) = tint {
+        let (message_alpha, selection_alpha) = if terminal_is_dark {
+            (0.12, 0.22)
+        } else {
+            (0.08, 0.16)
+        };
+        theme.message_bg = Some(best_color(blend(tint, terminal_bg, message_alpha)));
+        theme.selection_bg = Some(best_color(blend(tint, terminal_bg, selection_alpha)));
+    }
+}
+
+fn adapt_theme_color(
+    color: &mut Color,
+    terminal_bg: (u8, u8, u8),
+    terminal_is_dark: bool,
+) -> Option<(u8, u8, u8)> {
+    let rgb = color_to_rgb(*color)?;
+    let adapted = adapt_color_for_terminal(rgb, terminal_bg, terminal_is_dark);
+    *color = best_color(adapted);
+    Some(adapted)
 }
 
 fn apply_palette_overrides(theme: &mut Theme, palette: &ThemePalette) {
@@ -566,12 +676,16 @@ pub fn builtin_theme_names() -> Vec<&'static str> {
     BuiltinTheme::iter().map(Into::into).collect()
 }
 
-/// Looks up a built-in theme by name, adapting it for the detected terminal
-/// background when available.
-pub fn builtin_theme_for_terminal(name: &str) -> Option<Theme> {
+/// Looks up a built-in theme by name, optionally adapting it for the detected
+/// terminal background when available.
+pub fn builtin_theme_for_terminal(name: &str, auto_adapt_enabled: bool) -> Option<Theme> {
     let builtin = BuiltinTheme::from_name(name)?;
-    let theme = if let Some(bg) = default_bg() {
-        Theme::from_builtin_with_terminal(builtin, bg)
+    let theme = if auto_adapt_enabled {
+        if let Some(bg) = default_bg() {
+            Theme::from_builtin_with_terminal(builtin, bg)
+        } else {
+            Theme::from_builtin(builtin)
+        }
     } else {
         Theme::from_builtin(builtin)
     };
@@ -587,6 +701,7 @@ mod tests {
     fn adapts_dark_theme_on_light_terminal() {
         let config = ThemeConfig {
             name: Some("ocean".to_string()),
+            auto_adapt: None,
             palette: None,
             styles: None,
         };
@@ -599,6 +714,7 @@ mod tests {
     fn adapts_light_theme_on_dark_terminal() {
         let config = ThemeConfig {
             name: Some("catppuccin-light".to_string()),
+            auto_adapt: None,
             palette: None,
             styles: None,
         };
@@ -608,17 +724,65 @@ mod tests {
     }
 
     #[test]
-    fn skips_adaptation_when_palette_overrides() {
+    fn custom_palette_adapts_with_builtin_polarity() {
         let config = ThemeConfig {
             name: Some("ocean".to_string()),
+            auto_adapt: None,
             palette: Some(ThemePalette {
                 accent: Some(ThemeColor::Named("red".to_string())),
                 ..ThemePalette::default()
             }),
             styles: None,
         };
-        let theme = resolve_theme_with_terminal_bg(&config, Some((240, 240, 240)));
-        assert!(theme.message_bg.is_some());
-        assert!(theme.selection_bg.is_some());
+        let mut theme = Theme::from_builtin(BuiltinTheme::Ocean);
+        apply_palette_overrides(&mut theme, config.palette.as_ref().unwrap());
+        apply_component_styles(&mut theme);
+        assert!(maybe_adapt_custom_theme(
+            &mut theme,
+            &config,
+            Some((240, 240, 240))
+        ));
+    }
+
+    #[test]
+    fn custom_palette_adapts_when_message_bg_present() {
+        let config = ThemeConfig {
+            name: Some("ocean".to_string()),
+            auto_adapt: None,
+            palette: Some(ThemePalette {
+                message_bg: Some(ThemeColor::Hex("#101010".to_string())),
+                ..ThemePalette::default()
+            }),
+            styles: None,
+        };
+        let mut theme = Theme::from_builtin(BuiltinTheme::Ocean);
+        apply_palette_overrides(&mut theme, config.palette.as_ref().unwrap());
+        apply_component_styles(&mut theme);
+        assert!(maybe_adapt_custom_theme(
+            &mut theme,
+            &config,
+            Some((240, 240, 240))
+        ));
+    }
+
+    #[test]
+    fn custom_palette_skips_when_auto_adapt_disabled() {
+        let config = ThemeConfig {
+            name: Some("ocean".to_string()),
+            auto_adapt: Some(false),
+            palette: Some(ThemePalette {
+                message_bg: Some(ThemeColor::Hex("#101010".to_string())),
+                ..ThemePalette::default()
+            }),
+            styles: None,
+        };
+        let mut theme = Theme::from_builtin(BuiltinTheme::Ocean);
+        apply_palette_overrides(&mut theme, config.palette.as_ref().unwrap());
+        apply_component_styles(&mut theme);
+        assert!(!maybe_adapt_custom_theme(
+            &mut theme,
+            &config,
+            Some((240, 240, 240))
+        ));
     }
 }

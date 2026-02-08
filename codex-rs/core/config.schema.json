@@ -1020,6 +1020,11 @@
       "additionalProperties": false,
       "description": "Top-level TUI theme config loaded from `[tui.theme]`.",
       "properties": {
+        "auto_adapt": {
+          "default": null,
+          "description": "Whether to automatically adapt themes for light/dark terminals.",
+          "type": "boolean"
+        },
         "name": {
           "description": "Optional built-in theme name.\n\nSupported names are defined by the TUI resolver in `tui/src/theme.rs`.",
           "type": "string"
