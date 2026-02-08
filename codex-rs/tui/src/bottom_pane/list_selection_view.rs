@@ -57,6 +57,12 @@ pub(crate) struct SelectionItem {
     pub disabled_reason: Option<String>,
 }
 
+/// Callback type for when the selection changes (navigation, filter, number-key).
+pub type OnSelectionChangedCallback = Option<Box<dyn Fn(usize, &AppEventSender) + Send + Sync>>;
+
+/// Callback type for when the selection popup is dismissed without accepting (e.g. via Esc or Ctrl+C).
+pub type OnCancelCallback = Option<Box<dyn Fn(&AppEventSender) + Send + Sync>>;
+
 /// Construction-time configuration for [`ListSelectionView`].
 ///
 /// This config is consumed once by [`ListSelectionView::new`]. After
@@ -78,6 +84,13 @@ pub(crate) struct SelectionViewParams {
     pub col_width_mode: ColumnWidthMode,
     pub header: Box<dyn Renderable>,
     pub initial_selected_idx: Option<usize>,
+
+    /// Called when the highlighted item changes (navigation, filter, number-key).
+    /// Receives the *actual* item index, not the filtered/visible index.
+    pub on_selection_changed: OnSelectionChangedCallback,
+
+    /// Called when the picker is dismissed via Esc/Ctrl+C without selecting.
+    pub on_cancel: OnCancelCallback,
 }
 
 impl Default for SelectionViewParams {
@@ -93,6 +106,9 @@ impl Default for SelectionViewParams {
             col_width_mode: ColumnWidthMode::AutoVisible,
             header: Box::new(()),
             initial_selected_idx: None,
+
+            on_selection_changed: None,
+            on_cancel: None,
         }
     }
 }
@@ -117,6 +133,15 @@ pub(crate) struct ListSelectionView {
     last_selected_actual_idx: Option<usize>,
     header: Box<dyn Renderable>,
     initial_selected_idx: Option<usize>,
+
+    /// Callbacks for selection changes and cancellation. These are called at the appropriate times
+    /// during interaction but are not expected to mutate the view directly (since that could cause
+    /// borrow issues); instead, they can send messages via `app_event_tx` that the parent view can
+    /// handle to update the selection state as needed.
+    on_selection_changed: OnSelectionChangedCallback,
+
+    /// Called when the picker is dismissed via Esc/Ctrl+C without selecting.
+    on_cancel: OnCancelCallback,
 }
 
 impl ListSelectionView {
@@ -157,6 +182,8 @@ impl ListSelectionView {
             last_selected_actual_idx: None,
             header,
             initial_selected_idx: params.initial_selected_idx,
+            on_selection_changed: params.on_selection_changed,
+            on_cancel: params.on_cancel,
         };
         s.apply_filter();
         s
@@ -218,6 +245,7 @@ impl ListSelectionView {
         let visible = Self::max_visible_rows(len);
         self.state.clamp_selection(len);
         self.state.ensure_visible(len, visible);
+        self.fire_selection_changed();
     }
 
     fn build_rows(&self) -> Vec<GenericDisplayRow> {
@@ -274,6 +302,7 @@ impl ListSelectionView {
         let visible = Self::max_visible_rows(len);
         self.state.ensure_visible(len, visible);
         self.skip_disabled_up();
+        self.fire_selection_changed();
     }
 
     fn move_down(&mut self) {
@@ -282,6 +311,7 @@ impl ListSelectionView {
         let visible = Self::max_visible_rows(len);
         self.state.ensure_visible(len, visible);
         self.skip_disabled_down();
+        self.fire_selection_changed();
     }
 
     fn accept(&mut self) {
@@ -355,6 +385,17 @@ impl ListSelectionView {
             } else {
                 break;
             }
+        }
+    }
+
+    fn fire_selection_changed(&self) {
+        if let Some(cb) = &self.on_selection_changed
+            && let Some(actual) = self
+                .state
+                .selected_idx
+                .and_then(|vis| self.filtered_indices.get(vis).copied())
+        {
+            cb(actual, &self.app_event_tx);
         }
     }
 }
@@ -444,6 +485,7 @@ impl BottomPaneView for ListSelectionView {
                         .is_some_and(|item| item.disabled_reason.is_none() && !item.is_disabled)
                 {
                     self.state.selected_idx = Some(idx);
+                    self.fire_selection_changed();
                     self.accept();
                 }
             }
@@ -461,6 +503,9 @@ impl BottomPaneView for ListSelectionView {
     }
 
     fn on_ctrl_c(&mut self) -> CancellationEvent {
+        if let Some(cb) = &self.on_cancel {
+            cb(&self.app_event_tx);
+        }
         self.complete = true;
         CancellationEvent::Handled
     }

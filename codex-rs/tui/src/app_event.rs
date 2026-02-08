@@ -140,6 +140,11 @@ pub(crate) enum AppEvent {
         personality: Personality,
     },
 
+    /// Notify the app that a new theme has been selected in the theme picker.
+    ThemeSelected {
+        name: String,
+    },
+
     /// Open the reasoning selection popup after picking a model.
     OpenReasoningPopup {
         model: ModelPreset,

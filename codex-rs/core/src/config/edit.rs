@@ -73,6 +73,25 @@ pub fn status_line_items_edit(items: &[String]) -> ConfigEdit {
     }
 }
 
+pub fn theme_name_edit(name: &str) -> Vec<ConfigEdit> {
+    vec![
+        ConfigEdit::SetPath {
+            segments: vec!["tui".to_string(), "theme".to_string(), "name".to_string()],
+            value: TomlItem::Value(name.into()),
+        },
+        ConfigEdit::ClearPath {
+            segments: vec![
+                "tui".to_string(),
+                "theme".to_string(),
+                "palette".to_string(),
+            ],
+        },
+        ConfigEdit::ClearPath {
+            segments: vec!["tui".to_string(), "theme".to_string(), "styles".to_string()],
+        },
+    ]
+}
+
 // TODO(jif) move to a dedicated file
 mod document_helpers {
     use crate::config::types::McpServerConfig;
@@ -1784,5 +1803,52 @@ model_reasoning_effort = "high"
         let contents =
             std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
         assert!(!contents.contains("mcp_servers"));
+    }
+
+    #[test]
+    fn theme_name_edit_sets_name_and_clears_overrides() {
+        let tmp = tempdir().expect("tmpdir");
+        let codex_home = tmp.path();
+
+        // Seed a config with palette and style overrides.
+        let initial = "\
+[tui.theme]
+name = \"default\"
+
+[tui.theme.palette]
+accent = \"#ff0000\"
+
+[tui.theme.styles.markdown_code]
+bold = true
+";
+        std::fs::create_dir_all(codex_home).unwrap();
+        std::fs::write(codex_home.join(CONFIG_TOML_FILE), initial).unwrap();
+
+        // Apply the theme edit.
+        let edits = theme_name_edit("ocean");
+        ConfigEditsBuilder::new(codex_home)
+            .with_edits(edits)
+            .apply_blocking()
+            .expect("persist");
+
+        let contents =
+            std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+        let doc: toml_edit::DocumentMut = contents.parse().expect("valid toml");
+
+        // Name should be updated.
+        assert_eq!(
+            doc["tui"]["theme"]["name"].as_str(),
+            Some("ocean"),
+            "theme name should be updated to 'ocean'"
+        );
+        // Palette and styles should be cleared.
+        assert!(
+            doc["tui"]["theme"].get("palette").is_none(),
+            "palette overrides should be cleared"
+        );
+        assert!(
+            doc["tui"]["theme"].get("styles").is_none(),
+            "style overrides should be cleared"
+        );
     }
 }

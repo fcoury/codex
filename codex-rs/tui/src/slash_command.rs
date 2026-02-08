@@ -45,6 +45,7 @@ pub enum SlashCommand {
     Ps,
     Personality,
     TestApproval,
+    Theme,
 }
 
 impl SlashCommand {
@@ -82,6 +83,7 @@ impl SlashCommand {
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::TestApproval => "test approval request",
+            SlashCommand::Theme => "choose a color theme for the interface",
         }
     }
 
@@ -110,6 +112,7 @@ impl SlashCommand {
             // | SlashCommand::Undo
             | SlashCommand::Model
             | SlashCommand::Personality
+            | SlashCommand::Theme
             | SlashCommand::Approvals
             | SlashCommand::Permissions
             | SlashCommand::ElevateSandbox

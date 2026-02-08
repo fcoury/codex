@@ -2285,6 +2285,25 @@ impl App {
             AppEvent::StatusLineSetupCancelled => {
                 self.chat_widget.cancel_status_line_setup();
             }
+            AppEvent::ThemeSelected { name } => {
+                let edits = codex_core::config::edit::theme_name_edit(&name);
+                let apply_result = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .with_edits(edits)
+                    .apply()
+                    .await;
+                match apply_result {
+                    Ok(()) => {
+                        self.chat_widget.set_theme_name(name);
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "failed to persist theme selection");
+                        let reverted = theme::resolve_theme(&self.config.tui_theme);
+                        theme::set_theme(reverted);
+                        self.chat_widget
+                            .add_error_message(format!("Failed to save theme: {err}"));
+                    }
+                }
+            }
         }
         Ok(AppRunControl::Continue)
     }

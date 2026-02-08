@@ -115,6 +115,7 @@ mod wrapping;
 #[cfg(test)]
 pub mod test_backend;
 mod theme;
+mod theme_picker;
 
 use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
 use crate::onboarding::onboarding_screen::run_onboarding_app;

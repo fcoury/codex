@@ -43,6 +43,7 @@ use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::text_formatting::proper_join;
 use crate::theme;
+use crate::theme_picker;
 use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_backend_client::Client as BackendClient;
@@ -867,6 +868,14 @@ impl ChatWidget {
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
         self.bottom_pane.set_status_line(status_line);
         self.request_redraw();
+    }
+
+    /// Updates the in-memory theme name and clears any custom palette or styles to switch to a
+    /// built-in theme.
+    pub(crate) fn set_theme_name(&mut self, name: String) {
+        self.config.tui_theme.name = Some(name);
+        self.config.tui_theme.palette = None;
+        self.config.tui_theme.styles = None;
     }
 
     /// Recomputes footer status-line content from config and current runtime state.
@@ -3431,6 +3440,15 @@ impl ChatWidget {
                         grant_root: Some(PathBuf::from("/tmp")),
                     }),
                 }));
+            }
+            SlashCommand::Theme => {
+                let has_overrides = self.config.tui_theme.palette.is_some()
+                    || self.config.tui_theme.styles.is_some();
+                let params = theme_picker::build_theme_picker_params(
+                    self.config.tui_theme.name.as_deref(),
+                    has_overrides,
+                );
+                self.bottom_pane.show_selection_view(params);
             }
         }
     }

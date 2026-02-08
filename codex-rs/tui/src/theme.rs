@@ -12,6 +12,11 @@ use std::sync::OnceLock;
 use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
+use strum::IntoEnumIterator;
+use strum_macros::Display;
+use strum_macros::EnumIter;
+use strum_macros::EnumString;
+use strum_macros::IntoStaticStr;
 use tracing::warn;
 
 use crate::terminal_palette::best_color;
@@ -53,7 +58,8 @@ pub struct Theme {
 }
 
 /// Built-in themes supported by `ThemeConfig.name`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, EnumIter, Display, IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 enum BuiltinTheme {
     /// Legacy/default dark palette.
     Default,
@@ -69,14 +75,7 @@ enum BuiltinTheme {
 
 impl BuiltinTheme {
     fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "default" => Some(Self::Default),
-            "ocean" => Some(Self::Ocean),
-            "rose-pine" => Some(Self::RosePine),
-            "solarized" => Some(Self::Solarized),
-            "catppuccin-light" => Some(Self::CatppuccinLight),
-            _ => None,
-        }
+        name.parse::<BuiltinTheme>().ok()
     }
 }
 
@@ -202,13 +201,15 @@ fn build_theme(
     }
 }
 
+/// Converts a `#RRGGBB` literal into a terminal [`Color`].
+///
+/// Only used for hardcoded builtin palette values, so an invalid literal is a
+/// programmer error surfaced at startup rather than a user-facing failure.
 fn hex_color(hex: &str) -> Color {
-    let hex = hex
-        .strip_prefix('#')
-        .expect("hex color should start with #");
-    let r = u8::from_str_radix(&hex[0..2], 16).expect("valid hex color");
-    let g = u8::from_str_radix(&hex[2..4], 16).expect("valid hex color");
-    let b = u8::from_str_radix(&hex[4..6], 16).expect("valid hex color");
+    let (r, g, b) = parse_hex_triplet(hex).unwrap_or_else(|| {
+        tracing::error!("invalid built-in hex color literal: {hex}");
+        (0, 0, 0)
+    });
     best_color((r, g, b))
 }
 
@@ -410,4 +411,12 @@ pub fn brand() -> Style {
 
 pub fn info() -> Style {
     current().info_style()
+}
+
+pub fn builtin_theme_names() -> Vec<&'static str> {
+    BuiltinTheme::iter().map(Into::into).collect()
+}
+
+pub fn builtin_theme(name: &str) -> Option<Theme> {
+    BuiltinTheme::from_name(name).map(Theme::from_builtin)
 }
