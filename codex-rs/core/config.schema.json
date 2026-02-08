@@ -1013,35 +1013,8 @@
       "type": "object"
     },
     "ThemeColor": {
-      "description": "A single theme color value.\n\nOn the wire this serializes as a string: - `Named`: `\"cyan\"`, `\"light_blue\"`, `\"default\"`, etc. - `Hex`: `\"#RRGGBB\"` (exactly six hex digits).",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "A named terminal color keyword.",
-          "properties": {
-            "Named": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "Named"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "A six-digit hex color (`#RRGGBB`).",
-          "properties": {
-            "Hex": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "Hex"
-          ],
-          "type": "object"
-        }
-      ]
+      "description": "A single theme color value.\n\nOn the wire this serializes as a string:\n- `Named`: \"cyan\", \"light_blue\", \"default\", etc.\n- `Hex`: \"#RRGGBB\" (exactly six hex digits).",
+      "type": "string"
     },
     "ThemeConfig": {
       "additionalProperties": false,

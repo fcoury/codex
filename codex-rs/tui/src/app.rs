@@ -2293,6 +2293,9 @@ impl App {
                     .await;
                 match apply_result {
                     Ok(()) => {
+                        self.config.tui_theme.name = Some(name.clone());
+                        self.config.tui_theme.palette = None;
+                        self.config.tui_theme.styles = None;
                         self.chat_widget.set_theme_name(name);
                     }
                     Err(err) => {

@@ -5,6 +5,9 @@
 //! `{ hex = "#7aa2f7" }` are intentionally rejected.
 
 use schemars::JsonSchema;
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::Metadata;
+use schemars::schema::Schema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::Serializer;
@@ -14,13 +17,32 @@ use serde::Serializer;
 /// On the wire this serializes as a string:
 /// - `Named`: `"cyan"`, `"light_blue"`, `"default"`, etc.
 /// - `Hex`: `"#RRGGBB"` (exactly six hex digits).
-#[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThemeColor {
     /// A named terminal color keyword.
     Named(String),
     /// A six-digit hex color (`#RRGGBB`).
     Hex(String),
 }
+
+impl JsonSchema for ThemeColor {
+    fn schema_name() -> String {
+        "ThemeColor".to_string()
+    }
+
+    fn json_schema(schema_gen: &mut SchemaGenerator) -> Schema {
+        let mut schema = <String>::json_schema(schema_gen);
+        if let Schema::Object(schema_object) = &mut schema {
+            let metadata = schema_object
+                .metadata
+                .get_or_insert_with(|| Box::new(Metadata::default()));
+            metadata.description = Some(THEME_COLOR_DESCRIPTION.to_string());
+        }
+        schema
+    }
+}
+
+const THEME_COLOR_DESCRIPTION: &str = "A single theme color value.\n\nOn the wire this serializes as a string:\n- `Named`: \"cyan\", \"light_blue\", \"default\", etc.\n- `Hex`: \"#RRGGBB\" (exactly six hex digits).";
 
 impl Serialize for ThemeColor {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
