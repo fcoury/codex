@@ -629,6 +629,10 @@ pub(crate) struct ChatWidget {
     last_agent_markdown: Option<String>,
     /// Raw markdown for each completed agent response in this session timeline.
     agent_turn_markdowns: Vec<String>,
+    /// Turn ordinal for each entry in `agent_turn_markdowns`.
+    agent_turn_markdown_turn_ordinals: Vec<usize>,
+    /// Number of completed turns observed in this session timeline.
+    completed_turn_count: usize,
     /// Whether this turn already emitted a full `AgentMessage`.
     ///
     /// Some models only provide `TurnComplete.last_agent_message`. This flag lets us use
@@ -1025,11 +1029,30 @@ impl ChatWidget {
         if message.is_empty() {
             return;
         }
-        self.agent_turn_markdowns.push(message.to_string());
+        let turn_ordinal = self.completed_turn_count.saturating_add(1);
+        let message = message.to_string();
+        if self
+            .agent_turn_markdown_turn_ordinals
+            .last()
+            .copied()
+            .is_some_and(|ordinal| ordinal == turn_ordinal)
+        {
+            if let Some(last) = self.agent_turn_markdowns.last_mut() {
+                *last = message;
+            }
+        } else {
+            self.agent_turn_markdowns.push(message);
+            self.agent_turn_markdown_turn_ordinals.push(turn_ordinal);
+        }
         if self.agent_turn_markdowns.len() > MAX_AGENT_COPY_HISTORY {
             let overflow = self.agent_turn_markdowns.len() - MAX_AGENT_COPY_HISTORY;
             self.agent_turn_markdowns.drain(0..overflow);
+            self.agent_turn_markdown_turn_ordinals.drain(0..overflow);
         }
+        debug_assert_eq!(
+            self.agent_turn_markdowns.len(),
+            self.agent_turn_markdown_turn_ordinals.len()
+        );
         self.last_agent_markdown = self.agent_turn_markdowns.last().cloned();
         self.saw_agent_message_this_turn = true;
     }
@@ -1038,6 +1061,8 @@ impl ChatWidget {
     fn on_session_configured(&mut self, event: codex_core::protocol::SessionConfiguredEvent) {
         self.last_agent_markdown = None;
         self.agent_turn_markdowns.clear();
+        self.agent_turn_markdown_turn_ordinals.clear();
+        self.completed_turn_count = 0;
         self.saw_agent_message_this_turn = false;
         self.bottom_pane
             .set_history_metadata(event.history_log_id, event.history_entry_count);
@@ -1353,6 +1378,7 @@ impl ChatWidget {
     }
 
     fn on_task_complete(&mut self, last_agent_message: Option<String>, from_replay: bool) {
+        let turn_was_running = self.agent_turn_running;
         // If a stream is currently active, finalize it.
         self.flush_answer_stream_with_separator();
         if let Some(mut controller) = self.plan_stream_controller.take()
@@ -1400,6 +1426,11 @@ impl ChatWidget {
             && !self.saw_agent_message_this_turn
         {
             self.record_agent_markdown(message);
+        }
+        let should_advance_completed_turn_count =
+            turn_was_running || !self.saw_agent_message_this_turn;
+        if should_advance_completed_turn_count {
+            self.completed_turn_count = self.completed_turn_count.saturating_add(1);
         }
         self.saw_agent_message_this_turn = false;
 
@@ -2713,6 +2744,8 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             last_agent_markdown: None,
             agent_turn_markdowns: Vec::new(),
+            agent_turn_markdown_turn_ordinals: Vec::new(),
+            completed_turn_count: 0,
             saw_agent_message_this_turn: false,
         };
 
@@ -2880,6 +2913,8 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             last_agent_markdown: None,
             agent_turn_markdowns: Vec::new(),
+            agent_turn_markdown_turn_ordinals: Vec::new(),
+            completed_turn_count: 0,
             saw_agent_message_this_turn: false,
         };
 
@@ -3036,6 +3071,8 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             last_agent_markdown: None,
             agent_turn_markdowns: Vec::new(),
+            agent_turn_markdown_turn_ordinals: Vec::new(),
+            completed_turn_count: 0,
             saw_agent_message_this_turn: false,
         };
 
@@ -3985,7 +4022,11 @@ impl ChatWidget {
             EventMsg::SessionConfigured(e) => self.on_session_configured(e),
             EventMsg::ThreadNameUpdated(e) => self.on_thread_name_updated(e),
             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
+                let count_as_completed_turn = !self.agent_turn_running && !message.is_empty();
                 self.record_agent_markdown(&message);
+                if count_as_completed_turn {
+                    self.completed_turn_count = self.completed_turn_count.saturating_add(1);
+                }
                 self.on_agent_message(message)
             }
             EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
@@ -4309,9 +4350,20 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(crate) fn drop_recent_agent_turn_markdowns(&mut self, count: usize) {
-        let keep_len = self.agent_turn_markdowns.len().saturating_sub(count);
-        self.agent_turn_markdowns.truncate(keep_len);
+    pub(crate) fn truncate_agent_turn_markdowns_to_turn_count(
+        &mut self,
+        remaining_turn_count: usize,
+    ) {
+        while self
+            .agent_turn_markdown_turn_ordinals
+            .last()
+            .copied()
+            .is_some_and(|ordinal| ordinal > remaining_turn_count)
+        {
+            self.agent_turn_markdown_turn_ordinals.pop();
+            self.agent_turn_markdowns.pop();
+        }
+        self.completed_turn_count = self.completed_turn_count.min(remaining_turn_count);
         self.last_agent_markdown = self.agent_turn_markdowns.last().cloned();
     }
 
