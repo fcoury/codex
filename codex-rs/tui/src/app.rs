@@ -2833,6 +2833,24 @@ mod tests {
         codex_core::models_manager::model_presets::all_model_presets().clone()
     }
 
+    fn make_session_configured_event(thread_id: ThreadId) -> SessionConfiguredEvent {
+        SessionConfiguredEvent {
+            session_id: thread_id,
+            forked_from_id: None,
+            thread_name: None,
+            model: "gpt-test".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::ReadOnly,
+            cwd: PathBuf::from("/home/user/project"),
+            reasoning_effort: None,
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            rollout_path: Some(PathBuf::new()),
+        }
+    }
+
     fn model_migration_copy_to_plain_text(
         copy: &crate::model_migration::ModelMigrationCopy,
     ) -> String {
@@ -3030,21 +3048,7 @@ mod tests {
         };
 
         let make_header = |is_first| {
-            let event = SessionConfiguredEvent {
-                session_id: ThreadId::new(),
-                forked_from_id: None,
-                thread_name: None,
-                model: "gpt-test".to_string(),
-                model_provider_id: "test-provider".to_string(),
-                approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::ReadOnly,
-                cwd: PathBuf::from("/home/user/project"),
-                reasoning_effort: None,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                rollout_path: Some(PathBuf::new()),
-            };
+            let event = make_session_configured_event(ThreadId::new());
             Arc::new(new_session_info(
                 app.chat_widget.config_ref(),
                 app.chat_widget.current_model(),
@@ -3084,21 +3088,7 @@ mod tests {
         let base_id = ThreadId::new();
         app.chat_widget.handle_codex_event(Event {
             id: String::new(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id: base_id,
-                forked_from_id: None,
-                thread_name: None,
-                model: "gpt-test".to_string(),
-                model_provider_id: "test-provider".to_string(),
-                approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::ReadOnly,
-                cwd: PathBuf::from("/home/user/project"),
-                reasoning_effort: None,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                rollout_path: Some(PathBuf::new()),
-            }),
+            msg: EventMsg::SessionConfigured(make_session_configured_event(base_id)),
         });
 
         app.backtrack.base_id = Some(base_id);
@@ -3132,21 +3122,7 @@ mod tests {
         let thread_id = ThreadId::new();
         app.chat_widget.handle_codex_event(Event {
             id: "session".to_string(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id: thread_id,
-                forked_from_id: None,
-                thread_name: None,
-                model: "gpt-test".to_string(),
-                model_provider_id: "test-provider".to_string(),
-                approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::ReadOnly,
-                cwd: PathBuf::from("/home/user/project"),
-                reasoning_effort: None,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                rollout_path: Some(PathBuf::new()),
-            }),
+            msg: EventMsg::SessionConfigured(make_session_configured_event(thread_id)),
         });
         app.chat_widget.handle_codex_event(Event {
             id: "agent-1".to_string(),
@@ -3206,21 +3182,7 @@ mod tests {
         let thread_id = ThreadId::new();
         app.chat_widget.handle_codex_event(Event {
             id: "session".to_string(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id: thread_id,
-                forked_from_id: None,
-                thread_name: None,
-                model: "gpt-test".to_string(),
-                model_provider_id: "test-provider".to_string(),
-                approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::ReadOnly,
-                cwd: PathBuf::from("/home/user/project"),
-                reasoning_effort: None,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                rollout_path: Some(PathBuf::new()),
-            }),
+            msg: EventMsg::SessionConfigured(make_session_configured_event(thread_id)),
         });
 
         app.chat_widget.handle_codex_event(Event {
@@ -3299,21 +3261,7 @@ mod tests {
         let thread_id = ThreadId::new();
         app.chat_widget.handle_codex_event(Event {
             id: "session".to_string(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id: thread_id,
-                forked_from_id: None,
-                thread_name: None,
-                model: "gpt-test".to_string(),
-                model_provider_id: "test-provider".to_string(),
-                approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::ReadOnly,
-                cwd: PathBuf::from("/home/user/project"),
-                reasoning_effort: None,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                rollout_path: Some(PathBuf::new()),
-            }),
+            msg: EventMsg::SessionConfigured(make_session_configured_event(thread_id)),
         });
         app.chat_widget.handle_codex_event(Event {
             id: "turn-1-started".to_string(),
@@ -3422,21 +3370,7 @@ mod tests {
         let thread_id = ThreadId::new();
         app.chat_widget.handle_codex_event(Event {
             id: "session".to_string(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id: thread_id,
-                forked_from_id: None,
-                thread_name: None,
-                model: "gpt-test".to_string(),
-                model_provider_id: "test-provider".to_string(),
-                approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::ReadOnly,
-                cwd: PathBuf::from("/home/user/project"),
-                reasoning_effort: None,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                rollout_path: Some(PathBuf::new()),
-            }),
+            msg: EventMsg::SessionConfigured(make_session_configured_event(thread_id)),
         });
 
         let mut transcript_cells: Vec<Arc<dyn HistoryCell>> = Vec::new();
@@ -3482,21 +3416,7 @@ mod tests {
         let thread_id = ThreadId::new();
         app.chat_widget.handle_codex_event(Event {
             id: "session".to_string(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id: thread_id,
-                forked_from_id: None,
-                thread_name: None,
-                model: "gpt-test".to_string(),
-                model_provider_id: "test-provider".to_string(),
-                approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::ReadOnly,
-                cwd: PathBuf::from("/home/user/project"),
-                reasoning_effort: None,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                rollout_path: Some(PathBuf::new()),
-            }),
+            msg: EventMsg::SessionConfigured(make_session_configured_event(thread_id)),
         });
 
         let mut transcript_cells: Vec<Arc<dyn HistoryCell>> = Vec::new();
@@ -3542,21 +3462,7 @@ mod tests {
         let thread_id = ThreadId::new();
         app.chat_widget.handle_codex_event(Event {
             id: "session".to_string(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id: thread_id,
-                forked_from_id: None,
-                thread_name: None,
-                model: "gpt-test".to_string(),
-                model_provider_id: "test-provider".to_string(),
-                approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::ReadOnly,
-                cwd: PathBuf::from("/home/user/project"),
-                reasoning_effort: None,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                rollout_path: Some(PathBuf::new()),
-            }),
+            msg: EventMsg::SessionConfigured(make_session_configured_event(thread_id)),
         });
         app.chat_widget.handle_codex_event(Event {
             id: "turn-1-started".to_string(),
@@ -3664,21 +3570,7 @@ mod tests {
         let thread_id = ThreadId::new();
         app.chat_widget.handle_codex_event(Event {
             id: "session".to_string(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id: thread_id,
-                forked_from_id: None,
-                thread_name: None,
-                model: "gpt-test".to_string(),
-                model_provider_id: "test-provider".to_string(),
-                approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::ReadOnly,
-                cwd: PathBuf::from("/home/user/project"),
-                reasoning_effort: None,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                rollout_path: Some(PathBuf::new()),
-            }),
+            msg: EventMsg::SessionConfigured(make_session_configured_event(thread_id)),
         });
         app.chat_widget.handle_codex_event(Event {
             id: "agent-1".to_string(),
@@ -3718,21 +3610,7 @@ mod tests {
         let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
 
         let thread_id = ThreadId::new();
-        let event = SessionConfiguredEvent {
-            session_id: thread_id,
-            forked_from_id: None,
-            thread_name: None,
-            model: "gpt-test".to_string(),
-            model_provider_id: "test-provider".to_string(),
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::ReadOnly,
-            cwd: PathBuf::from("/home/user/project"),
-            reasoning_effort: None,
-            history_log_id: 0,
-            history_entry_count: 0,
-            initial_messages: None,
-            rollout_path: Some(PathBuf::new()),
-        };
+        let event = make_session_configured_event(thread_id);
 
         app.chat_widget.handle_codex_event(Event {
             id: String::new(),
