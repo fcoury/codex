@@ -13,7 +13,11 @@ use super::StreamState;
 /// commit animation across streams.
 pub(crate) struct StreamController {
     state: StreamState,
-    finishing_after_drain: bool,
+    width: Option<usize>,
+    raw_source: String,
+    rendered_lines: Vec<Line<'static>>,
+    enqueued_stable_len: usize,
+    emitted_stable_len: usize,
     header_emitted: bool,
 }
 
@@ -21,55 +25,61 @@ impl StreamController {
     pub(crate) fn new(width: Option<usize>) -> Self {
         Self {
             state: StreamState::new(width),
-            finishing_after_drain: false,
+            width,
+            raw_source: String::new(),
+            rendered_lines: Vec::new(),
+            enqueued_stable_len: 0,
+            emitted_stable_len: 0,
             header_emitted: false,
         }
     }
 
     /// Push a delta; if it contains a newline, commit completed lines and start animation.
     pub(crate) fn push(&mut self, delta: &str) -> bool {
-        let state = &mut self.state;
         if !delta.is_empty() {
-            state.has_seen_delta = true;
+            self.state.has_seen_delta = true;
         }
-        state.collector.push_delta(delta);
-        if delta.contains('\n') {
-            let newly_completed = state.collector.commit_complete_lines();
-            if !newly_completed.is_empty() {
-                state.enqueue(newly_completed);
-                return true;
-            }
+        self.state.collector.push_delta(delta);
+
+        let mut enqueued = false;
+        if delta.contains('\n')
+            && let Some(committed_source) = self.state.collector.commit_complete_source()
+        {
+            self.raw_source.push_str(&committed_source);
+            self.recompute_streaming_render();
+            enqueued = self.sync_stable_queue();
         }
-        false
+        enqueued
     }
 
     /// Finalize the active stream. Drain and emit now.
     pub(crate) fn finalize(&mut self) -> Option<Box<dyn HistoryCell>> {
-        // Finalize collector first.
-        let remaining = {
-            let state = &mut self.state;
-            state.collector.finalize_and_drain()
-        };
-        // Collect all output first to avoid emitting headers when there is no content.
-        let mut out_lines = Vec::new();
-        {
-            let state = &mut self.state;
-            if !remaining.is_empty() {
-                state.enqueue(remaining);
-            }
-            let step = state.drain_all();
-            out_lines.extend(step);
+        let remainder_source = self.state.collector.finalize_and_drain_source();
+        if !remainder_source.is_empty() {
+            self.raw_source.push_str(&remainder_source);
+        }
+        if self.raw_source.is_empty() {
+            self.reset_stream_state();
+            return None;
         }
 
-        // Cleanup
-        self.state.clear();
-        self.finishing_after_drain = false;
-        self.emit(out_lines)
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
+        let out_lines = if self.emitted_stable_len >= rendered.len() {
+            Vec::new()
+        } else {
+            rendered[self.emitted_stable_len..].to_vec()
+        };
+
+        let out = self.emit(out_lines);
+        self.reset_stream_state();
+        out
     }
 
     /// Step animation: commit at most one queued line and handle end-of-drain cleanup.
     pub(crate) fn on_commit_tick(&mut self) -> (Option<Box<dyn HistoryCell>>, bool) {
         let step = self.state.step();
+        self.emitted_stable_len += step.len();
         (self.emit(step), self.state.is_idle())
     }
 
@@ -82,6 +92,7 @@ impl StreamController {
         max_lines: usize,
     ) -> (Option<Box<dyn HistoryCell>>, bool) {
         let step = self.state.drain_n(max_lines.max(1));
+        self.emitted_stable_len += step.len();
         (self.emit(step), self.state.is_idle())
     }
 
@@ -95,6 +106,21 @@ impl StreamController {
         self.state.oldest_queued_age(now)
     }
 
+    /// Returns the current mutable tail to render in the active cell.
+    pub(crate) fn current_tail_lines(&self) -> Vec<Line<'static>> {
+        let start = self.enqueued_stable_len.min(self.rendered_lines.len());
+        self.rendered_lines[start..].to_vec()
+    }
+
+    /// Returns whether the mutable tail should render the leading assistant marker.
+    pub(crate) fn tail_starts_stream(&self) -> bool {
+        !self.header_emitted && self.enqueued_stable_len == 0
+    }
+
+    pub(crate) fn has_live_tail(&self) -> bool {
+        !self.current_tail_lines().is_empty()
+    }
+
     fn emit(&mut self, lines: Vec<Line<'static>>) -> Option<Box<dyn HistoryCell>> {
         if lines.is_empty() {
             return None;
@@ -105,11 +131,69 @@ impl StreamController {
             !header_emitted
         })))
     }
+
+    fn recompute_streaming_render(&mut self) {
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
+        self.rendered_lines = rendered;
+    }
+
+    fn sync_stable_queue(&mut self) -> bool {
+        let tail_budget = self.active_tail_budget_lines();
+        let target_stable_len = self
+            .rendered_lines
+            .len()
+            .saturating_sub(tail_budget)
+            .max(self.emitted_stable_len);
+
+        if target_stable_len < self.enqueued_stable_len {
+            // A structural rewrite moved the stable boundary backward into queued-but-unemitted
+            // lines. Rebuild queue from the latest render snapshot.
+            self.state.clear_queue();
+            if self.emitted_stable_len < target_stable_len {
+                self.state.enqueue(
+                    self.rendered_lines[self.emitted_stable_len..target_stable_len].to_vec(),
+                );
+            }
+            self.enqueued_stable_len = target_stable_len;
+            return self.state.queued_len() > 0;
+        }
+
+        if target_stable_len == self.enqueued_stable_len {
+            return false;
+        }
+
+        self.state
+            .enqueue(self.rendered_lines[self.enqueued_stable_len..target_stable_len].to_vec());
+        self.enqueued_stable_len = target_stable_len;
+        true
+    }
+
+    fn active_tail_budget_lines(&self) -> usize {
+        if has_table_candidates_anywhere(&self.raw_source) {
+            self.rendered_lines.len()
+        } else {
+            0
+        }
+    }
+
+    fn reset_stream_state(&mut self) {
+        self.state.clear();
+        self.raw_source.clear();
+        self.rendered_lines.clear();
+        self.enqueued_stable_len = 0;
+        self.emitted_stable_len = 0;
+    }
 }
 
 /// Controller that streams proposed plan markdown into a styled plan block.
 pub(crate) struct PlanStreamController {
     state: StreamState,
+    width: Option<usize>,
+    raw_source: String,
+    rendered_lines: Vec<Line<'static>>,
+    enqueued_stable_len: usize,
+    emitted_stable_len: usize,
     header_emitted: bool,
     top_padding_emitted: bool,
 }
@@ -118,6 +202,11 @@ impl PlanStreamController {
     pub(crate) fn new(width: Option<usize>) -> Self {
         Self {
             state: StreamState::new(width),
+            width,
+            raw_source: String::new(),
+            rendered_lines: Vec::new(),
+            enqueued_stable_len: 0,
+            emitted_stable_len: 0,
             header_emitted: false,
             top_padding_emitted: false,
         }
@@ -125,44 +214,45 @@ impl PlanStreamController {
 
     /// Push a delta; if it contains a newline, commit completed lines and start animation.
     pub(crate) fn push(&mut self, delta: &str) -> bool {
-        let state = &mut self.state;
         if !delta.is_empty() {
-            state.has_seen_delta = true;
+            self.state.has_seen_delta = true;
         }
-        state.collector.push_delta(delta);
-        if delta.contains('\n') {
-            let newly_completed = state.collector.commit_complete_lines();
-            if !newly_completed.is_empty() {
-                state.enqueue(newly_completed);
-                return true;
-            }
+        self.state.collector.push_delta(delta);
+
+        let mut enqueued = false;
+        if delta.contains('\n')
+            && let Some(committed_source) = self.state.collector.commit_complete_source()
+        {
+            self.raw_source.push_str(&committed_source);
+            self.recompute_streaming_render();
+            enqueued = self.sync_stable_queue();
         }
-        false
+        enqueued
     }
 
     /// Finalize the active stream. Drain and emit now.
     pub(crate) fn finalize(&mut self) -> Option<Box<dyn HistoryCell>> {
-        let remaining = {
-            let state = &mut self.state;
-            state.collector.finalize_and_drain()
-        };
-        let mut out_lines = Vec::new();
-        {
-            let state = &mut self.state;
-            if !remaining.is_empty() {
-                state.enqueue(remaining);
-            }
-            let step = state.drain_all();
-            out_lines.extend(step);
+        let remainder_source = self.state.collector.finalize_and_drain_source();
+        if !remainder_source.is_empty() {
+            self.raw_source.push_str(&remainder_source);
         }
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
+        let out_lines = if self.emitted_stable_len >= rendered.len() {
+            Vec::new()
+        } else {
+            rendered[self.emitted_stable_len..].to_vec()
+        };
 
-        self.state.clear();
-        self.emit(out_lines, true)
+        let out = self.emit(out_lines, true);
+        self.reset_plan_stream_state();
+        out
     }
 
     /// Step animation: commit at most one queued line and handle end-of-drain cleanup.
     pub(crate) fn on_commit_tick(&mut self) -> (Option<Box<dyn HistoryCell>>, bool) {
         let step = self.state.step();
+        self.emitted_stable_len += step.len();
         (self.emit(step, false), self.state.is_idle())
     }
 
@@ -175,6 +265,7 @@ impl PlanStreamController {
         max_lines: usize,
     ) -> (Option<Box<dyn HistoryCell>>, bool) {
         let step = self.state.drain_n(max_lines.max(1));
+        self.emitted_stable_len += step.len();
         (self.emit(step, false), self.state.is_idle())
     }
 
@@ -227,6 +318,175 @@ impl PlanStreamController {
             is_stream_continuation,
         )))
     }
+
+    fn recompute_streaming_render(&mut self) {
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
+        self.rendered_lines = rendered;
+    }
+
+    fn sync_stable_queue(&mut self) -> bool {
+        let tail_budget = self.active_tail_budget_lines();
+        let target_stable_len = self
+            .rendered_lines
+            .len()
+            .saturating_sub(tail_budget)
+            .max(self.emitted_stable_len);
+
+        if target_stable_len < self.enqueued_stable_len {
+            self.state.clear_queue();
+            if self.emitted_stable_len < target_stable_len {
+                self.state.enqueue(
+                    self.rendered_lines[self.emitted_stable_len..target_stable_len].to_vec(),
+                );
+            }
+            self.enqueued_stable_len = target_stable_len;
+            return self.state.queued_len() > 0;
+        }
+
+        if target_stable_len == self.enqueued_stable_len {
+            return false;
+        }
+
+        self.state
+            .enqueue(self.rendered_lines[self.enqueued_stable_len..target_stable_len].to_vec());
+        self.enqueued_stable_len = target_stable_len;
+        true
+    }
+
+    fn active_tail_budget_lines(&self) -> usize {
+        if has_table_candidates_anywhere(&self.raw_source) {
+            self.rendered_lines.len()
+        } else {
+            0
+        }
+    }
+
+    fn reset_plan_stream_state(&mut self) {
+        self.state.clear();
+        self.raw_source.clear();
+        self.rendered_lines.clear();
+        self.enqueued_stable_len = 0;
+        self.emitted_stable_len = 0;
+    }
+}
+
+fn parse_fence_marker(line: &str) -> Option<(char, usize)> {
+    let mut chars = line.chars();
+    let first = chars.next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let mut len = 1usize;
+    for ch in chars {
+        if ch == first {
+            len += 1;
+        } else {
+            break;
+        }
+    }
+    if len < 3 {
+        return None;
+    }
+    Some((first, len))
+}
+
+struct ParsedLine<'a> {
+    text: &'a str,
+    fence_context: FenceContext,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FenceContext {
+    Outside,
+    Markdown,
+    Other,
+}
+
+fn is_markdown_fence(trimmed_line: &str, marker_len: usize) -> bool {
+    let info = trimmed_line[marker_len..]
+        .split_whitespace()
+        .next()
+        .unwrap_or_default();
+    info.eq_ignore_ascii_case("md") || info.eq_ignore_ascii_case("markdown")
+}
+
+fn parse_lines_with_fence_state(source: &str) -> Vec<ParsedLine<'_>> {
+    let mut in_fence = false;
+    let mut fence_char = '\0';
+    let mut fence_context = FenceContext::Other;
+    let mut lines = Vec::new();
+
+    for raw_line in source.split('\n') {
+        lines.push(ParsedLine {
+            text: raw_line,
+            fence_context: if in_fence {
+                fence_context
+            } else {
+                FenceContext::Outside
+            },
+        });
+
+        let trimmed = raw_line.trim_start();
+        if let Some((marker, len)) = parse_fence_marker(trimmed) {
+            if !in_fence {
+                in_fence = true;
+                fence_char = marker;
+                fence_context = if is_markdown_fence(trimmed, len) {
+                    FenceContext::Markdown
+                } else {
+                    FenceContext::Other
+                };
+            } else if marker == fence_char && len >= 3 {
+                in_fence = false;
+                fence_context = FenceContext::Other;
+            }
+        }
+    }
+
+    lines
+}
+
+fn strip_blockquote_prefix(line: &str) -> &str {
+    let mut rest = line.trim_start();
+    loop {
+        let Some(stripped) = rest.strip_prefix('>') else {
+            return rest;
+        };
+        rest = stripped.strip_prefix(' ').unwrap_or(stripped).trim_start();
+    }
+}
+
+fn table_candidate_text(line: &str) -> Option<&str> {
+    let stripped = strip_blockquote_prefix(line).trim();
+    let pipe_count = stripped.chars().filter(|ch| *ch == '|').count();
+    (pipe_count >= 2).then_some(stripped)
+}
+
+fn is_table_candidate_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let pipe_count = trimmed.chars().filter(|ch| *ch == '|').count();
+    if pipe_count < 2 {
+        return false;
+    }
+    if trimmed.starts_with('|') {
+        return true;
+    }
+
+    // Support GFM-style tables without outer pipes:
+    // "Col A | Col B | Col C"
+    trimmed
+        .split('|')
+        .map(str::trim)
+        .all(|segment| !segment.is_empty())
+}
+
+fn has_table_candidates_anywhere(source: &str) -> bool {
+    parse_lines_with_fence_state(source)
+        .iter()
+        .filter(|line| line.fence_context != FenceContext::Other)
+        .filter_map(|line| table_candidate_text(line.text))
+        .any(is_table_candidate_line)
 }
 
 #[cfg(test)]
@@ -244,6 +504,45 @@ mod tests {
                     .join("")
             })
             .collect()
+    }
+
+    fn collect_streamed_lines(deltas: &[&str], width: Option<usize>) -> Vec<String> {
+        let mut ctrl = StreamController::new(width);
+        let mut lines = Vec::new();
+        for d in deltas {
+            ctrl.push(d);
+            while let (Some(cell), idle) = ctrl.on_commit_tick() {
+                lines.extend(cell.transcript_lines(u16::MAX));
+                if idle {
+                    break;
+                }
+            }
+        }
+        if let Some(cell) = ctrl.finalize() {
+            lines.extend(cell.transcript_lines(u16::MAX));
+        }
+        lines_to_plain_strings(&lines)
+            .into_iter()
+            .map(|s| s.chars().skip(2).collect::<String>())
+            .collect()
+    }
+
+    fn collect_plan_streamed_lines(deltas: &[&str], width: Option<usize>) -> Vec<String> {
+        let mut ctrl = PlanStreamController::new(width);
+        let mut lines = Vec::new();
+        for d in deltas {
+            ctrl.push(d);
+            while let (Some(cell), idle) = ctrl.on_commit_tick() {
+                lines.extend(cell.transcript_lines(u16::MAX));
+                if idle {
+                    break;
+                }
+            }
+        }
+        if let Some(cell) = ctrl.finalize() {
+            lines.extend(cell.transcript_lines(u16::MAX));
+        }
+        lines_to_plain_strings(&lines)
     }
 
     #[tokio::test]
@@ -346,7 +645,7 @@ mod tests {
         // Full render of the same source
         let source: String = deltas.iter().copied().collect();
         let mut rendered: Vec<ratatui::text::Line<'static>> = Vec::new();
-        crate::markdown::append_markdown(&source, None, &mut rendered);
+        crate::markdown::append_markdown_agent(&source, None, &mut rendered);
         let rendered_strs = lines_to_plain_strings(&rendered);
 
         assert_eq!(streamed, rendered_strs);
@@ -367,6 +666,302 @@ mod tests {
         assert_eq!(
             streamed, expected,
             "expected exact rendered lines for loose/tight section"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_streamed_table_matches_full_render_widths() {
+        let deltas = vec![
+            "| Key | Description |\n",
+            "| --- | --- |\n",
+            "| -v | Enable very verbose logging output for debugging |\n",
+            "\n",
+        ];
+
+        let streamed = collect_streamed_lines(&deltas, Some(80));
+
+        let source: String = deltas.iter().copied().collect();
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&source, Some(80), &mut rendered);
+        let expected = lines_to_plain_strings(&rendered);
+
+        assert_eq!(streamed, expected);
+    }
+
+    #[tokio::test]
+    async fn controller_holds_blockquoted_table_tail_until_stable() {
+        let deltas = vec![
+            "> | A | B |\n",
+            "> | --- | --- |\n",
+            "> | longvalue | ok |\n",
+            "\n",
+        ];
+
+        let streamed = collect_streamed_lines(&deltas, Some(80));
+
+        let source: String = deltas.iter().copied().collect();
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&source, Some(80), &mut rendered);
+        let expected = lines_to_plain_strings(&rendered);
+
+        assert_eq!(streamed, expected);
+    }
+
+    #[tokio::test]
+    async fn controller_handles_table_immediately_after_heading() {
+        let deltas = vec![
+            "### 1) Basic table\n",
+            "| Name | Role | Status |\n",
+            "|---|---|---|\n",
+            "| Alice | Admin | Active |\n",
+            "| Bob | Editor | Pending |\n",
+            "\n",
+        ];
+
+        let streamed = collect_streamed_lines(&deltas, Some(100));
+
+        let source: String = deltas.iter().copied().collect();
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&source, Some(100), &mut rendered);
+        let expected = lines_to_plain_strings(&rendered);
+
+        assert_eq!(streamed, expected);
+    }
+
+    #[tokio::test]
+    async fn controller_renders_unicode_for_multi_table_response_shape() {
+        let source = "Absolutely. Here are several different Markdown table patterns you can use for rendering tests.\n\n| Name  | Role      | Location |\n|-------|-----------|----------|\n| Ava   | Engineer  | NYC      |\n| Malik | Designer  | Berlin   |\n| Priya | PM        | Remote   |\n\n| Item        | Qty | Price | In Stock |\n|:------------|----:|------:|:--------:|\n| Keyboard    |   2 | 49.99 |    Yes   |\n| Mouse       |  10 | 19.50 |    Yes   |\n| Monitor     |   1 | 219.0 |    No    |\n\n| Field         | Example                         | Notes                    |\n|---------------|----------------------------------|--------------------------|\n| Escaped pipe  | `foo \\| bar`                    | Should stay in one cell  |\n| Inline code   | `let x = value;`                | Monospace inline content |\n| Link          | [OpenAI](https://openai.com)    | Standard markdown link   |\n";
+
+        let chunked = source
+            .split_inclusive('\n')
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let deltas = chunked.iter().map(String::as_str).collect::<Vec<_>>();
+        let streamed = collect_streamed_lines(&deltas, Some(120));
+        assert!(
+            streamed.iter().any(|line| line.contains('┌')),
+            "expected unicode table border in streamed output: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_renders_unicode_for_no_outer_pipes_table_shape() {
+        let source = "### 1) Basic\n\n| Name | Role | Active |\n|---|---|---|\n| Alice | Engineer | Yes |\n| Bob | Designer | No |\n\n### 2) No outer pipes\n\nCol A | Col B | Col C\n--- | --- | ---\nx | y | z\n10 | 20 | 30\n\n### 3) Another table\n\n| Key | Value |\n|---|---|\n| a | b |\n";
+
+        let chunked = source
+            .split_inclusive('\n')
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let deltas = chunked.iter().map(String::as_str).collect::<Vec<_>>();
+        let streamed = collect_streamed_lines(&deltas, Some(100));
+
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(source, Some(100), &mut rendered);
+        let expected = lines_to_plain_strings(&rendered);
+
+        assert_eq!(streamed, expected);
+        let has_raw_no_outer_header = streamed
+            .iter()
+            .any(|line| line.trim() == "Col A | Col B | Col C");
+        assert!(
+            !has_raw_no_outer_header,
+            "no-outer-pipes header should not remain raw in final streamed output: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_stabilizes_first_no_outer_pipes_table_in_response() {
+        let deltas = vec![
+            "### No outer pipes first\n\n",
+            "Col A | Col B | Col C\n",
+            "--- | --- | ---\n",
+            "x | y | z\n",
+            "10 | 20 | 30\n",
+            "\n",
+            "After table paragraph.\n",
+        ];
+        let streamed = collect_streamed_lines(&deltas, Some(100));
+
+        let source: String = deltas.iter().copied().collect();
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&source, Some(100), &mut rendered);
+        let expected = lines_to_plain_strings(&rendered);
+
+        assert_eq!(streamed, expected);
+        assert!(
+            streamed.iter().any(|line| line.contains('┌')),
+            "expected unicode table border for no-outer-pipes streaming: {streamed:?}"
+        );
+        assert!(
+            !streamed
+                .iter()
+                .any(|line| line.trim() == "Col A | Col B | Col C"),
+            "did not expect raw no-outer-pipes header in final streamed output: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_converts_no_outer_table_between_preboxed_sections() {
+        let source = "  ┌───────┬──────────┬────────┐\n  │ Name  │ Role     │ Active │\n  ├───────┼──────────┼────────┤\n  │ Alice │ Engineer │ Yes    │\n  │ Bob   │ Designer │ No     │\n  │ Cara  │ PM       │ Yes    │\n  └───────┴──────────┴────────┘\n\n  ### 3) No outer pipes\n\n  Col A | Col B | Col C\n  --- | --- | ---\n  x | y | z\n  10 | 20 | 30\n\n  ┌─────────────────┬────────┬────────────────────────┐\n  │ Example         │ Output │ Notes                  │\n  ├─────────────────┼────────┼────────────────────────┤\n  │ a | b           │ `a     │ b`                     │\n  │ npm run test    │ ok     │ Inline code formatting │\n  │ SELECT * FROM t │ 3 rows │ SQL snippet            │\n  └─────────────────┴────────┴────────────────────────┘\n";
+
+        let deltas = source
+            .split_inclusive('\n')
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let streamed = collect_streamed_lines(
+            &deltas.iter().map(String::as_str).collect::<Vec<_>>(),
+            Some(100),
+        );
+
+        let has_raw_no_outer_header = streamed
+            .iter()
+            .any(|line| line.trim() == "Col A | Col B | Col C");
+        assert!(
+            !has_raw_no_outer_header,
+            "no-outer table header remained raw in streamed output: {streamed:?}"
+        );
+        assert!(
+            streamed
+                .iter()
+                .any(|line| line.contains("┌───────┬───────┬───────┐")),
+            "expected converted no-outer table border in streamed output: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_keeps_markdown_fenced_tables_mutable_until_finalize() {
+        let source = "```md\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n";
+        let deltas = vec![
+            "```md\n",
+            "| A | B |\n",
+            "|---|---|\n",
+            "| 1 | 2 |\n",
+            "```\n",
+        ];
+        let streamed = collect_streamed_lines(&deltas, Some(80));
+
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(source, Some(80), &mut rendered);
+        let expected = lines_to_plain_strings(&rendered);
+
+        assert_eq!(streamed, expected);
+        assert!(
+            streamed.iter().any(|line| line.contains('┌')),
+            "expected unicode table border in streamed output: {streamed:?}"
+        );
+        assert!(
+            !streamed.iter().any(|line| line.trim() == "| A | B |"),
+            "did not expect raw table header line after finalize: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_keeps_markdown_fenced_no_outer_tables_mutable_until_finalize() {
+        let source =
+            "```md\nCol A | Col B | Col C\n--- | --- | ---\nx | y | z\n10 | 20 | 30\n```\n";
+        let deltas = vec![
+            "```md\n",
+            "Col A | Col B | Col C\n",
+            "--- | --- | ---\n",
+            "x | y | z\n",
+            "10 | 20 | 30\n",
+            "```\n",
+        ];
+        let streamed = collect_streamed_lines(&deltas, Some(100));
+
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(source, Some(100), &mut rendered);
+        let expected = lines_to_plain_strings(&rendered);
+
+        assert_eq!(streamed, expected);
+        assert!(
+            streamed.iter().any(|line| line.contains('┌')),
+            "expected unicode table border in streamed output: {streamed:?}"
+        );
+        assert!(
+            !streamed
+                .iter()
+                .any(|line| line.trim() == "Col A | Col B | Col C"),
+            "did not expect raw no-outer-pipes header line after finalize: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_keeps_non_markdown_fenced_tables_as_code() {
+        let source = "```sh\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n";
+        let deltas = vec![
+            "```sh\n",
+            "| A | B |\n",
+            "|---|---|\n",
+            "| 1 | 2 |\n",
+            "```\n",
+        ];
+        let streamed = collect_streamed_lines(&deltas, Some(80));
+
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(source, Some(80), &mut rendered);
+        let expected = lines_to_plain_strings(&rendered);
+
+        assert_eq!(streamed, expected);
+        assert!(
+            streamed.iter().any(|line| line.trim() == "| A | B |"),
+            "expected code-fenced pipe line to remain raw: {streamed:?}"
+        );
+        assert!(
+            !streamed.iter().any(|line| line.contains('┌')),
+            "did not expect unicode table border for non-markdown fence: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_controller_streamed_table_matches_finalize_render() {
+        let deltas = vec![
+            "## Build plan\n\n",
+            "| Step | Owner |\n",
+            "|---|---|\n",
+            "| Write tests | Agent |\n",
+            "| Verify output | User |\n",
+            "\n",
+        ];
+        let streamed = collect_plan_streamed_lines(&deltas, Some(80));
+
+        let source: String = deltas.iter().copied().collect();
+        let baseline = collect_plan_streamed_lines(&[source.as_str()], Some(80));
+
+        assert_eq!(streamed, baseline);
+        assert!(
+            streamed.iter().any(|line| line.contains('┌')),
+            "expected unicode table border in plan streamed output: {streamed:?}"
+        );
+        assert!(
+            !streamed
+                .iter()
+                .any(|line| line.trim() == "| Step | Owner |"),
+            "did not expect raw table header line in plan output: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_controller_streamed_markdown_fenced_table_matches_finalize_render() {
+        let deltas = vec![
+            "## Build plan\n\n",
+            "```md\n",
+            "| Step | Owner |\n",
+            "|---|---|\n",
+            "| Write tests | Agent |\n",
+            "| Verify output | User |\n",
+            "```\n",
+            "\n",
+        ];
+        let streamed = collect_plan_streamed_lines(&deltas, Some(80));
+
+        let source: String = deltas.iter().copied().collect();
+        let baseline = collect_plan_streamed_lines(&[source.as_str()], Some(80));
+
+        assert_eq!(streamed, baseline);
+        assert!(
+            streamed.iter().any(|line| line.contains('┌')),
+            "expected unicode table border in fenced plan output: {streamed:?}"
         );
     }
 }
