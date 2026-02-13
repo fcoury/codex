@@ -11,22 +11,22 @@ pub(crate) struct MarkdownStreamCollector {
     committed_source_len: usize,
     #[cfg(test)]
     committed_line_count: usize,
-    #[cfg(test)]
     width: Option<usize>,
 }
 
 impl MarkdownStreamCollector {
     pub fn new(width: Option<usize>) -> Self {
-        #[cfg(not(test))]
-        let _ = width;
         Self {
             buffer: String::new(),
             committed_source_len: 0,
             #[cfg(test)]
             committed_line_count: 0,
-            #[cfg(test)]
             width,
         }
+    }
+
+    pub fn set_width(&mut self, width: Option<usize>) {
+        self.width = width;
     }
 
     pub fn clear(&mut self) {

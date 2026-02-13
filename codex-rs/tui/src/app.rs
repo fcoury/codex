@@ -108,6 +108,7 @@ const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
 /// Smooth-mode streaming drains one line per tick, so this interval controls
 /// perceived typing speed for non-backlogged output.
 const COMMIT_ANIMATION_TICK: Duration = tui::TARGET_FRAME_INTERVAL;
+const RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
 
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
@@ -531,6 +532,14 @@ pub(crate) struct App {
     pub(crate) overlay: Option<Overlay>,
     pub(crate) deferred_history_lines: Vec<Line<'static>>,
     has_emitted_history_lines: bool,
+    last_transcript_render_width: Option<u16>,
+    resize_reflow_pending_until: Option<Instant>,
+
+    /// Set to `true` when a resize reflow runs during an active stream, so
+    /// that `ConsolidateAgentMessage` can schedule a re-reflow to pick up the
+    /// consolidated `AgentMarkdownCell` rendering. Reset to `false` when a
+    /// new stream starts (`StartCommitAnimation`).
+    reflow_ran_during_stream: bool,
 
     pub(crate) enhanced_keys_supported: bool,
 
@@ -877,10 +886,81 @@ impl App {
         self.transcript_cells.clear();
         self.deferred_history_lines.clear();
         self.has_emitted_history_lines = false;
+        self.last_transcript_render_width = None;
+        self.resize_reflow_pending_until = None;
         self.backtrack = BacktrackState::default();
         self.backtrack_render_pending = false;
         tui.terminal.clear_scrollback()?;
         tui.terminal.clear()?;
+        Ok(())
+    }
+
+    fn display_lines_for_history_insert(
+        &mut self,
+        cell: &dyn HistoryCell,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        let mut display = cell.display_lines(width);
+        if !display.is_empty() && !cell.is_stream_continuation() {
+            if self.has_emitted_history_lines {
+                display.insert(0, Line::from(""));
+            } else {
+                self.has_emitted_history_lines = true;
+            }
+        }
+        display
+    }
+
+    fn insert_history_cell_lines(
+        &mut self,
+        tui: &mut tui::Tui,
+        cell: &dyn HistoryCell,
+        width: u16,
+    ) {
+        let display = self.display_lines_for_history_insert(cell, width);
+        if display.is_empty() {
+            return;
+        }
+        if self.overlay.is_some() {
+            self.deferred_history_lines.extend(display);
+        } else {
+            tui.insert_history_lines(display);
+        }
+    }
+
+    fn schedule_resize_reflow(&mut self) {
+        self.resize_reflow_pending_until = Some(Instant::now() + RESIZE_REFLOW_DEBOUNCE);
+    }
+
+    fn maybe_run_resize_reflow(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        let Some(deadline) = self.resize_reflow_pending_until else {
+            return Ok(());
+        };
+        if Instant::now() < deadline || self.overlay.is_some() {
+            return Ok(());
+        }
+
+        self.resize_reflow_pending_until = None;
+        if self.transcript_cells.is_empty() {
+            self.has_emitted_history_lines = false;
+            self.deferred_history_lines.clear();
+            return Ok(());
+        }
+
+        tui.terminal.clear_scrollback()?;
+        tui.terminal.clear()?;
+        self.has_emitted_history_lines = false;
+        self.deferred_history_lines.clear();
+
+        // Track that a reflow happened; if streaming cells haven't been
+        // consolidated yet, ConsolidateAgentMessage will schedule a
+        // follow-up reflow with the correct AgentMarkdownCell rendering.
+        self.reflow_ran_during_stream = true;
+
+        let width = tui.terminal.size()?.width;
+        for cell in self.transcript_cells.clone() {
+            self.insert_history_cell_lines(tui, cell.as_ref(), width);
+        }
         Ok(())
     }
 
@@ -1133,6 +1213,9 @@ impl App {
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
+            last_transcript_render_width: None,
+            resize_reflow_pending_until: None,
+            reflow_ran_during_stream: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
             backtrack: BacktrackState::default(),
@@ -1265,6 +1348,15 @@ impl App {
     ) -> Result<AppRunControl> {
         if matches!(event, TuiEvent::Draw) {
             let size = tui.terminal.size()?;
+            let previous_width = self.last_transcript_render_width.replace(size.width);
+            if previous_width.is_some_and(|width| width != size.width) {
+                self.chat_widget.on_terminal_resize(size.width);
+                self.schedule_resize_reflow();
+                tui.frame_requester()
+                    .schedule_frame_in(RESIZE_REFLOW_DEBOUNCE);
+            } else if previous_width.is_none() {
+                self.chat_widget.on_terminal_resize(size.width);
+            }
             if size != tui.terminal.last_known_screen_size {
                 self.refresh_status_line();
             }
@@ -1290,6 +1382,7 @@ impl App {
                         self.backtrack_render_pending = false;
                         self.render_transcript_once(tui);
                     }
+                    self.maybe_run_resize_reflow(tui)?;
                     self.chat_widget.maybe_post_pending_notification(tui);
                     if self
                         .chat_widget
@@ -1520,23 +1613,72 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
                 self.transcript_cells.push(cell.clone());
-                let mut display = cell.display_lines(tui.terminal.last_known_screen_size.width);
-                if !display.is_empty() {
-                    // Only insert a separating blank line for new cells that are not
-                    // part of an ongoing stream. Streaming continuations should not
-                    // accrue extra blank lines between chunks.
-                    if !cell.is_stream_continuation() {
-                        if self.has_emitted_history_lines {
-                            display.insert(0, Line::from(""));
-                        } else {
-                            self.has_emitted_history_lines = true;
-                        }
+                self.insert_history_cell_lines(
+                    tui,
+                    cell.as_ref(),
+                    tui.terminal.last_known_screen_size.width,
+                );
+            }
+            AppEvent::ConsolidateAgentMessage(source) => {
+                // Walk backward to find the contiguous run of streaming
+                // AgentMessageCells that belong to the just-finalized stream.
+                let end = self.transcript_cells.len();
+                tracing::debug!(
+                    "ConsolidateAgentMessage: transcript_cells.len()={end}, source_len={}",
+                    source.len()
+                );
+                let mut start = end;
+                // Include continuation cells that are AgentMessageCells.
+                // We must check the concrete type to avoid consuming
+                // unrelated stream continuations (e.g. ProposedPlanStreamCell).
+                while start > 0
+                    && self.transcript_cells[start - 1].is_stream_continuation()
+                    && self.transcript_cells[start - 1]
+                        .as_any()
+                        .is::<history_cell::AgentMessageCell>()
+                {
+                    start -= 1;
+                }
+                // Include the head cell (is_stream_continuation == false) that
+                // started this agent message run.
+                if start > 0
+                    && self.transcript_cells[start - 1]
+                        .as_any()
+                        .is::<history_cell::AgentMessageCell>()
+                    && !self.transcript_cells[start - 1].is_stream_continuation()
+                {
+                    start -= 1;
+                }
+                if start < end {
+                    tracing::debug!(
+                        "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
+                    );
+                    let consolidated: Arc<dyn HistoryCell> =
+                        Arc::new(history_cell::AgentMarkdownCell::new(source));
+                    self.transcript_cells
+                        .splice(start..end, std::iter::once(consolidated.clone()));
+
+                    // Keep the transcript overlay in sync so it doesn't
+                    // hold stale AgentMessageCells while the main
+                    // transcript has the consolidated AgentMarkdownCell.
+                    if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+                        t.consolidate_cells(start..end, consolidated.clone());
+                        tui.frame_requester().schedule_frame();
                     }
-                    if self.overlay.is_some() {
-                        self.deferred_history_lines.extend(display);
-                    } else {
-                        tui.insert_history_lines(display);
+
+                    // If a resize reflow ran while these cells were still
+                    // unconsolidated AgentMessageCells, the scrollback has
+                    // stale table rendering. Schedule a re-reflow so the
+                    // consolidated AgentMarkdownCell re-renders correctly.
+                    if self.reflow_ran_during_stream {
+                        self.schedule_resize_reflow();
+                        tui.frame_requester()
+                            .schedule_frame_in(RESIZE_REFLOW_DEBOUNCE);
                     }
+                } else {
+                    tracing::debug!(
+                        "ConsolidateAgentMessage: no cells to consolidate (start={start}, end={end})"
+                    );
                 }
             }
             AppEvent::ApplyThreadRollback { num_turns } => {
@@ -1545,6 +1687,11 @@ impl App {
                 }
             }
             AppEvent::StartCommitAnimation => {
+                // New stream starting; reset the flag so ConsolidateAgentMessage
+                // only triggers a re-reflow if a resize actually happened during
+                // this stream's lifetime.
+                self.reflow_ran_during_stream = false;
+
                 if self
                     .commit_anim_running
                     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -2776,6 +2923,9 @@ mod tests {
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
+            last_transcript_render_width: None,
+            resize_reflow_pending_until: None,
+            reflow_ran_during_stream: false,
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
@@ -2833,6 +2983,9 @@ mod tests {
                 overlay: None,
                 deferred_history_lines: Vec::new(),
                 has_emitted_history_lines: false,
+                last_transcript_render_width: None,
+                resize_reflow_pending_until: None,
+                reflow_ran_during_stream: false,
                 enhanced_keys_supported: false,
                 commit_anim_running: Arc::new(AtomicBool::new(false)),
                 status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),

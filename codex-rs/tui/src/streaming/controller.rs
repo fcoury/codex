@@ -52,16 +52,20 @@ impl StreamController {
         enqueued
     }
 
-    /// Finalize the active stream. Drain and emit now.
-    pub(crate) fn finalize(&mut self) -> Option<Box<dyn HistoryCell>> {
+    /// Finalize the active stream. Returns the final cell (if any remaining
+    /// lines) and the raw markdown source for consolidation.
+    pub(crate) fn finalize(&mut self) -> (Option<Box<dyn HistoryCell>>, Option<String>) {
         let remainder_source = self.state.collector.finalize_and_drain_source();
         if !remainder_source.is_empty() {
             self.raw_source.push_str(&remainder_source);
         }
         if self.raw_source.is_empty() {
             self.reset_stream_state();
-            return None;
+            return (None, None);
         }
+
+        // Capture the source before reset clears it.
+        let source = self.raw_source.clone();
 
         let mut rendered = Vec::new();
         crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
@@ -73,7 +77,7 @@ impl StreamController {
 
         let out = self.emit(out_lines);
         self.reset_stream_state();
-        out
+        (out, Some(source))
     }
 
     /// Step animation: commit at most one queued line and handle end-of-drain cleanup.
@@ -119,6 +123,20 @@ impl StreamController {
 
     pub(crate) fn has_live_tail(&self) -> bool {
         !self.current_tail_lines().is_empty()
+    }
+
+    /// Update rendering width and rebuild queued stable lines to match the new layout.
+    pub(crate) fn set_width(&mut self, width: Option<usize>) {
+        if self.width == width {
+            return;
+        }
+        self.width = width;
+        self.state.collector.set_width(width);
+        if self.raw_source.is_empty() {
+            return;
+        }
+        self.recompute_streaming_render();
+        self.rebuild_stable_queue_from_render();
     }
 
     fn emit(&mut self, lines: Vec<Line<'static>>) -> Option<Box<dyn HistoryCell>> {
@@ -167,6 +185,21 @@ impl StreamController {
             .enqueue(self.rendered_lines[self.enqueued_stable_len..target_stable_len].to_vec());
         self.enqueued_stable_len = target_stable_len;
         true
+    }
+
+    fn rebuild_stable_queue_from_render(&mut self) {
+        let tail_budget = self.active_tail_budget_lines();
+        let target_stable_len = self
+            .rendered_lines
+            .len()
+            .saturating_sub(tail_budget)
+            .max(self.emitted_stable_len);
+        self.state.clear_queue();
+        if self.emitted_stable_len < target_stable_len {
+            self.state
+                .enqueue(self.rendered_lines[self.emitted_stable_len..target_stable_len].to_vec());
+        }
+        self.enqueued_stable_len = target_stable_len;
     }
 
     fn active_tail_budget_lines(&self) -> usize {
@@ -279,6 +312,20 @@ impl PlanStreamController {
         self.state.oldest_queued_age(now)
     }
 
+    /// Update rendering width and rebuild queued stable lines to match the new layout.
+    pub(crate) fn set_width(&mut self, width: Option<usize>) {
+        if self.width == width {
+            return;
+        }
+        self.width = width;
+        self.state.collector.set_width(width);
+        if self.raw_source.is_empty() {
+            return;
+        }
+        self.recompute_streaming_render();
+        self.rebuild_stable_queue_from_render();
+    }
+
     fn emit(
         &mut self,
         lines: Vec<Line<'static>>,
@@ -352,6 +399,21 @@ impl PlanStreamController {
             .enqueue(self.rendered_lines[self.enqueued_stable_len..target_stable_len].to_vec());
         self.enqueued_stable_len = target_stable_len;
         true
+    }
+
+    fn rebuild_stable_queue_from_render(&mut self) {
+        let tail_budget = self.active_tail_budget_lines();
+        let target_stable_len = self
+            .rendered_lines
+            .len()
+            .saturating_sub(tail_budget)
+            .max(self.emitted_stable_len);
+        self.state.clear_queue();
+        if self.emitted_stable_len < target_stable_len {
+            self.state
+                .enqueue(self.rendered_lines[self.emitted_stable_len..target_stable_len].to_vec());
+        }
+        self.enqueued_stable_len = target_stable_len;
     }
 
     fn active_tail_budget_lines(&self) -> usize {
@@ -571,7 +633,7 @@ mod tests {
                 }
             }
         }
-        if let Some(cell) = ctrl.finalize() {
+        if let (Some(cell), _source) = ctrl.finalize() {
             lines.extend(cell.transcript_lines(u16::MAX));
         }
         lines_to_plain_strings(&lines)
@@ -596,6 +658,65 @@ mod tests {
             lines.extend(cell.transcript_lines(u16::MAX));
         }
         lines_to_plain_strings(&lines)
+    }
+
+    #[test]
+    fn controller_set_width_rebuilds_queued_lines() {
+        let mut ctrl = StreamController::new(Some(120));
+        let delta = "This is a long line that should wrap into multiple rows when resized.\n";
+        assert!(ctrl.push(delta));
+        assert_eq!(ctrl.queued_lines(), 1);
+
+        ctrl.set_width(Some(24));
+        let (cell, idle) = ctrl.on_commit_tick_batch(usize::MAX);
+        let rendered = lines_to_plain_strings(
+            &cell
+                .expect("expected resized queued lines")
+                .transcript_lines(u16::MAX),
+        );
+
+        assert!(idle);
+        assert!(
+            rendered.len() > 1,
+            "expected resized content to occupy multiple lines, got {rendered:?}",
+        );
+    }
+
+    #[test]
+    fn controller_set_width_preserves_in_flight_tail() {
+        let mut ctrl = StreamController::new(Some(80));
+        ctrl.push("tail without newline");
+        ctrl.set_width(Some(24));
+
+        let (cell, _source) = ctrl.finalize();
+        let rendered = lines_to_plain_strings(
+            &cell
+                .expect("expected finalized tail")
+                .transcript_lines(u16::MAX),
+        );
+
+        assert_eq!(rendered, vec!["• tail without newline".to_string()]);
+    }
+
+    #[test]
+    fn plan_controller_set_width_preserves_in_flight_tail() {
+        let mut ctrl = PlanStreamController::new(Some(80));
+        ctrl.push("1. Item without newline");
+        ctrl.set_width(Some(24));
+
+        let rendered = lines_to_plain_strings(
+            &ctrl
+                .finalize()
+                .expect("expected finalized tail")
+                .transcript_lines(u16::MAX),
+        );
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Item without newline")),
+            "expected finalized plan content after resize, got {rendered:?}",
+        );
     }
 
     #[tokio::test]
@@ -685,7 +806,7 @@ mod tests {
             }
         }
         // Finalize and flush remaining lines now.
-        if let Some(cell) = ctrl.finalize() {
+        if let (Some(cell), _source) = ctrl.finalize() {
             lines.extend(cell.transcript_lines(u16::MAX));
         }
 

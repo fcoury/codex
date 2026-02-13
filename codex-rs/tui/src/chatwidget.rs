@@ -812,8 +812,15 @@ impl ChatWidget {
         let had_stream_controller = self.stream_controller.is_some();
         if let Some(mut controller) = self.stream_controller.take() {
             self.clear_active_stream_tail();
-            if let Some(cell) = controller.finalize() {
+            let (cell, source) = controller.finalize();
+            if let Some(cell) = cell {
                 self.add_boxed_history(cell);
+            }
+            // Consolidate the run of streaming AgentMessageCells into a single
+            // AgentMarkdownCell that can re-render from source on resize.
+            if let Some(source) = source {
+                self.app_event_tx
+                    .send(AppEvent::ConsolidateAgentMessage(source));
             }
         }
         self.adaptive_chunking.reset();
@@ -2297,6 +2304,19 @@ impl ChatWidget {
             .get()
             .or_else(|| terminal::size().ok().map(|(w, _)| usize::from(w)))
             .map(|w| w.saturating_sub(reserved_cols))
+    }
+
+    pub(crate) fn on_terminal_resize(&mut self, width: u16) {
+        self.last_rendered_width.set(Some(width as usize));
+        let stream_width = self.current_stream_width(2);
+        let plan_stream_width = self.current_stream_width(4);
+        if let Some(controller) = self.stream_controller.as_mut() {
+            controller.set_width(stream_width);
+        }
+        if let Some(controller) = self.plan_stream_controller.as_mut() {
+            controller.set_width(plan_stream_width);
+        }
+        self.sync_active_stream_tail();
     }
 
     fn worked_elapsed_from(&mut self, current_elapsed: u64) -> u64 {
