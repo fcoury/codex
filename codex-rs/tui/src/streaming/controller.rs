@@ -459,8 +459,7 @@ fn strip_blockquote_prefix(line: &str) -> &str {
 
 fn table_candidate_text(line: &str) -> Option<&str> {
     let stripped = strip_blockquote_prefix(line).trim();
-    let pipe_count = stripped.chars().filter(|ch| *ch == '|').count();
-    (pipe_count >= 2).then_some(stripped)
+    parse_table_segments(stripped).map(|_| stripped)
 }
 
 fn parse_table_segments(line: &str) -> Option<Vec<&str>> {
@@ -867,6 +866,33 @@ mod tests {
                 .iter()
                 .any(|line| line.trim() == "Col A | Col B | Col C"),
             "did not expect raw no-outer-pipes header in final streamed output: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_stabilizes_two_column_no_outer_table_in_response() {
+        let deltas = vec![
+            "A | B\n",
+            "--- | ---\n",
+            "left | right\n",
+            "\n",
+            "After table paragraph.\n",
+        ];
+        let streamed = collect_streamed_lines(&deltas, Some(80));
+
+        let source: String = deltas.iter().copied().collect();
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&source, Some(80), &mut rendered);
+        let expected = lines_to_plain_strings(&rendered);
+
+        assert_eq!(streamed, expected);
+        assert!(
+            streamed.iter().any(|line| line.contains('┌')),
+            "expected unicode table border for two-column no-outer table: {streamed:?}"
+        );
+        assert!(
+            !streamed.iter().any(|line| line.trim() == "A | B"),
+            "did not expect raw two-column no-outer header in final streamed output: {streamed:?}"
         );
     }
 

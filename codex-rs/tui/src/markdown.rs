@@ -93,33 +93,33 @@ fn unwrap_markdown_fences(markdown_source: &str) -> String {
     }
 
     fn is_table_candidate_line(line: &str) -> bool {
+        parse_table_segments(line)
+            .is_some_and(|segments| segments.iter().any(|segment| !segment.is_empty()))
+    }
+
+    fn parse_table_segments(line: &str) -> Option<Vec<&str>> {
         let trimmed = line.trim();
-        let pipe_count = trimmed.chars().filter(|ch| *ch == '|').count();
-        if pipe_count < 2 {
-            return false;
+        if trimmed.is_empty() {
+            return None;
         }
-        if trimmed.starts_with('|') {
-            return true;
+
+        let mut content = trimmed;
+        if let Some(without_leading) = content.strip_prefix('|') {
+            content = without_leading;
         }
-        trimmed
-            .split('|')
-            .map(str::trim)
-            .all(|segment| !segment.is_empty())
+        if let Some(without_trailing) = content.strip_suffix('|') {
+            content = without_trailing;
+        }
+
+        let segments: Vec<&str> = content.split('|').map(str::trim).collect();
+        (segments.len() >= 2).then_some(segments)
     }
 
     fn is_table_delimiter_line(line: &str) -> bool {
-        let trimmed = line.trim();
-        let pipe_count = trimmed.chars().filter(|ch| *ch == '|').count();
-        if pipe_count < 2 {
+        let Some(segments) = parse_table_segments(line) else {
             return false;
-        }
-
-        let mut saw_segment = false;
-        let segments: Vec<&str> = if trimmed.starts_with('|') {
-            trimmed.trim_matches('|').split('|').collect()
-        } else {
-            trimmed.split('|').collect()
         };
+        let mut saw_segment = false;
         for segment in segments {
             let value = segment.trim();
             if value.is_empty() {
@@ -359,6 +359,17 @@ mod tests {
                 .iter()
                 .any(|line| line.trim() == "Col A | Col B | Col C")
         );
+    }
+
+    #[test]
+    fn append_markdown_agent_unwraps_markdown_fences_for_two_column_no_outer_table() {
+        let src = "```md\nA | B\n--- | ---\nleft | right\n```\n";
+        let mut out = Vec::new();
+        append_markdown_agent(src, None, &mut out);
+        let rendered = lines_to_strings(&out);
+        assert!(rendered.iter().any(|line| line.contains("┌")));
+        assert!(rendered.iter().any(|line| line.contains("│ A")));
+        assert!(!rendered.iter().any(|line| line.trim() == "A | B"));
     }
 
     #[test]
