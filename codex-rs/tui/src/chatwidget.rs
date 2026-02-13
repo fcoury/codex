@@ -135,6 +135,7 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use crossterm::terminal;
 use rand::Rng;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -1201,9 +1202,8 @@ impl ChatWidget {
         self.flush_active_cell();
 
         if self.plan_stream_controller.is_none() {
-            self.plan_stream_controller = Some(PlanStreamController::new(
-                self.last_rendered_width.get().map(|w| w.saturating_sub(4)),
-            ));
+            self.plan_stream_controller =
+                Some(PlanStreamController::new(self.current_stream_width(4)));
         }
         if let Some(controller) = self.plan_stream_controller.as_mut()
             && controller.push(&delta)
@@ -2276,9 +2276,7 @@ impl ChatWidget {
                 // Reset the flag even if we don't show separator (no work was done)
                 self.needs_final_message_separator = false;
             }
-            self.stream_controller = Some(StreamController::new(
-                self.last_rendered_width.get().map(|w| w.saturating_sub(2)),
-            ));
+            self.stream_controller = Some(StreamController::new(self.current_stream_width(2)));
         }
         if let Some(controller) = self.stream_controller.as_mut()
             && controller.push(&delta)
@@ -2288,6 +2286,13 @@ impl ChatWidget {
         }
         self.sync_active_stream_tail();
         self.request_redraw();
+    }
+
+    fn current_stream_width(&self, reserved_cols: usize) -> Option<usize> {
+        self.last_rendered_width
+            .get()
+            .or_else(|| terminal::size().ok().map(|(w, _)| usize::from(w)))
+            .map(|w| w.saturating_sub(reserved_cols))
     }
 
     fn worked_elapsed_from(&mut self, current_elapsed: u64) -> u64 {

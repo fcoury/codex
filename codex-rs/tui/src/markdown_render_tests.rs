@@ -1104,6 +1104,28 @@ fn table_keeps_sparse_rows_with_empty_trailing_cells() {
 }
 
 #[test]
+fn table_keeps_sparse_sentence_row_inside_grid() {
+    let md = "| A | B | C |\n|---|---|---|\n| This is done. | | |\n";
+    let text = render_markdown_text(md);
+    let lines: Vec<String> = text
+        .lines
+        .iter()
+        .map(|line| line.spans.iter().map(|span| span.content.clone()).collect())
+        .collect();
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("│ This is done.") && line.ends_with('│')),
+        "expected sparse sentence row to remain inside table grid: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.trim() == "This is done."),
+        "did not expect sparse sentence row to spill outside table: {lines:?}"
+    );
+}
+
+#[test]
 fn table_preserves_structured_leading_columns_when_last_column_is_long() {
     let md = "| Milestone | Planned Date | Outcome | Retrospective Summary |\n|---|---|---|---|\n| Canary rollout | 2026-01-10 | Completed | Canary traffic was held at 5% longer than planned due to latency regressions tied to cold cache behavior; after pre-warming and query plan hints, p95 returned to baseline and rollout resumed safely. |\n| Full region cutover | 2026-01-24 | Completed | Cutover succeeded with no customer-visible downtime, though internal dashboards lagged for approximately 18 minutes because ingestion workers autoscaled slower than forecast under burst load. |\n";
     let text = crate::markdown_render::render_markdown_text_with_width(md, Some(160));
@@ -1144,5 +1166,31 @@ fn table_preserves_status_column_with_long_notes() {
     assert!(
         lines.iter().any(|line| line.contains("Monitoring")),
         "expected status values to avoid mid-word wraps: {lines:?}"
+    );
+}
+
+#[test]
+fn table_keeps_long_body_rows_inside_grid_instead_of_spilling_raw_pipe_rows() {
+    let md = "| Milestone | Planned Date | Outcome | Retrospective Summary |\n|---|---|---|---|\n| Canary rollout | 2026-01-10 | Completed | Canary traffic was held at 5% longer than planned due to latency regressions tied to cold cache behavior; after pre-warming and query plan hints, p95 returned to baseline and rollout resumed safely. |\n| Full region cutover | 2026-01-24 | Completed | Cutover succeeded with no customer-visible downtime, though internal dashboards lagged for approximately 18 minutes because ingestion workers autoscaled slower than forecast under burst load. |\n| Legacy decommission | 2026-02-07 | In progress | Most workloads have been drained, but final decommission is blocked by one compliance export task that still depends on a deprecated storage path and requires legal sign-off before removal. |\n";
+    let text = crate::markdown_render::render_markdown_text_with_width(md, Some(200));
+    let lines: Vec<String> = text
+        .lines
+        .iter()
+        .map(|line| line.spans.iter().map(|span| span.content.clone()).collect())
+        .collect();
+
+    assert!(
+        lines.iter().any(|line| line.starts_with('┌')) && lines.iter().any(|line| line.starts_with('└')),
+        "expected boxed table output: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("│ Canary rollout")),
+        "expected first body row to stay inside table grid: {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("| Canary rollout |")),
+        "did not expect raw pipe-form body rows outside table: {lines:?}"
     );
 }

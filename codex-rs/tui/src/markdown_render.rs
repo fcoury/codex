@@ -693,16 +693,17 @@ where
 
         let mut spillover_rows: Vec<TableCell> = Vec::new();
         let mut rows: Vec<Vec<TableCell>> = Vec::new();
-        for row in table_state.rows {
+        for (row_idx, row) in table_state.rows.iter().enumerate() {
+            let next_row = table_state.rows.get(row_idx + 1);
             // pulldown-cmark accepts body rows without pipes, which can turn a
             // following paragraph into a one-cell table row. For multi-column
             // tables, treat those as spillover text rendered after the table.
-            if column_count > 1 && Self::is_spillover_row(&row) {
-                if let Some(cell) = row.into_iter().next() {
+            if column_count > 1 && Self::is_spillover_row(row, next_row) {
+                if let Some(cell) = row.first().cloned() {
                     spillover_rows.push(cell);
                 }
             } else {
-                rows.push(row);
+                rows.push(row.clone());
             }
         }
 
@@ -1078,25 +1079,45 @@ where
         wrapped
     }
 
-    fn is_spillover_row(row: &[TableCell]) -> bool {
-        if row.is_empty() {
+    fn is_spillover_row(row: &[TableCell], next_row: Option<&Vec<TableCell>>) -> bool {
+        let Some(first_text) = Self::first_non_empty_only_text(row) else {
             return false;
-        }
-        let first_text = row[0].plain_text();
-        let first_non_empty = !first_text.trim().is_empty();
-        let rest_empty = row[1..]
-            .iter()
-            .all(|cell| cell.plain_text().trim().is_empty());
-        if !first_non_empty || !rest_empty {
-            return false;
-        }
+        };
 
         if row.len() == 1 {
             return true;
         }
 
-        first_text.contains(char::is_whitespace)
-            && (first_text.trim_end().ends_with('.') || first_text.trim_end().ends_with(':'))
+        if Self::looks_like_html_content(&first_text) {
+            return true;
+        }
+
+        // Keep common intro + html-block spillover together:
+        // "HTML block:" followed by "<div ...>".
+        first_text.trim_end().ends_with(':')
+            && (next_row
+                .and_then(|row| Self::first_non_empty_only_text(row))
+                .is_some_and(|text| Self::looks_like_html_content(&text))
+                || Self::looks_like_label_line(&first_text))
+    }
+
+    fn first_non_empty_only_text(row: &[TableCell]) -> Option<String> {
+        let first = row.first()?.plain_text();
+        if first.trim().is_empty() {
+            return None;
+        }
+        let rest_empty = row[1..]
+            .iter()
+            .all(|cell| cell.plain_text().trim().is_empty());
+        rest_empty.then_some(first)
+    }
+
+    fn looks_like_html_content(text: &str) -> bool {
+        text.contains('<') && text.contains('>')
+    }
+
+    fn looks_like_label_line(text: &str) -> bool {
+        text.trim_end().ends_with(':') && text.split_whitespace().count() <= 3
     }
 
     fn spans_display_width(spans: &[Span<'_>]) -> usize {
