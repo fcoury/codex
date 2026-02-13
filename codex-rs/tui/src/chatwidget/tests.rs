@@ -2313,6 +2313,38 @@ async fn streaming_final_answer_keeps_task_running_state() {
 }
 
 #[tokio::test]
+async fn task_complete_stops_commit_animation_when_stream_has_live_tail() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.on_task_started();
+    chat.on_agent_message_delta("Committed line\n".to_string());
+
+    let mut saw_start = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::StartCommitAnimation = event {
+            saw_start = true;
+        }
+    }
+    assert!(saw_start, "expected commit animation to start");
+
+    // Leave a live tail (no trailing newline) so run_commit_tick() cannot stop animation by idle.
+    chat.on_agent_message_delta("live tail without newline".to_string());
+
+    chat.on_task_complete(None, false);
+
+    let mut saw_stop = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::StopCommitAnimation = event {
+            saw_stop = true;
+        }
+    }
+    assert!(
+        saw_stop,
+        "expected commit animation to stop after task completion with a live tail",
+    );
+}
+
+#[tokio::test]
 async fn idle_commit_ticks_do_not_restore_status_without_commentary_completion() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
 

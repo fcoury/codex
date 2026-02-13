@@ -809,6 +809,7 @@ impl ChatWidget {
     }
 
     fn flush_answer_stream_with_separator(&mut self) {
+        let had_stream_controller = self.stream_controller.is_some();
         if let Some(mut controller) = self.stream_controller.take() {
             self.clear_active_stream_tail();
             if let Some(cell) = controller.finalize() {
@@ -816,6 +817,9 @@ impl ChatWidget {
             }
         }
         self.adaptive_chunking.reset();
+        if had_stream_controller {
+            self.app_event_tx.send(AppEvent::StopCommitAnimation);
+        }
     }
 
     fn stream_controllers_idle(&self) -> bool {
