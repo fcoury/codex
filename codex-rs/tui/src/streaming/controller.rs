@@ -170,10 +170,10 @@ impl StreamController {
     }
 
     fn active_tail_budget_lines(&self) -> usize {
-        if has_table_candidates_anywhere(&self.raw_source) {
-            self.rendered_lines.len()
-        } else {
-            0
+        match table_holdback_state(&self.raw_source) {
+            TableHoldbackState::Confirmed => self.rendered_lines.len(),
+            TableHoldbackState::PendingHeader => self.rendered_lines.len(),
+            TableHoldbackState::None => 0,
         }
     }
 
@@ -355,10 +355,10 @@ impl PlanStreamController {
     }
 
     fn active_tail_budget_lines(&self) -> usize {
-        if has_table_candidates_anywhere(&self.raw_source) {
-            self.rendered_lines.len()
-        } else {
-            0
+        match table_holdback_state(&self.raw_source) {
+            TableHoldbackState::Confirmed => self.rendered_lines.len(),
+            TableHoldbackState::PendingHeader => self.rendered_lines.len(),
+            TableHoldbackState::None => 0,
         }
     }
 
@@ -463,30 +463,84 @@ fn table_candidate_text(line: &str) -> Option<&str> {
     (pipe_count >= 2).then_some(stripped)
 }
 
-fn is_table_candidate_line(line: &str) -> bool {
+fn parse_table_segments(line: &str) -> Option<Vec<&str>> {
     let trimmed = line.trim();
-    let pipe_count = trimmed.chars().filter(|ch| *ch == '|').count();
-    if pipe_count < 2 {
-        return false;
-    }
-    if trimmed.starts_with('|') {
-        return true;
+    if trimmed.is_empty() {
+        return None;
     }
 
-    // Support GFM-style tables without outer pipes:
-    // "Col A | Col B | Col C"
-    trimmed
-        .split('|')
-        .map(str::trim)
-        .all(|segment| !segment.is_empty())
+    let mut content = trimmed;
+    if let Some(without_leading) = content.strip_prefix('|') {
+        content = without_leading;
+    }
+    if let Some(without_trailing) = content.strip_suffix('|') {
+        content = without_trailing;
+    }
+
+    let segments: Vec<&str> = content.split('|').map(str::trim).collect();
+    (segments.len() >= 2).then_some(segments)
 }
 
-fn has_table_candidates_anywhere(source: &str) -> bool {
-    parse_lines_with_fence_state(source)
-        .iter()
-        .filter(|line| line.fence_context != FenceContext::Other)
-        .filter_map(|line| table_candidate_text(line.text))
-        .any(is_table_candidate_line)
+fn is_table_header_line(line: &str) -> bool {
+    parse_table_segments(line)
+        .is_some_and(|segments| segments.iter().any(|segment| !segment.is_empty()))
+}
+
+fn is_table_delimiter_segment(segment: &str) -> bool {
+    let trimmed = segment.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let without_leading = trimmed.strip_prefix(':').unwrap_or(trimmed);
+    let without_ends = without_leading.strip_suffix(':').unwrap_or(without_leading);
+    without_ends.len() >= 3 && without_ends.chars().all(|ch| ch == '-')
+}
+
+fn is_table_delimiter_line(line: &str) -> bool {
+    parse_table_segments(line)
+        .is_some_and(|segments| segments.into_iter().all(is_table_delimiter_segment))
+}
+
+enum TableHoldbackState {
+    None,
+    PendingHeader,
+    Confirmed,
+}
+
+fn table_holdback_state(source: &str) -> TableHoldbackState {
+    let lines = parse_lines_with_fence_state(source);
+    for pair in lines.windows(2) {
+        let [header_line, delimiter_line] = pair else {
+            continue;
+        };
+        if header_line.fence_context == FenceContext::Other
+            || delimiter_line.fence_context == FenceContext::Other
+        {
+            continue;
+        }
+
+        let Some(header_text) = table_candidate_text(header_line.text) else {
+            continue;
+        };
+        let Some(delimiter_text) = table_candidate_text(delimiter_line.text) else {
+            continue;
+        };
+
+        if is_table_header_line(header_text) && is_table_delimiter_line(delimiter_text) {
+            return TableHoldbackState::Confirmed;
+        }
+    }
+
+    let pending_header = lines.iter().rev().find(|line| !line.text.trim().is_empty());
+    let pending_header = pending_header.is_some_and(|line| {
+        line.fence_context != FenceContext::Other
+            && table_candidate_text(line.text).is_some_and(is_table_header_line)
+    });
+    if pending_header {
+        TableHoldbackState::PendingHeader
+    } else {
+        TableHoldbackState::None
+    }
 }
 
 #[cfg(test)]
@@ -705,6 +759,22 @@ mod tests {
         let expected = lines_to_plain_strings(&rendered);
 
         assert_eq!(streamed, expected);
+    }
+
+    #[tokio::test]
+    async fn controller_does_not_hold_back_pipe_prose_without_table_delimiter() {
+        let mut ctrl = StreamController::new(Some(80));
+
+        ctrl.push("status | owner | note\n");
+        let (_first_commit, first_idle) = ctrl.on_commit_tick();
+        assert!(first_idle);
+
+        ctrl.push("next line\n");
+        let (second_commit, _second_idle) = ctrl.on_commit_tick();
+        assert!(
+            second_commit.is_some(),
+            "expected prose lines to be released once no table delimiter follows"
+        );
     }
 
     #[tokio::test]
@@ -963,5 +1033,14 @@ mod tests {
             streamed.iter().any(|line| line.contains('┌')),
             "expected unicode table border in fenced plan output: {streamed:?}"
         );
+    }
+
+    #[test]
+    fn table_holdback_state_detects_header_plus_delimiter() {
+        let source = "| Key | Description |\n| --- | --- |\n";
+        assert!(matches!(
+            table_holdback_state(source),
+            TableHoldbackState::Confirmed
+        ));
     }
 }

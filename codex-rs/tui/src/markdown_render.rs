@@ -129,6 +129,22 @@ struct TableState {
     in_header: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TableColumnKind {
+    Narrative,
+    Structured,
+}
+
+#[derive(Clone, Debug)]
+struct TableColumnMetrics {
+    max_width: usize,
+    header_token_width: usize,
+    body_token_width: usize,
+    avg_words_per_cell: f64,
+    avg_cell_width: f64,
+    kind: TableColumnKind,
+}
+
 impl TableState {
     fn new(alignments: Vec<Alignment>) -> Self {
         Self {
@@ -681,7 +697,7 @@ where
             // pulldown-cmark accepts body rows without pipes, which can turn a
             // following paragraph into a one-cell table row. For multi-column
             // tables, treat those as spillover text rendered after the table.
-            if column_count > 1 && Self::is_degenerate_row(&row) {
+            if column_count > 1 && Self::is_spillover_row(&row) {
                 if let Some(cell) = row.into_iter().next() {
                     spillover_rows.push(cell);
                 }
@@ -763,41 +779,61 @@ where
         available_width: Option<usize>,
     ) -> Option<Vec<usize>> {
         let min_column_width = 3usize;
-        let mut widths = vec![min_column_width; alignments.len()];
-
-        for (column, cell) in header.iter().enumerate() {
-            widths[column] = widths[column].max(Self::cell_display_width(cell));
-        }
-
-        if self.table_width_mode == TableColumnWidthMode::Full {
-            for row in rows {
-                for (column, cell) in row.iter().enumerate() {
-                    widths[column] = widths[column].max(Self::cell_display_width(cell));
-                }
-            }
-        }
+        let metrics = Self::collect_table_column_metrics(
+            header,
+            rows,
+            alignments.len(),
+            self.table_width_mode,
+        );
+        let mut widths: Vec<usize> = metrics
+            .iter()
+            .map(|column| column.max_width.max(min_column_width))
+            .collect();
 
         let Some(max_width) = available_width else {
             return Some(widths);
         };
-        let mut total_width: usize = widths.iter().sum();
         let minimum_total = alignments.len() * min_column_width;
         if max_width < minimum_total {
             return None;
         }
 
+        let mut floors: Vec<usize> = metrics
+            .iter()
+            .map(|column| Self::preferred_column_floor(column, min_column_width))
+            .collect();
+        let mut floor_total: usize = floors.iter().sum();
+        if floor_total > max_width {
+            // Relax preferred floors (starting with narrative columns) until
+            // we can satisfy the width budget. We still keep hard minimums.
+            while floor_total > max_width {
+                let Some((idx, _)) = floors
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, floor)| **floor > min_column_width)
+                    .min_by_key(|(idx, floor)| {
+                        let kind_priority = match metrics[*idx].kind {
+                            TableColumnKind::Narrative => 0,
+                            TableColumnKind::Structured => 1,
+                        };
+                        (kind_priority, *floor)
+                    })
+                else {
+                    break;
+                };
+                floors[idx] -= 1;
+                floor_total -= 1;
+            }
+        }
+
+        let mut total_width: usize = widths.iter().sum();
+
         while total_width > max_width {
-            let mut reduced = false;
-            for width in &mut widths {
-                if *width > min_column_width && total_width > max_width {
-                    *width -= 1;
-                    total_width -= 1;
-                    reduced = true;
-                }
-            }
-            if !reduced {
+            let Some(idx) = Self::next_column_to_shrink(&widths, &floors, &metrics) else {
                 break;
-            }
+            };
+            widths[idx] -= 1;
+            total_width -= 1;
         }
 
         if total_width > max_width {
@@ -805,6 +841,111 @@ where
         }
 
         Some(widths)
+    }
+
+    fn collect_table_column_metrics(
+        header: &[TableCell],
+        rows: &[Vec<TableCell>],
+        column_count: usize,
+        mode: TableColumnWidthMode,
+    ) -> Vec<TableColumnMetrics> {
+        let mut metrics = Vec::with_capacity(column_count);
+        for column in 0..column_count {
+            let header_cell = &header[column];
+            let header_plain = header_cell.plain_text();
+            let header_token_width = Self::longest_token_width(&header_plain);
+            let mut max_width = Self::cell_display_width(header_cell);
+            let mut body_token_width = 0usize;
+            let mut total_words = 0usize;
+            let mut total_cells = 0usize;
+            let mut total_cell_width = 0usize;
+
+            if mode == TableColumnWidthMode::Full {
+                for row in rows {
+                    let cell = &row[column];
+                    max_width = max_width.max(Self::cell_display_width(cell));
+                    let plain = cell.plain_text();
+                    body_token_width = body_token_width.max(Self::longest_token_width(&plain));
+                    let word_count = plain.split_whitespace().count();
+                    if word_count > 0 {
+                        total_words += word_count;
+                        total_cells += 1;
+                        total_cell_width += plain.width();
+                    }
+                }
+            }
+
+            let avg_words_per_cell = if total_cells == 0 {
+                header_plain.split_whitespace().count() as f64
+            } else {
+                total_words as f64 / total_cells as f64
+            };
+            let avg_cell_width = if total_cells == 0 {
+                header_plain.width() as f64
+            } else {
+                total_cell_width as f64 / total_cells as f64
+            };
+            let kind = if avg_words_per_cell >= 4.0 || avg_cell_width >= 28.0 {
+                TableColumnKind::Narrative
+            } else {
+                TableColumnKind::Structured
+            };
+
+            metrics.push(TableColumnMetrics {
+                max_width,
+                header_token_width,
+                body_token_width,
+                avg_words_per_cell,
+                avg_cell_width,
+                kind,
+            });
+        }
+        metrics
+    }
+
+    fn preferred_column_floor(metrics: &TableColumnMetrics, min_column_width: usize) -> usize {
+        let token_target = match metrics.kind {
+            TableColumnKind::Narrative => metrics.header_token_width.min(10),
+            TableColumnKind::Structured => metrics
+                .header_token_width
+                .max(metrics.body_token_width.min(16)),
+        };
+        token_target.max(min_column_width).min(metrics.max_width)
+    }
+
+    fn next_column_to_shrink(
+        widths: &[usize],
+        floors: &[usize],
+        metrics: &[TableColumnMetrics],
+    ) -> Option<usize> {
+        widths
+            .iter()
+            .enumerate()
+            .filter(|(idx, width)| **width > floors[*idx])
+            .min_by_key(|(idx, width)| {
+                let slack = width.saturating_sub(floors[*idx]);
+                let kind_cost = match metrics[*idx].kind {
+                    TableColumnKind::Narrative => 0i32,
+                    TableColumnKind::Structured => 2i32,
+                };
+                let header_guard = if **width <= metrics[*idx].header_token_width {
+                    3i32
+                } else {
+                    0i32
+                };
+                let density_guard = if metrics[*idx].avg_words_per_cell >= 4.0
+                    || metrics[*idx].avg_cell_width >= 24.0
+                {
+                    0i32
+                } else {
+                    1i32
+                };
+                (
+                    kind_cost + header_guard + density_guard,
+                    usize::MAX.saturating_sub(slack),
+                )
+            })
+            .map(|(idx, _)| idx)
     }
 
     fn render_border_line(
@@ -937,15 +1078,25 @@ where
         wrapped
     }
 
-    fn is_degenerate_row(row: &[TableCell]) -> bool {
+    fn is_spillover_row(row: &[TableCell]) -> bool {
         if row.is_empty() {
-            return true;
+            return false;
         }
-        let first_non_empty = !row[0].plain_text().trim().is_empty();
+        let first_text = row[0].plain_text();
+        let first_non_empty = !first_text.trim().is_empty();
         let rest_empty = row[1..]
             .iter()
             .all(|cell| cell.plain_text().trim().is_empty());
-        first_non_empty && rest_empty
+        if !first_non_empty || !rest_empty {
+            return false;
+        }
+
+        if row.len() == 1 {
+            return true;
+        }
+
+        first_text.contains(char::is_whitespace)
+            && (first_text.trim_end().ends_with('.') || first_text.trim_end().ends_with(':'))
     }
 
     fn spans_display_width(spans: &[Span<'_>]) -> usize {
@@ -962,6 +1113,10 @@ where
             .map(Self::line_display_width)
             .max()
             .unwrap_or(0)
+    }
+
+    fn longest_token_width(text: &str) -> usize {
+        text.split_whitespace().map(str::width).max().unwrap_or(0)
     }
 
     fn push_inline_style(&mut self, style: Style) {

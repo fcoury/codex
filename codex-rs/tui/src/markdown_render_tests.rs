@@ -1082,3 +1082,67 @@ fn table_falls_back_to_pipe_rendering_if_it_cannot_fit() {
     assert!(lines.first().is_some_and(|line| line.starts_with('|')));
     assert!(!lines.iter().any(|line| line.contains('┌')));
 }
+
+#[test]
+fn table_keeps_sparse_rows_with_empty_trailing_cells() {
+    let md = "| A | B | C |\n|---|---|---|\n| a | | |\n";
+    let text = render_markdown_text(md);
+    let lines: Vec<String> = text
+        .lines
+        .iter()
+        .map(|line| line.spans.iter().map(|span| span.content.clone()).collect())
+        .collect();
+
+    assert!(
+        lines.iter().any(|line| line.contains("│ a") && line.ends_with('│')),
+        "expected sparse row to remain inside table grid: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line == "a"),
+        "did not expect sparse row content to spill outside the table: {lines:?}"
+    );
+}
+
+#[test]
+fn table_preserves_structured_leading_columns_when_last_column_is_long() {
+    let md = "| Milestone | Planned Date | Outcome | Retrospective Summary |\n|---|---|---|---|\n| Canary rollout | 2026-01-10 | Completed | Canary traffic was held at 5% longer than planned due to latency regressions tied to cold cache behavior; after pre-warming and query plan hints, p95 returned to baseline and rollout resumed safely. |\n| Full region cutover | 2026-01-24 | Completed | Cutover succeeded with no customer-visible downtime, though internal dashboards lagged for approximately 18 minutes because ingestion workers autoscaled slower than forecast under burst load. |\n";
+    let text = crate::markdown_render::render_markdown_text_with_width(md, Some(160));
+    let lines: Vec<String> = text
+        .lines
+        .iter()
+        .map(|line| line.spans.iter().map(|span| span.content.clone()).collect())
+        .collect();
+
+    assert!(
+        lines.iter().any(|line| line.contains("Milestone")),
+        "expected first structured header to remain readable: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Planned Date")),
+        "expected date header to remain readable: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("2026-01-10")),
+        "expected date values to avoid forced mid-token wraps: {lines:?}"
+    );
+}
+
+#[test]
+fn table_preserves_status_column_with_long_notes() {
+    let md = "| Service | Status | Notes |\n|---|---|---|\n| Auth API | Stable | Handles login and token refresh with no major incidents in the last 30 days. |\n| Billing Worker | Monitoring | Throughput is good, but we still see occasional retry storms when upstream settlement providers return partial failures. |\n| Search Indexer | Tuning | Performance improved after shard balancing, yet memory usage remains elevated during full rebuild windows. |\n";
+    let text = crate::markdown_render::render_markdown_text_with_width(md, Some(150));
+    let lines: Vec<String> = text
+        .lines
+        .iter()
+        .map(|line| line.spans.iter().map(|span| span.content.clone()).collect())
+        .collect();
+
+    assert!(
+        lines.iter().any(|line| line.contains("Status")),
+        "expected status header to remain readable: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Monitoring")),
+        "expected status values to avoid mid-word wraps: {lines:?}"
+    );
+}
