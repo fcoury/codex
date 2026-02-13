@@ -808,10 +808,11 @@ impl ChatWidget {
     }
 
     fn flush_answer_stream_with_separator(&mut self) {
-        if let Some(mut controller) = self.stream_controller.take()
-            && let Some(cell) = controller.finalize()
-        {
-            self.add_boxed_history(cell);
+        if let Some(mut controller) = self.stream_controller.take() {
+            self.clear_active_stream_tail();
+            if let Some(cell) = controller.finalize() {
+                self.add_boxed_history(cell);
+            }
         }
         self.adaptive_chunking.reset();
     }
@@ -819,7 +820,7 @@ impl ChatWidget {
     fn stream_controllers_idle(&self) -> bool {
         self.stream_controller
             .as_ref()
-            .map(|controller| controller.queued_lines() == 0)
+            .map(|controller| controller.queued_lines() == 0 && !controller.has_live_tail())
             .unwrap_or(true)
             && self
                 .plan_stream_controller
@@ -2207,8 +2208,9 @@ impl ChatWidget {
             self.bottom_pane.hide_status_indicator();
             self.add_boxed_history(cell);
         }
+        self.sync_active_stream_tail();
 
-        if outcome.has_controller && outcome.all_idle {
+        if outcome.has_controller && outcome.all_idle && self.stream_controllers_idle() {
             self.maybe_restore_status_indicator_after_stream_idle();
             self.app_event_tx.send(AppEvent::StopCommitAnimation);
         }
@@ -2251,11 +2253,11 @@ impl ChatWidget {
 
     #[inline]
     fn handle_streaming_delta(&mut self, delta: String) {
-        // Before streaming agent content, flush any active exec cell group.
-        self.flush_unified_exec_wait_streak();
-        self.flush_active_cell();
-
         if self.stream_controller.is_none() {
+            // Before streaming agent content, flush any active exec cell group.
+            self.flush_unified_exec_wait_streak();
+            self.flush_active_cell();
+
             // If the previous turn inserted non-stream history (exec output, patch status, MCP
             // calls), render a separator before starting the next streamed assistant message.
             if self.needs_final_message_separator && self.had_work_activity {
@@ -2284,6 +2286,7 @@ impl ChatWidget {
             self.app_event_tx.send(AppEvent::StartCommitAnimation);
             self.run_catch_up_commit_tick();
         }
+        self.sync_active_stream_tail();
         self.request_redraw();
     }
 
@@ -3603,6 +3606,14 @@ impl ChatWidget {
     }
 
     fn flush_active_cell(&mut self) {
+        if self.stream_controller.is_some()
+            && self
+                .active_cell
+                .as_ref()
+                .is_some_and(|cell| cell.as_any().is::<history_cell::StreamingAgentTailCell>())
+        {
+            return;
+        }
         if let Some(active) = self.active_cell.take() {
             self.needs_final_message_separator = true;
             self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
@@ -3624,10 +3635,49 @@ impl ChatWidget {
 
         if !keep_placeholder_header_active && !cell.display_lines(u16::MAX).is_empty() {
             // Only break exec grouping if the cell renders visible lines.
-            self.flush_active_cell();
+            let keep_stream_tail_active = self.stream_controller.is_some()
+                && self.active_cell.as_ref().is_some_and(|active| {
+                    active.as_any().is::<history_cell::StreamingAgentTailCell>()
+                });
+            if !keep_stream_tail_active {
+                self.flush_active_cell();
+            }
             self.needs_final_message_separator = true;
         }
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+    }
+
+    fn sync_active_stream_tail(&mut self) {
+        let Some((tail_lines, tail_starts_stream)) =
+            self.stream_controller.as_ref().map(|controller| {
+                (
+                    controller.current_tail_lines(),
+                    controller.tail_starts_stream(),
+                )
+            })
+        else {
+            return;
+        };
+        if tail_lines.is_empty() {
+            self.clear_active_stream_tail();
+            return;
+        }
+
+        self.bottom_pane.hide_status_indicator();
+        let tail_cell = history_cell::StreamingAgentTailCell::new(tail_lines, tail_starts_stream);
+        self.active_cell = Some(Box::new(tail_cell));
+        self.bump_active_cell_revision();
+    }
+
+    fn clear_active_stream_tail(&mut self) {
+        if self
+            .active_cell
+            .as_ref()
+            .is_some_and(|cell| cell.as_any().is::<history_cell::StreamingAgentTailCell>())
+        {
+            self.active_cell = None;
+            self.bump_active_cell_revision();
+        }
     }
 
     fn queue_user_message(&mut self, user_message: UserMessage) {

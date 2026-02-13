@@ -66,13 +66,6 @@ impl StreamState {
             .map(|queued| queued.line)
             .collect()
     }
-    /// Drains all queued lines from the front of the queue.
-    pub(crate) fn drain_all(&mut self) -> Vec<Line<'static>> {
-        self.queued_lines
-            .drain(..)
-            .map(|queued| queued.line)
-            .collect()
-    }
     /// Returns whether no lines are queued for commit.
     pub(crate) fn is_idle(&self) -> bool {
         self.queued_lines.is_empty()
@@ -80,6 +73,10 @@ impl StreamState {
     /// Returns the current queue depth.
     pub(crate) fn queued_len(&self) -> usize {
         self.queued_lines.len()
+    }
+    /// Clears queued lines while keeping collector/turn lifecycle state intact.
+    pub(crate) fn clear_queue(&mut self) {
+        self.queued_lines.clear();
     }
     /// Returns the age of the oldest queued line.
     pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {

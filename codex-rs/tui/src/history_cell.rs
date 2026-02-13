@@ -383,6 +383,40 @@ impl HistoryCell for AgentMessageCell {
 }
 
 #[derive(Debug)]
+pub(crate) struct StreamingAgentTailCell {
+    lines: Vec<Line<'static>>,
+    is_first_line: bool,
+}
+
+impl StreamingAgentTailCell {
+    pub(crate) fn new(lines: Vec<Line<'static>>, is_first_line: bool) -> Self {
+        Self {
+            lines,
+            is_first_line,
+        }
+    }
+}
+
+impl HistoryCell for StreamingAgentTailCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        word_wrap_lines(
+            &self.lines,
+            RtOptions::new(width as usize)
+                .initial_indent(if self.is_first_line {
+                    "• ".dim().into()
+                } else {
+                    "  ".into()
+                })
+                .subsequent_indent("  ".into()),
+        )
+    }
+
+    fn is_stream_continuation(&self) -> bool {
+        !self.is_first_line
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct PlainHistoryCell {
     lines: Vec<Line<'static>>,
 }
