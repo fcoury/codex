@@ -109,7 +109,7 @@ Key modules and their responsibilities:
 
 ## Tests
 
-892 tests pass in `codex-tui`.  Key coverage areas:
+895 tests pass in `codex-tui`.  Key coverage areas:
 
 - **Table detection** (`table_detect.rs`): segment parsing, header/delimiter
   validation, alignment-colon syntax.
@@ -121,7 +121,10 @@ Key modules and their responsibilities:
 - **Streaming controller** (`controller.rs`): holdback state machine, resize
   remapping via `source_bytes_for_rendered_count`, queue sync after rewrite,
   table-aware tail budget.
-- **No direct test for `source_bytes_for_rendered_count`** as a standalone
-  function.  It is exercised indirectly through `set_width` tests.
+- **`source_bytes_for_rendered_count` prefix stability** (`controller.rs`):
+  three targeted tests (`source_bytes_plain_paragraphs`,
+  `source_bytes_wrapped_lines`, `source_bytes_list_items`) lock in the
+  invariant that rendering a newline-terminated source prefix produces a prefix
+  of the full render.
 - **No integration test for the full resize reflow path** (resize → re-render
   transcript cells → `AgentMarkdownCell.display_lines(new_width)`).

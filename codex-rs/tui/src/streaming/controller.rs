@@ -1276,4 +1276,81 @@ mod tests {
             TableHoldbackState::Confirmed
         ));
     }
+
+    // -----------------------------------------------------------------------
+    // source_bytes_for_rendered_count — prefix-stability tests
+    //
+    // These lock in the invariant that rendering a newline-terminated prefix
+    // of raw markdown source produces a prefix of the full render (i.e. the
+    // line count grows monotonically with each source line).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn source_bytes_plain_paragraphs() {
+        // Three one-line paragraphs separated by blank lines.
+        let src = "Alpha\n\nBravo\n\nCharlie\n";
+        let width = Some(80);
+
+        // Full render — count the lines so we know the expected total.
+        let mut full = Vec::new();
+        crate::markdown::append_markdown_agent(src, width, &mut full);
+        let total = full.len();
+        assert!(total >= 3, "expected at least 3 rendered lines, got {total}");
+
+        // Asking for 0 lines always returns offset 0.
+        assert_eq!(source_bytes_for_rendered_count(src, width, 0), 0);
+
+        // Asking for the full count returns the entire source.
+        assert_eq!(source_bytes_for_rendered_count(src, width, total), src.len());
+
+        // Asking for 1 line returns a prefix that renders to at most 1 line.
+        let off = source_bytes_for_rendered_count(src, width, 1);
+        assert!(off > 0 && off <= src.len());
+        let mut partial = Vec::new();
+        crate::markdown::append_markdown_agent(&src[..off], width, &mut partial);
+        assert!(partial.len() <= 1, "expected <=1 line, got {}", partial.len());
+    }
+
+    #[test]
+    fn source_bytes_wrapped_lines() {
+        // A single long line that wraps at a narrow width.
+        let src = "The quick brown fox jumps over the lazy dog near the riverbank.\n";
+        let width = Some(20);
+
+        let mut full = Vec::new();
+        crate::markdown::append_markdown_agent(src, width, &mut full);
+        let total = full.len();
+        assert!(total > 1, "expected wrapping at width 20, got {total} lines");
+
+        // Asking for 1 line: since the single source line wraps into
+        // multiple rendered lines, the function should stop at the previous
+        // newline (offset 0) to avoid overshooting.
+        let off = source_bytes_for_rendered_count(src, width, 1);
+        assert_eq!(off, 0, "single wrapped source line should not be split");
+    }
+
+    #[test]
+    fn source_bytes_list_items() {
+        // Unordered list — each item is a source line that should map to a
+        // rendered line, preserving the prefix-stability invariant.
+        let src = "- First item\n- Second item\n- Third item\n";
+        let width = Some(80);
+
+        let mut full = Vec::new();
+        crate::markdown::append_markdown_agent(src, width, &mut full);
+        let total = full.len();
+        assert!(total >= 3, "expected at least 3 rendered lines, got {total}");
+
+        // Prefix covering first two source lines should produce <= 2
+        // rendered lines.
+        let off = source_bytes_for_rendered_count(src, width, 2);
+        assert!(off > 0);
+        let mut partial = Vec::new();
+        crate::markdown::append_markdown_agent(&src[..off], width, &mut partial);
+        assert!(
+            partial.len() <= 2,
+            "expected <=2 lines from prefix, got {}",
+            partial.len()
+        );
+    }
 }

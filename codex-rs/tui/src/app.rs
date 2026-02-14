@@ -535,10 +535,14 @@ pub(crate) struct App {
     last_transcript_render_width: Option<u16>,
     resize_reflow_pending_until: Option<Instant>,
 
-    /// Set to `true` when a resize reflow runs during an active stream, so
-    /// that `ConsolidateAgentMessage` can schedule a re-reflow to pick up the
-    /// consolidated `AgentMarkdownCell` rendering. Reset to `false` after
-    /// consolidation completes.
+    /// Set to `true` when a resize reflow runs during an active agent stream
+    /// (`SetWidth` handler), so that `ConsolidateAgentMessage` can schedule a
+    /// re-reflow to pick up the consolidated `AgentMarkdownCell` rendering.
+    ///
+    /// Cleared in three places:
+    /// 1. `ConsolidateAgentMessage` — normal completion (cells consolidated).
+    /// 2. `ConsolidateAgentMessage` — no-cells-to-consolidate `else` branch.
+    /// 3. `clear_thread_state()` — thread switch / abort.
     reflow_ran_during_stream: bool,
 
     pub(crate) enhanced_keys_supported: bool,

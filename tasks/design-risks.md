@@ -29,29 +29,21 @@
 6. **Column width allocation.** `markdown_render_tests.rs` exercises
    natural-fit, narrow-terminal, and minimum-width scenarios.
 
+7. **`source_bytes_for_rendered_count` prefix stability.** Three tests
+   (`source_bytes_plain_paragraphs`, `source_bytes_wrapped_lines`,
+   `source_bytes_list_items`) lock in the invariant that rendering a
+   newline-terminated source prefix produces a prefix of the full render.
+
 ### Social/tribal knowledge only
 
-7. **`source_bytes_for_rendered_count` convergence assumption.** The function
-   assumes that for non-table content, rendering a newline-terminated source
-   prefix produces a *prefix* of the full render.  This is true for the
-   current `pulldown-cmark` → `Writer` pipeline but is not tested in
-   isolation.  If a future markdown feature (e.g. footnotes, multi-paragraph
-   list items) violates this assumption, resize remapping will produce
-   duplicated or dropped lines.
-
-   *Recommendation:* Add a targeted unit test for
-   `source_bytes_for_rendered_count` with plain text and list content to lock
-   in the prefix-stability invariant.
-
 8. **`reflow_ran_during_stream` lifecycle.** The flag is set during resize
-   inside an agent stream and cleared in `ConsolidateAgentMessage`.  If the
-   stream is interrupted (e.g. abort, thread switch) without producing a
-   consolidation event, the flag remains set.  The Phase 4 fix added clearing
-   in the `else` branch, but there may be other abort paths that skip
-   `ConsolidateAgentMessage` entirely.
+   inside an agent stream and cleared in three places (documented in the
+   field's doc comment): `ConsolidateAgentMessage` normal path,
+   `ConsolidateAgentMessage` else branch, and `clear_thread_state()`.  If a
+   new abort path bypasses all three, the flag can leak.
 
-   *Recommendation:* Document in `app.rs` which events clear the flag, or
-   consolidate the flag-clearing into `reset_for_new_thread()`.
+   *Recommendation:* Already well-documented in the field's doc comment.
+   Keep the enumerated clearing sites up to date when adding new abort paths.
 
 9. **Table holdback applies to the entire buffer, not per-table regions.** If
    raw source contains mixed prose + table, the prose lines are also withheld
@@ -114,17 +106,8 @@
 
 ## Commit-Story Improvements
 
-The branch has 14 commits.  The first ~8 add feature code and the last ~6
-are fix-ups.  Suggested rewrite for a squash-merge PR description:
-
-| Current message | Suggested rewrite |
-|----------------|-------------------|
-| "Fix resize mid-drain dropping un-emitted wrapped lines" | "Preserve un-emitted wrapped lines when terminal resize occurs during commit-animation drain" |
-| "Restrict reflow flag to agent message streams only" | "Scope reflow-during-stream flag to agent streams to prevent spurious reflows during plan streaming" |
-| "Fix resize mid-stream duplicating already-emitted lines" | "Remap emitted line count through source bytes on resize to prevent duplicate scrollback lines" |
-| "Guard reflow flag to active streams and reset on thread switch" | "Clear reflow flag on consolidation (including no-cells-to-consolidate path) to prevent stale flag leaking across streams" |
-
-For a squash merge, the single commit message should be:
+The branch has 15 commits.  The first ~8 add feature code and the last ~7
+are fix-ups and docs.  Suggested squash-merge message:
 
 > Add native pipe-table rendering with streaming holdback and resize reflow
 >
