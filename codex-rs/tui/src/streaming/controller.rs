@@ -471,12 +471,14 @@ impl PlanStreamController {
     }
 }
 
-/// Find the smallest newline-terminated prefix of `raw_source` whose
-/// rendering at `width` produces at least `target_count` lines.
+/// Find the largest newline-terminated prefix of `raw_source` whose
+/// rendering at `width` produces at most `target_count` lines.
 ///
-/// Returns the byte offset (exclusive) of that prefix, or `raw_source.len()`
-/// if no newline boundary reaches the target (e.g. the tail of the emitted
-/// content was a partial source line that wrapped).
+/// When the target falls exactly on a source-line boundary, the returned
+/// offset covers that line. When it falls in the middle of a wrapped
+/// source line (partial drain), the offset stops at the *previous*
+/// newline to avoid overshooting — this may re-queue a few already-emitted
+/// wrapped lines as duplicates, but never drops un-emitted content.
 ///
 /// For non-table content (the only case where `emitted_stable_len > 0`),
 /// rendering a newline-terminated prefix produces a prefix of the full
@@ -489,15 +491,19 @@ fn source_bytes_for_rendered_count(
     if target_count == 0 {
         return 0;
     }
+    let mut best_offset = 0;
     for (i, _) in raw_source.match_indices('\n') {
         let prefix = &raw_source[..=i];
         let mut lines = Vec::new();
         crate::markdown::append_markdown_agent(prefix, width, &mut lines);
+        if lines.len() <= target_count {
+            best_offset = i + 1;
+        }
         if lines.len() >= target_count {
-            return i + 1;
+            break;
         }
     }
-    raw_source.len()
+    best_offset
 }
 
 fn parse_fence_marker(line: &str) -> Option<(char, usize)> {
@@ -771,6 +777,41 @@ mod tests {
             0,
             "already-emitted content must not be re-queued after resize",
         );
+    }
+
+    #[test]
+    fn controller_set_width_partial_drain_no_lost_lines() {
+        // Regression: if a wrapped source line is partially drained (some
+        // wrapped lines emitted, others still queued) and then the terminal
+        // resizes, the un-emitted wrapped lines must not be lost.
+        let mut ctrl = StreamController::new(Some(40));
+        // Push two source lines. The first is long enough to wrap at width=40.
+        ctrl.push("AAAA BBBB CCCC DDDD EEEE FFFF GGGG HHHH IIII JJJJ\n");
+        ctrl.push("second line\n");
+
+        // Drain only 1 rendered line (the first wrapped row of line 1).
+        let (cell, idle) = ctrl.on_commit_tick();
+        assert!(cell.is_some(), "expected 1 emitted line");
+        assert!(!idle, "queue should still have lines");
+        let remaining_before = ctrl.queued_lines();
+        assert!(remaining_before > 0, "should have queued lines left");
+
+        // Resize to a narrower width.
+        ctrl.set_width(Some(20));
+
+        // Finalize and collect all remaining output.
+        let (cell, source) = ctrl.finalize();
+        let final_lines = cell
+            .map(|c| lines_to_plain_strings(&c.transcript_lines(u16::MAX)))
+            .unwrap_or_default();
+
+        // The finalized output must contain "second line" — it was queued
+        // and must not be dropped by the resize remapping.
+        assert!(
+            final_lines.iter().any(|l| l.contains("second line")),
+            "un-emitted 'second line' was lost after resize; got: {final_lines:?}",
+        );
+        assert!(source.is_some(), "expected source from finalize");
     }
 
     #[test]
