@@ -9,48 +9,35 @@ use std::time::Instant;
 
 use super::StreamState;
 
-/// Controller for streaming agent message content with table-aware holdback.
+// ---------------------------------------------------------------------------
+// StreamCore — shared bookkeeping for both stream controllers
+// ---------------------------------------------------------------------------
+
+/// Shared state and logic for the two-region streaming model.
 ///
-/// Manages a two-region model of rendered output:
+/// Both [`StreamController`] (agent messages) and [`PlanStreamController`]
+/// (proposed plans) delegate their core bookkeeping here: source
+/// accumulation, re-rendering, stable/tail partitioning, commit-animation
+/// queue management, and terminal resize handling.
 ///
-/// - **Stable region** (`[0..enqueued_stable_len]`): lines that have been
-///   enqueued for commit-animation drain into scrollback. Once emitted
-///   (`emitted_stable_len`), these lines live in the transcript as
-///   `AgentMessageCell`s.
-///
-/// - **Tail region** (`[enqueued_stable_len..]`): lines that are still
-///   mutable because they may be rewritten (e.g. a table whose column widths
-///   change as new rows arrive). Displayed as a `StreamingAgentTailCell` in
-///   the active cell.
-///
-/// When `table_holdback_state()` detects an in-progress table, the entire
-/// rendered buffer becomes tail (tail_budget = rendered_lines.len()), preventing
-/// partial-table commits. When no table is detected, the tail budget is zero
-/// and all rendered lines flow into the stable queue immediately.
-///
-/// On terminal resize, `set_width()` re-renders from `raw_source`, remaps
-/// `emitted_stable_len` to the new layout via `source_bytes_for_rendered_count`,
-/// and rebuilds the stable queue.
-pub(crate) struct StreamController {
+/// The wrapping controllers add only their own `emit()` styling and
+/// finalize return types.
+struct StreamCore {
     state: StreamState,
     /// Current rendering width (columns available for markdown content).
     width: Option<usize>,
-    /// Accumulated raw markdown source for the current stream (newline-terminated
-    /// chunks from `commit_complete_source()`).
+    /// Accumulated raw markdown source for the current stream.
     raw_source: String,
     /// Full re-render of `raw_source` at `width`. Rebuilt on every committed delta.
     rendered_lines: Vec<Line<'static>>,
-    /// Number of lines from `rendered_lines[0..]` that have been enqueued into
-    /// the commit-animation queue (but may not yet be emitted to scrollback).
+    /// Lines enqueued into the commit-animation queue.
     enqueued_stable_len: usize,
-    /// Number of lines that have actually been emitted to scrollback via
-    /// `on_commit_tick` / `on_commit_tick_batch`. Always <= `enqueued_stable_len`.
+    /// Lines actually emitted to scrollback.
     emitted_stable_len: usize,
-    header_emitted: bool,
 }
 
-impl StreamController {
-    pub(crate) fn new(width: Option<usize>) -> Self {
+impl StreamCore {
+    fn new(width: Option<usize>) -> Self {
         Self {
             state: StreamState::new(width),
             width,
@@ -58,12 +45,12 @@ impl StreamController {
             rendered_lines: Vec::new(),
             enqueued_stable_len: 0,
             emitted_stable_len: 0,
-            header_emitted: false,
         }
     }
 
-    /// Push a delta; if it contains a newline, commit completed lines and start animation.
-    pub(crate) fn push(&mut self, delta: &str) -> bool {
+    /// Push a delta; if it contains a newline, commit completed lines and
+    /// enqueue newly-stable lines. Returns `true` if new lines were enqueued.
+    fn push_delta(&mut self, delta: &str) -> bool {
         if !delta.is_empty() {
             self.state.has_seen_delta = true;
         }
@@ -80,81 +67,56 @@ impl StreamController {
         enqueued
     }
 
-    /// Finalize the active stream. Returns the final cell (if any remaining
-    /// lines) and the raw markdown source for consolidation.
-    pub(crate) fn finalize(&mut self) -> (Option<Box<dyn HistoryCell>>, Option<String>) {
+    /// Drain the collector, re-render, and return lines not yet emitted.
+    /// Does NOT reset state — the caller must call `reset()` afterward.
+    fn finalize_remaining(&mut self) -> Vec<Line<'static>> {
         let remainder_source = self.state.collector.finalize_and_drain_source();
         if !remainder_source.is_empty() {
             self.raw_source.push_str(&remainder_source);
         }
-        if self.raw_source.is_empty() {
-            self.reset_stream_state();
-            return (None, None);
-        }
-
-        // Capture the source before reset clears it.
-        let source = self.raw_source.clone();
-
         let mut rendered = Vec::new();
         crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
-        let out_lines = if self.emitted_stable_len >= rendered.len() {
+        if self.emitted_stable_len >= rendered.len() {
             Vec::new()
         } else {
             rendered[self.emitted_stable_len..].to_vec()
-        };
-
-        let out = self.emit(out_lines);
-        self.reset_stream_state();
-        (out, Some(source))
+        }
     }
 
-    /// Step animation: commit at most one queued line and handle end-of-drain cleanup.
-    pub(crate) fn on_commit_tick(&mut self) -> (Option<Box<dyn HistoryCell>>, bool) {
+    /// Step animation: dequeue one line, update the emitted count.
+    fn tick(&mut self) -> Vec<Line<'static>> {
         let step = self.state.step();
         self.emitted_stable_len += step.len();
-        (self.emit(step), self.state.is_idle())
+        step
     }
 
-    /// Step animation: commit at most `max_lines` queued lines.
-    ///
-    /// This is intended for adaptive catch-up drains. Callers should keep `max_lines` bounded; a
-    /// very large value can collapse perceived animation into a single jump.
-    pub(crate) fn on_commit_tick_batch(
-        &mut self,
-        max_lines: usize,
-    ) -> (Option<Box<dyn HistoryCell>>, bool) {
+    /// Batch drain: dequeue up to `max_lines`, update the emitted count.
+    fn tick_batch(&mut self, max_lines: usize) -> Vec<Line<'static>> {
         let step = self.state.drain_n(max_lines.max(1));
         self.emitted_stable_len += step.len();
-        (self.emit(step), self.state.is_idle())
+        step
     }
 
-    /// Returns the current number of queued lines waiting to be displayed.
-    pub(crate) fn queued_lines(&self) -> usize {
+    fn is_idle(&self) -> bool {
+        self.state.is_idle()
+    }
+
+    fn queued_lines(&self) -> usize {
         self.state.queued_len()
     }
 
-    /// Returns the age of the oldest queued line.
-    pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+    fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
         self.state.oldest_queued_age(now)
     }
 
-    /// Returns the current mutable tail to render in the active cell.
-    pub(crate) fn current_tail_lines(&self) -> Vec<Line<'static>> {
+    /// Mutable tail lines not yet enqueued into the stable region.
+    fn current_tail_lines(&self) -> Vec<Line<'static>> {
         let start = self.enqueued_stable_len.min(self.rendered_lines.len());
         self.rendered_lines[start..].to_vec()
     }
 
-    /// Returns whether the mutable tail should render the leading assistant marker.
-    pub(crate) fn tail_starts_stream(&self) -> bool {
-        !self.header_emitted && self.enqueued_stable_len == 0
-    }
-
-    pub(crate) fn has_live_tail(&self) -> bool {
-        !self.current_tail_lines().is_empty()
-    }
-
-    /// Update rendering width and rebuild queued stable lines to match the new layout.
-    pub(crate) fn set_width(&mut self, width: Option<usize>) {
+    /// Update rendering width and rebuild queued stable lines for the new layout.
+    fn set_width(&mut self, width: Option<usize>) {
         if self.width == width {
             return;
         }
@@ -186,19 +148,18 @@ impl StreamController {
         self.rebuild_stable_queue_from_render();
     }
 
-    fn emit(&mut self, lines: Vec<Line<'static>>) -> Option<Box<dyn HistoryCell>> {
-        if lines.is_empty() {
-            return None;
-        }
-        Some(Box::new(history_cell::AgentMessageCell::new(lines, {
-            let header_emitted = self.header_emitted;
-            self.header_emitted = true;
-            !header_emitted
-        })))
+    /// Clear all accumulated state for the current stream.
+    fn reset(&mut self) {
+        self.state.clear();
+        self.raw_source.clear();
+        self.rendered_lines.clear();
+        self.enqueued_stable_len = 0;
+        self.emitted_stable_len = 0;
     }
 
-    /// Re-render the full `raw_source` at the current `width`, replacing the
-    /// `rendered_lines` snapshot.
+    // -- Private helpers --
+
+    /// Re-render the full `raw_source` at the current `width`.
     fn recompute_streaming_render(&mut self) {
         let mut rendered = Vec::new();
         crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
@@ -206,13 +167,7 @@ impl StreamController {
     }
 
     /// Advance `enqueued_stable_len` toward the target stable boundary and
-    /// enqueue any newly-stable lines into the commit-animation queue. Returns
-    /// `true` if new lines were enqueued.
-    ///
-    /// The target is `rendered_lines.len() - tail_budget`, clamped to at least
-    /// `emitted_stable_len` (we never un-emit lines). When a structural rewrite
-    /// moves the boundary backward (table appeared retroactively), the queue is
-    /// rebuilt from scratch.
+    /// enqueue any newly-stable lines. Returns `true` if new lines were enqueued.
     fn sync_stable_queue(&mut self) -> bool {
         let tail_budget = self.active_tail_budget_lines();
         let target_stable_len = self
@@ -221,9 +176,9 @@ impl StreamController {
             .saturating_sub(tail_budget)
             .max(self.emitted_stable_len);
 
+        // A structural rewrite moved the stable boundary backward into
+        // queued-but-unemitted lines. Rebuild queue from the latest snapshot.
         if target_stable_len < self.enqueued_stable_len {
-            // A structural rewrite moved the stable boundary backward into queued-but-unemitted
-            // lines. Rebuild queue from the latest render snapshot.
             self.state.clear_queue();
             if self.emitted_stable_len < target_stable_len {
                 self.state.enqueue(
@@ -244,9 +199,8 @@ impl StreamController {
         true
     }
 
-    /// Rebuild the stable queue from the current render snapshot, discarding any
-    /// previously queued lines. Used after `set_width()` where the old queue is
-    /// stale.
+    /// Rebuild the stable queue from the current render snapshot. Used after
+    /// `set_width()` where the old queue is stale.
     fn rebuild_stable_queue_from_render(&mut self) {
         let tail_budget = self.active_tail_budget_lines();
         let target_stable_len = self
@@ -262,9 +216,8 @@ impl StreamController {
         self.enqueued_stable_len = target_stable_len;
     }
 
-    /// How many rendered lines to withhold from the stable queue as mutable
-    /// tail. When a table is detected in the source, the entire rendered buffer
-    /// is tail; otherwise zero.
+    /// How many rendered lines to withhold as mutable tail. When a table is
+    /// detected, the entire buffer is tail; otherwise zero.
     fn active_tail_budget_lines(&self) -> usize {
         match table_holdback_state(&self.raw_source) {
             TableHoldbackState::Confirmed => self.rendered_lines.len(),
@@ -272,24 +225,106 @@ impl StreamController {
             TableHoldbackState::None => 0,
         }
     }
+}
 
-    fn reset_stream_state(&mut self) {
-        self.state.clear();
-        self.raw_source.clear();
-        self.rendered_lines.clear();
-        self.enqueued_stable_len = 0;
-        self.emitted_stable_len = 0;
+// ---------------------------------------------------------------------------
+// StreamController — agent message streams
+// ---------------------------------------------------------------------------
+
+/// Controller for streaming agent message content with table-aware holdback.
+///
+/// Wraps [`StreamCore`] and adds `AgentMessageCell` emission styling.
+pub(crate) struct StreamController {
+    core: StreamCore,
+    header_emitted: bool,
+}
+
+impl StreamController {
+    pub(crate) fn new(width: Option<usize>) -> Self {
+        Self {
+            core: StreamCore::new(width),
+            header_emitted: false,
+        }
+    }
+
+    pub(crate) fn push(&mut self, delta: &str) -> bool {
+        self.core.push_delta(delta)
+    }
+
+    /// Finalize the active stream. Returns the final cell (if any remaining
+    /// lines) and the raw markdown source for consolidation.
+    pub(crate) fn finalize(&mut self) -> (Option<Box<dyn HistoryCell>>, Option<String>) {
+        let remaining = self.core.finalize_remaining();
+        if self.core.raw_source.is_empty() {
+            self.core.reset();
+            return (None, None);
+        }
+        // Capture the source before reset clears it.
+        let source = self.core.raw_source.clone();
+        let out = self.emit(remaining);
+        self.core.reset();
+        (out, Some(source))
+    }
+
+    pub(crate) fn on_commit_tick(&mut self) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let step = self.core.tick();
+        (self.emit(step), self.core.is_idle())
+    }
+
+    pub(crate) fn on_commit_tick_batch(
+        &mut self,
+        max_lines: usize,
+    ) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let step = self.core.tick_batch(max_lines);
+        (self.emit(step), self.core.is_idle())
+    }
+
+    pub(crate) fn queued_lines(&self) -> usize {
+        self.core.queued_lines()
+    }
+
+    pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.core.oldest_queued_age(now)
+    }
+
+    pub(crate) fn current_tail_lines(&self) -> Vec<Line<'static>> {
+        self.core.current_tail_lines()
+    }
+
+    pub(crate) fn tail_starts_stream(&self) -> bool {
+        !self.header_emitted && self.core.enqueued_stable_len == 0
+    }
+
+    pub(crate) fn has_live_tail(&self) -> bool {
+        !self.current_tail_lines().is_empty()
+    }
+
+    pub(crate) fn set_width(&mut self, width: Option<usize>) {
+        self.core.set_width(width);
+    }
+
+    fn emit(&mut self, lines: Vec<Line<'static>>) -> Option<Box<dyn HistoryCell>> {
+        if lines.is_empty() {
+            return None;
+        }
+        Some(Box::new(history_cell::AgentMessageCell::new(lines, {
+            let header_emitted = self.header_emitted;
+            self.header_emitted = true;
+            !header_emitted
+        })))
     }
 }
 
+// ---------------------------------------------------------------------------
+// PlanStreamController — proposed plan streams
+// ---------------------------------------------------------------------------
+
 /// Controller that streams proposed plan markdown into a styled plan block.
+///
+/// Wraps [`StreamCore`] and adds plan-specific header, indentation, and
+/// background styling.
 pub(crate) struct PlanStreamController {
-    state: StreamState,
-    width: Option<usize>,
-    raw_source: String,
-    rendered_lines: Vec<Line<'static>>,
-    enqueued_stable_len: usize,
-    emitted_stable_len: usize,
+    core: StreamCore,
     header_emitted: bool,
     top_padding_emitted: bool,
 }
@@ -297,115 +332,47 @@ pub(crate) struct PlanStreamController {
 impl PlanStreamController {
     pub(crate) fn new(width: Option<usize>) -> Self {
         Self {
-            state: StreamState::new(width),
-            width,
-            raw_source: String::new(),
-            rendered_lines: Vec::new(),
-            enqueued_stable_len: 0,
-            emitted_stable_len: 0,
+            core: StreamCore::new(width),
             header_emitted: false,
             top_padding_emitted: false,
         }
     }
 
-    /// Push a delta; if it contains a newline, commit completed lines and start animation.
     pub(crate) fn push(&mut self, delta: &str) -> bool {
-        if !delta.is_empty() {
-            self.state.has_seen_delta = true;
-        }
-        self.state.collector.push_delta(delta);
-
-        let mut enqueued = false;
-        if delta.contains('\n')
-            && let Some(committed_source) = self.state.collector.commit_complete_source()
-        {
-            self.raw_source.push_str(&committed_source);
-            self.recompute_streaming_render();
-            enqueued = self.sync_stable_queue();
-        }
-        enqueued
+        self.core.push_delta(delta)
     }
 
     /// Finalize the active stream. Drain and emit now.
     pub(crate) fn finalize(&mut self) -> Option<Box<dyn HistoryCell>> {
-        let remainder_source = self.state.collector.finalize_and_drain_source();
-        if !remainder_source.is_empty() {
-            self.raw_source.push_str(&remainder_source);
-        }
-        let mut rendered = Vec::new();
-        crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
-        let out_lines = if self.emitted_stable_len >= rendered.len() {
-            Vec::new()
-        } else {
-            rendered[self.emitted_stable_len..].to_vec()
-        };
-
-        let out = self.emit(out_lines, true);
-        self.reset_plan_stream_state();
+        let remaining = self.core.finalize_remaining();
+        let out = self.emit(remaining, true);
+        self.core.reset();
         out
     }
 
-    /// Step animation: commit at most one queued line and handle end-of-drain cleanup.
     pub(crate) fn on_commit_tick(&mut self) -> (Option<Box<dyn HistoryCell>>, bool) {
-        let step = self.state.step();
-        self.emitted_stable_len += step.len();
-        (self.emit(step, false), self.state.is_idle())
+        let step = self.core.tick();
+        (self.emit(step, false), self.core.is_idle())
     }
 
-    /// Step animation: commit at most `max_lines` queued lines.
-    ///
-    /// This is intended for adaptive catch-up drains. Callers should keep `max_lines` bounded; a
-    /// very large value can collapse perceived animation into a single jump.
     pub(crate) fn on_commit_tick_batch(
         &mut self,
         max_lines: usize,
     ) -> (Option<Box<dyn HistoryCell>>, bool) {
-        let step = self.state.drain_n(max_lines.max(1));
-        self.emitted_stable_len += step.len();
-        (self.emit(step, false), self.state.is_idle())
+        let step = self.core.tick_batch(max_lines);
+        (self.emit(step, false), self.core.is_idle())
     }
 
-    /// Returns the current number of queued plan lines waiting to be displayed.
     pub(crate) fn queued_lines(&self) -> usize {
-        self.state.queued_len()
+        self.core.queued_lines()
     }
 
-    /// Returns the age of the oldest queued plan line.
     pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
-        self.state.oldest_queued_age(now)
+        self.core.oldest_queued_age(now)
     }
 
-    /// Update rendering width and rebuild queued stable lines to match the new layout.
     pub(crate) fn set_width(&mut self, width: Option<usize>) {
-        if self.width == width {
-            return;
-        }
-        let old_width = self.width;
-        self.width = width;
-        self.state.collector.set_width(width);
-        if self.raw_source.is_empty() {
-            return;
-        }
-
-        // Recalculate emitted_stable_len for the new width so we don't
-        // re-queue lines that were already emitted at the old width.
-        if self.emitted_stable_len > 0 {
-            let emitted_bytes = source_bytes_for_rendered_count(
-                &self.raw_source,
-                old_width,
-                self.emitted_stable_len,
-            );
-            let mut emitted_at_new = Vec::new();
-            crate::markdown::append_markdown_agent(
-                &self.raw_source[..emitted_bytes],
-                self.width,
-                &mut emitted_at_new,
-            );
-            self.emitted_stable_len = emitted_at_new.len();
-        }
-
-        self.recompute_streaming_render();
-        self.rebuild_stable_queue_from_render();
+        self.core.set_width(width);
     }
 
     fn emit(
@@ -447,73 +414,11 @@ impl PlanStreamController {
             is_stream_continuation,
         )))
     }
-
-    fn recompute_streaming_render(&mut self) {
-        let mut rendered = Vec::new();
-        crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
-        self.rendered_lines = rendered;
-    }
-
-    fn sync_stable_queue(&mut self) -> bool {
-        let tail_budget = self.active_tail_budget_lines();
-        let target_stable_len = self
-            .rendered_lines
-            .len()
-            .saturating_sub(tail_budget)
-            .max(self.emitted_stable_len);
-
-        if target_stable_len < self.enqueued_stable_len {
-            self.state.clear_queue();
-            if self.emitted_stable_len < target_stable_len {
-                self.state.enqueue(
-                    self.rendered_lines[self.emitted_stable_len..target_stable_len].to_vec(),
-                );
-            }
-            self.enqueued_stable_len = target_stable_len;
-            return self.state.queued_len() > 0;
-        }
-
-        if target_stable_len == self.enqueued_stable_len {
-            return false;
-        }
-
-        self.state
-            .enqueue(self.rendered_lines[self.enqueued_stable_len..target_stable_len].to_vec());
-        self.enqueued_stable_len = target_stable_len;
-        true
-    }
-
-    fn rebuild_stable_queue_from_render(&mut self) {
-        let tail_budget = self.active_tail_budget_lines();
-        let target_stable_len = self
-            .rendered_lines
-            .len()
-            .saturating_sub(tail_budget)
-            .max(self.emitted_stable_len);
-        self.state.clear_queue();
-        if self.emitted_stable_len < target_stable_len {
-            self.state
-                .enqueue(self.rendered_lines[self.emitted_stable_len..target_stable_len].to_vec());
-        }
-        self.enqueued_stable_len = target_stable_len;
-    }
-
-    fn active_tail_budget_lines(&self) -> usize {
-        match table_holdback_state(&self.raw_source) {
-            TableHoldbackState::Confirmed => self.rendered_lines.len(),
-            TableHoldbackState::PendingHeader => self.rendered_lines.len(),
-            TableHoldbackState::None => 0,
-        }
-    }
-
-    fn reset_plan_stream_state(&mut self) {
-        self.state.clear();
-        self.raw_source.clear();
-        self.rendered_lines.clear();
-        self.enqueued_stable_len = 0;
-        self.emitted_stable_len = 0;
-    }
 }
+
+// ---------------------------------------------------------------------------
+// source_bytes_for_rendered_count — resize remapping helper
+// ---------------------------------------------------------------------------
 
 /// Find the largest newline-terminated prefix of `raw_source` whose
 /// rendering at `width` produces at most `target_count` lines.
@@ -549,6 +454,10 @@ fn source_bytes_for_rendered_count(
     }
     best_offset
 }
+
+// ---------------------------------------------------------------------------
+// Table holdback infrastructure
+// ---------------------------------------------------------------------------
 
 fn parse_fence_marker(line: &str) -> Option<(char, usize)> {
     let mut chars = line.chars();
