@@ -888,6 +888,7 @@ impl App {
         self.has_emitted_history_lines = false;
         self.last_transcript_render_width = None;
         self.resize_reflow_pending_until = None;
+        self.reflow_ran_during_stream = false;
         self.backtrack = BacktrackState::default();
         self.backtrack_render_pending = false;
         tui.terminal.clear_scrollback()?;
@@ -952,10 +953,14 @@ impl App {
         self.has_emitted_history_lines = false;
         self.deferred_history_lines.clear();
 
-        // Track that a reflow happened; if streaming cells haven't been
-        // consolidated yet, ConsolidateAgentMessage will schedule a
-        // follow-up reflow with the correct AgentMarkdownCell rendering.
-        self.reflow_ran_during_stream = true;
+        // Track that a reflow happened during an active stream so
+        // ConsolidateAgentMessage can schedule a follow-up reflow with
+        // the correct AgentMarkdownCell rendering. Only set the flag
+        // when a stream is actually running to avoid spurious reflows
+        // on the next consolidation if the user resizes while idle.
+        if self.commit_anim_running.load(Ordering::Relaxed) {
+            self.reflow_ran_during_stream = true;
+        }
 
         let width = tui.terminal.size()?.width;
         for cell in self.transcript_cells.clone() {
