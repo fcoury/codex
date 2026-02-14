@@ -1,5 +1,14 @@
-#[cfg(test)]
-use crate::markdown_render::TableColumnWidthMode;
+//! Markdown-to-ratatui rendering entry points.
+//!
+//! This module provides the public API surface that the rest of the TUI uses to
+//! turn markdown source into `Vec<Line<'static>>`.  Three variants exist:
+//!
+//! - [`append_markdown`] -- general-purpose, used for plan blocks and history
+//!   cells that already hold pre-processed markdown.
+//! - [`append_markdown_agent`] -- for agent responses.  Runs
+//!   [`unwrap_markdown_fences`] first so that `` ```md ``/`` ```markdown ``
+//!   fences containing tables are stripped and the table parser sees raw
+//!   markdown instead of fenced code.
 use ratatui::text::Line;
 
 pub(crate) fn append_markdown(
@@ -11,6 +20,12 @@ pub(crate) fn append_markdown(
     crate::render::line_utils::push_owned_lines(&rendered.lines, lines);
 }
 
+/// Render an agent message to styled ratatui lines.
+///
+/// Before rendering, the source is passed through [`unwrap_markdown_fences`] so
+/// that tables wrapped in `` ```md `` fences are rendered as native tables
+/// rather than code blocks.  Non-markdown fences (e.g. `rust`, `sh`) are left
+/// intact.
 pub(crate) fn append_markdown_agent(
     markdown_source: &str,
     width: Option<usize>,
@@ -20,20 +35,17 @@ pub(crate) fn append_markdown_agent(
     append_markdown(&normalized, width, lines);
 }
 
-#[cfg(test)]
-pub(crate) fn append_markdown_streaming(
-    markdown_source: &str,
-    width: Option<usize>,
-    lines: &mut Vec<Line<'static>>,
-) {
-    let rendered = crate::markdown_render::render_markdown_text_with_width_and_table_mode(
-        markdown_source,
-        width,
-        TableColumnWidthMode::HeaderOnly,
-    );
-    crate::render::line_utils::push_owned_lines(&rendered.lines, lines);
-}
-
+/// Strip `` ```md ``/`` ```markdown `` fences that contain tables, emitting
+/// their content as bare markdown so `pulldown-cmark` parses the tables natively.
+///
+/// Fences whose info string is not `md` or `markdown` are passed through
+/// unchanged.  Markdown fences that do *not* contain a table (detected by
+/// checking for a header row + delimiter row) are also passed through so that
+/// non-table markdown inside a fence still renders as a code block.
+///
+/// The fence unwrapping is intentionally conservative: it buffers the entire
+/// fence body before deciding, and an unclosed fence at end-of-input is
+/// re-emitted with its opening line so partial streams degrade to code display.
 fn unwrap_markdown_fences(markdown_source: &str) -> String {
     #[derive(Clone, Copy)]
     struct Fence {
@@ -92,51 +104,8 @@ fn unwrap_markdown_fences(markdown_source: &str) -> String {
         trimmed[len..].trim().is_empty()
     }
 
-    fn is_table_candidate_line(line: &str) -> bool {
-        parse_table_segments(line)
-            .is_some_and(|segments| segments.iter().any(|segment| !segment.is_empty()))
-    }
-
-    fn parse_table_segments(line: &str) -> Option<Vec<&str>> {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        let mut content = trimmed;
-        if let Some(without_leading) = content.strip_prefix('|') {
-            content = without_leading;
-        }
-        if let Some(without_trailing) = content.strip_suffix('|') {
-            content = without_trailing;
-        }
-
-        let segments: Vec<&str> = content.split('|').map(str::trim).collect();
-        (segments.len() >= 2).then_some(segments)
-    }
-
-    fn is_table_delimiter_line(line: &str) -> bool {
-        let Some(segments) = parse_table_segments(line) else {
-            return false;
-        };
-        let mut saw_segment = false;
-        for segment in segments {
-            let value = segment.trim();
-            if value.is_empty() {
-                return false;
-            }
-            if !value.chars().all(|ch| ch == '-' || ch == ':') {
-                return false;
-            }
-            if !value.contains('-') {
-                return false;
-            }
-            saw_segment = true;
-        }
-        saw_segment
-    }
-
     fn markdown_fence_contains_table(content: &str) -> bool {
+        use crate::table_detect;
         let mut saw_candidate = false;
         let mut saw_delimiter = false;
         for line in content.lines() {
@@ -144,10 +113,10 @@ fn unwrap_markdown_fences(markdown_source: &str) -> String {
             if trimmed.is_empty() {
                 continue;
             }
-            if !is_table_candidate_line(trimmed) {
+            if !table_detect::is_table_header_line(trimmed) {
                 continue;
             }
-            if is_table_delimiter_line(trimmed) {
+            if table_detect::is_table_delimiter_line(trimmed) {
                 saw_delimiter = true;
             } else {
                 saw_candidate = true;

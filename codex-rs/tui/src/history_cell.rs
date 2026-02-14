@@ -415,6 +415,16 @@ impl HistoryCell for AgentMarkdownCell {
     }
 }
 
+/// Transient active-cell representation of the mutable tail of an agent stream.
+///
+/// During streaming, lines that have not yet been committed to scrollback
+/// (because they belong to an in-progress table or are the last incomplete
+/// line) are displayed via this cell in the `active_cell` slot.  It is
+/// replaced on every delta and cleared when the stream finalizes.
+///
+/// Unlike `AgentMessageCell`, this cell is never committed to the transcript --
+/// it exists only as a live preview of content that will eventually be emitted
+/// as stable `AgentMessageCell`s or consolidated into an `AgentMarkdownCell`.
 #[derive(Debug)]
 pub(crate) struct StreamingAgentTailCell {
     lines: Vec<Line<'static>>,

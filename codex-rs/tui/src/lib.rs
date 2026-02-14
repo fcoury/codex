@@ -100,6 +100,7 @@ mod status;
 mod status_indicator_widget;
 mod streaming;
 mod style;
+mod table_detect;
 mod terminal_palette;
 mod text_formatting;
 mod tooltips;

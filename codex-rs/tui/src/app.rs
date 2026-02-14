@@ -1693,6 +1693,10 @@ impl App {
                     tracing::debug!(
                         "ConsolidateAgentMessage: no cells to consolidate (start={start}, end={end})"
                     );
+                    // Clear the flag even when there are no cells to
+                    // consolidate so it never leaks into unrelated future
+                    // streams.
+                    self.reflow_ran_during_stream = false;
                 }
             }
             AppEvent::ApplyThreadRollback { num_turns } => {

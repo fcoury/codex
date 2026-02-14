@@ -86,7 +86,7 @@ impl MarkdownStreamCollector {
         }
         let source = self.buffer[..commit_end].to_string();
         let mut rendered: Vec<Line<'static>> = Vec::new();
-        markdown::append_markdown_streaming(&source, self.width, &mut rendered);
+        markdown::append_markdown(&source, self.width, &mut rendered);
         let mut complete_line_count = rendered.len();
         if complete_line_count > 0
             && crate::render::line_utils::is_blank_line_spaces_only(
@@ -132,7 +132,7 @@ impl MarkdownStreamCollector {
         tracing::trace!("markdown finalize (raw source):\n---\n{source}\n---");
 
         let mut rendered: Vec<Line<'static>> = Vec::new();
-        markdown::append_markdown_streaming(&source, self.width, &mut rendered);
+        markdown::append_markdown(&source, self.width, &mut rendered);
 
         let out = if self.committed_line_count >= rendered.len() {
             Vec::new()

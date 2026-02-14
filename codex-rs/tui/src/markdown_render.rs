@@ -75,13 +75,12 @@ impl IndentContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TableColumnWidthMode {
-    #[allow(dead_code)]
-    HeaderOnly,
-    Full,
-}
-
+/// Styled content of a single cell in the table being parsed.
+///
+/// A cell can contain multiple lines (hard breaks inside the cell) and rich
+/// inline spans (bold, code, links).  The `plain_text()` projection is used
+/// for column-width measurement; the styled `lines` are used for final
+/// rendering.
 #[derive(Clone, Debug, Default)]
 struct TableCell {
     lines: Vec<Line<'static>>,
@@ -119,6 +118,12 @@ impl TableCell {
     }
 }
 
+/// Accumulates pulldown-cmark table events into a structured representation.
+///
+/// `TableState` is created on `Tag::Table` and consumed on `TagEnd::Table`.
+/// Between those events, the Writer delegates cell content (text, code, html,
+/// breaks) into the `current_cell`, which is flushed into `current_row` on
+/// `TagEnd::TableCell`, then into `header`/`rows` on row/head end events.
 #[derive(Debug)]
 struct TableState {
     alignments: Vec<Alignment>,
@@ -129,19 +134,37 @@ struct TableState {
     in_header: bool,
 }
 
+/// Classification of a table column for width-allocation priority.
+///
+/// Narrative columns (long prose, many words per cell) are shrunk first when
+/// the table exceeds available width.  Structured columns (short tokens like
+/// dates, status words, numbers) are preserved as long as possible to keep
+/// their content on a single line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TableColumnKind {
+    /// Long-form prose content (>= 4 avg words/cell or >= 28 avg char width).
     Narrative,
+    /// Short, token-like content that should resist wrapping.
     Structured,
 }
 
+/// Per-column statistics used to drive the width-allocation algorithm.
+///
+/// Collected in a single pass over the header and body rows before any
+/// shrinking decisions are made.
 #[derive(Clone, Debug)]
 struct TableColumnMetrics {
+    /// Widest cell content (display width) across header and all body rows.
     max_width: usize,
+    /// Display width of the longest whitespace-delimited token in the header.
     header_token_width: usize,
+    /// Display width of the longest whitespace-delimited token across body rows.
     body_token_width: usize,
+    /// Average number of whitespace-delimited words per non-empty body cell.
     avg_words_per_cell: f64,
+    /// Average display width of non-empty body cells.
     avg_cell_width: f64,
+    /// Classification derived from `avg_words_per_cell` and `avg_cell_width`.
     kind: TableColumnKind,
 }
 
@@ -163,19 +186,11 @@ pub fn render_markdown_text(input: &str) -> Text<'static> {
 }
 
 pub(crate) fn render_markdown_text_with_width(input: &str, width: Option<usize>) -> Text<'static> {
-    render_markdown_text_with_width_and_table_mode(input, width, TableColumnWidthMode::Full)
-}
-
-pub(crate) fn render_markdown_text_with_width_and_table_mode(
-    input: &str,
-    width: Option<usize>,
-    table_width_mode: TableColumnWidthMode,
-) -> Text<'static> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
     let parser = Parser::new_ext(input, options);
-    let mut w = Writer::new(parser, width, table_width_mode);
+    let mut w = Writer::new(parser, width);
     w.run();
     w.text
 }
@@ -202,14 +217,13 @@ where
     current_line_style: Style,
     current_line_in_code_block: bool,
     table_state: Option<TableState>,
-    table_width_mode: TableColumnWidthMode,
 }
 
 impl<'a, I> Writer<'a, I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    fn new(iter: I, wrap_width: Option<usize>, table_width_mode: TableColumnWidthMode) -> Self {
+    fn new(iter: I, wrap_width: Option<usize>) -> Self {
         Self {
             iter,
             text: Text::default(),
@@ -229,7 +243,6 @@ where
             current_line_style: Style::default(),
             current_line_in_code_block: false,
             table_state: None,
-            table_width_mode,
         }
     }
 
@@ -685,6 +698,12 @@ where
         }
     }
 
+    /// Convert a completed `TableState` into styled `Line`s with Unicode
+    /// box-drawing borders.
+    ///
+    /// The pipeline is: filter spillover rows -> normalize column counts ->
+    /// compute column widths -> render box grid (or fall back to pipe format
+    /// if widths can't fit). Spillover rows are appended after the table grid.
     fn render_table_lines(&self, mut table_state: TableState) -> Vec<Line<'static>> {
         let column_count = table_state.alignments.len();
         if column_count == 0 {
@@ -772,6 +791,14 @@ where
         })
     }
 
+    /// Allocate column widths to fit within `available_width`, or return `None`
+    /// if the table cannot fit even at minimum widths (triggering pipe fallback).
+    ///
+    /// Algorithm: start each column at its natural max width, then iteratively
+    /// shrink the best candidate column by one character until the total fits.
+    /// Narrative columns are shrunk before structured columns. Within a kind,
+    /// the column with the most slack above its floor is chosen. Returns `None`
+    /// when the minimum total exceeds `available_width`.
     fn compute_column_widths(
         &self,
         header: &[TableCell],
@@ -784,7 +811,6 @@ where
             header,
             rows,
             alignments.len(),
-            self.table_width_mode,
         );
         let mut widths: Vec<usize> = metrics
             .iter()
@@ -848,7 +874,6 @@ where
         header: &[TableCell],
         rows: &[Vec<TableCell>],
         column_count: usize,
-        mode: TableColumnWidthMode,
     ) -> Vec<TableColumnMetrics> {
         let mut metrics = Vec::with_capacity(column_count);
         for column in 0..column_count {
@@ -861,18 +886,16 @@ where
             let mut total_cells = 0usize;
             let mut total_cell_width = 0usize;
 
-            if mode == TableColumnWidthMode::Full {
-                for row in rows {
-                    let cell = &row[column];
-                    max_width = max_width.max(Self::cell_display_width(cell));
-                    let plain = cell.plain_text();
-                    body_token_width = body_token_width.max(Self::longest_token_width(&plain));
-                    let word_count = plain.split_whitespace().count();
-                    if word_count > 0 {
-                        total_words += word_count;
-                        total_cells += 1;
-                        total_cell_width += plain.width();
-                    }
+            for row in rows {
+                let cell = &row[column];
+                max_width = max_width.max(Self::cell_display_width(cell));
+                let plain = cell.plain_text();
+                body_token_width = body_token_width.max(Self::longest_token_width(&plain));
+                let word_count = plain.split_whitespace().count();
+                if word_count > 0 {
+                    total_words += word_count;
+                    total_cells += 1;
+                    total_cell_width += plain.width();
                 }
             }
 
@@ -1079,6 +1102,10 @@ where
         wrapped
     }
 
+    /// Detect rows that are artifacts of pulldown-cmark's lenient table
+    /// parsing rather than real table data. These "spillover" rows -- typically
+    /// trailing paragraphs absorbed into the table because they lack leading
+    /// pipes -- are extracted and rendered as plain text after the table grid.
     fn is_spillover_row(row: &[TableCell], next_row: Option<&Vec<TableCell>>) -> bool {
         let Some(first_text) = Self::first_non_empty_only_text(row) else {
             return false;

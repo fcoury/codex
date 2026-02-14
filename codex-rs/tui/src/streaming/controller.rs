@@ -9,14 +9,42 @@ use std::time::Instant;
 
 use super::StreamState;
 
-/// Controller that manages newline-gated streaming, header emission, and
-/// commit animation across streams.
+/// Controller for streaming agent message content with table-aware holdback.
+///
+/// Manages a two-region model of rendered output:
+///
+/// - **Stable region** (`[0..enqueued_stable_len]`): lines that have been
+///   enqueued for commit-animation drain into scrollback. Once emitted
+///   (`emitted_stable_len`), these lines live in the transcript as
+///   `AgentMessageCell`s.
+///
+/// - **Tail region** (`[enqueued_stable_len..]`): lines that are still
+///   mutable because they may be rewritten (e.g. a table whose column widths
+///   change as new rows arrive). Displayed as a `StreamingAgentTailCell` in
+///   the active cell.
+///
+/// When `table_holdback_state()` detects an in-progress table, the entire
+/// rendered buffer becomes tail (tail_budget = rendered_lines.len()), preventing
+/// partial-table commits. When no table is detected, the tail budget is zero
+/// and all rendered lines flow into the stable queue immediately.
+///
+/// On terminal resize, `set_width()` re-renders from `raw_source`, remaps
+/// `emitted_stable_len` to the new layout via `source_bytes_for_rendered_count`,
+/// and rebuilds the stable queue.
 pub(crate) struct StreamController {
     state: StreamState,
+    /// Current rendering width (columns available for markdown content).
     width: Option<usize>,
+    /// Accumulated raw markdown source for the current stream (newline-terminated
+    /// chunks from `commit_complete_source()`).
     raw_source: String,
+    /// Full re-render of `raw_source` at `width`. Rebuilt on every committed delta.
     rendered_lines: Vec<Line<'static>>,
+    /// Number of lines from `rendered_lines[0..]` that have been enqueued into
+    /// the commit-animation queue (but may not yet be emitted to scrollback).
     enqueued_stable_len: usize,
+    /// Number of lines that have actually been emitted to scrollback via
+    /// `on_commit_tick` / `on_commit_tick_batch`. Always <= `enqueued_stable_len`.
     emitted_stable_len: usize,
     header_emitted: bool,
 }
@@ -169,12 +197,22 @@ impl StreamController {
         })))
     }
 
+    /// Re-render the full `raw_source` at the current `width`, replacing the
+    /// `rendered_lines` snapshot.
     fn recompute_streaming_render(&mut self) {
         let mut rendered = Vec::new();
         crate::markdown::append_markdown_agent(&self.raw_source, self.width, &mut rendered);
         self.rendered_lines = rendered;
     }
 
+    /// Advance `enqueued_stable_len` toward the target stable boundary and
+    /// enqueue any newly-stable lines into the commit-animation queue. Returns
+    /// `true` if new lines were enqueued.
+    ///
+    /// The target is `rendered_lines.len() - tail_budget`, clamped to at least
+    /// `emitted_stable_len` (we never un-emit lines). When a structural rewrite
+    /// moves the boundary backward (table appeared retroactively), the queue is
+    /// rebuilt from scratch.
     fn sync_stable_queue(&mut self) -> bool {
         let tail_budget = self.active_tail_budget_lines();
         let target_stable_len = self
@@ -206,6 +244,9 @@ impl StreamController {
         true
     }
 
+    /// Rebuild the stable queue from the current render snapshot, discarding any
+    /// previously queued lines. Used after `set_width()` where the old queue is
+    /// stale.
     fn rebuild_stable_queue_from_render(&mut self) {
         let tail_budget = self.active_tail_budget_lines();
         let target_stable_len = self
@@ -221,6 +262,9 @@ impl StreamController {
         self.enqueued_stable_len = target_stable_len;
     }
 
+    /// How many rendered lines to withhold from the stable queue as mutable
+    /// tail. When a table is detected in the source, the entire rendered buffer
+    /// is tail; otherwise zero.
     fn active_tail_budget_lines(&self) -> usize {
         match table_holdback_state(&self.raw_source) {
             TableHoldbackState::Confirmed => self.rendered_lines.len(),
@@ -526,15 +570,25 @@ fn parse_fence_marker(line: &str) -> Option<(char, usize)> {
     Some((first, len))
 }
 
+/// A source line annotated with whether it falls inside a fenced code block.
 struct ParsedLine<'a> {
     text: &'a str,
     fence_context: FenceContext,
 }
 
+/// Where a source line sits relative to fenced code blocks.
+///
+/// Table holdback only applies to lines that are `Outside` or inside a
+/// `Markdown` fence. Lines inside `Other` fences (e.g. `sh`, `rust`) are
+/// ignored by the table scanner because their pipe characters are code, not
+/// table syntax.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FenceContext {
+    /// Not inside any fenced code block.
     Outside,
+    /// Inside a `` ```md `` or `` ```markdown `` fence.
     Markdown,
+    /// Inside a fence with a non-markdown info string.
     Other,
 }
 
@@ -597,50 +651,26 @@ fn table_candidate_text(line: &str) -> Option<&str> {
     parse_table_segments(stripped).map(|_| stripped)
 }
 
-fn parse_table_segments(line: &str) -> Option<Vec<&str>> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
+use crate::table_detect::is_table_header_line;
+use crate::table_detect::is_table_delimiter_line;
+use crate::table_detect::parse_table_segments;
 
-    let mut content = trimmed;
-    if let Some(without_leading) = content.strip_prefix('|') {
-        content = without_leading;
-    }
-    if let Some(without_trailing) = content.strip_suffix('|') {
-        content = without_trailing;
-    }
-
-    let segments: Vec<&str> = content.split('|').map(str::trim).collect();
-    (segments.len() >= 2).then_some(segments)
-}
-
-fn is_table_header_line(line: &str) -> bool {
-    parse_table_segments(line)
-        .is_some_and(|segments| segments.iter().any(|segment| !segment.is_empty()))
-}
-
-fn is_table_delimiter_segment(segment: &str) -> bool {
-    let trimmed = segment.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let without_leading = trimmed.strip_prefix(':').unwrap_or(trimmed);
-    let without_ends = without_leading.strip_suffix(':').unwrap_or(without_leading);
-    without_ends.len() >= 3 && without_ends.chars().all(|ch| ch == '-')
-}
-
-fn is_table_delimiter_line(line: &str) -> bool {
-    parse_table_segments(line)
-        .is_some_and(|segments| segments.into_iter().all(is_table_delimiter_segment))
-}
-
+/// Whether the accumulated raw source contains a markdown table that requires
+/// holdback of the mutable tail to prevent partial-table commits.
 enum TableHoldbackState {
+    /// No table detected -- all rendered lines can flow into the stable queue.
     None,
+    /// The last non-blank line looks like a table header row but no delimiter
+    /// row has followed yet. Hold back in case the next delta is a delimiter.
     PendingHeader,
+    /// A header + delimiter pair was found -- the source contains a confirmed
+    /// table. The entire rendered buffer is held as mutable tail.
     Confirmed,
 }
 
+/// Scan `source` for pipe-table patterns (header row followed by delimiter row)
+/// outside of non-markdown fenced code blocks. Used by the stream controllers
+/// to decide the tail budget.
 fn table_holdback_state(source: &str) -> TableHoldbackState {
     let lines = parse_lines_with_fence_state(source);
     for pair in lines.windows(2) {
