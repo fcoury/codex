@@ -130,11 +130,30 @@ impl StreamController {
         if self.width == width {
             return;
         }
+        let old_width = self.width;
         self.width = width;
         self.state.collector.set_width(width);
         if self.raw_source.is_empty() {
             return;
         }
+
+        // Recalculate emitted_stable_len for the new width so we don't
+        // re-queue lines that were already emitted at the old width.
+        if self.emitted_stable_len > 0 {
+            let emitted_bytes = source_bytes_for_rendered_count(
+                &self.raw_source,
+                old_width,
+                self.emitted_stable_len,
+            );
+            let mut emitted_at_new = Vec::new();
+            crate::markdown::append_markdown_agent(
+                &self.raw_source[..emitted_bytes],
+                self.width,
+                &mut emitted_at_new,
+            );
+            self.emitted_stable_len = emitted_at_new.len();
+        }
+
         self.recompute_streaming_render();
         self.rebuild_stable_queue_from_render();
     }
@@ -317,11 +336,30 @@ impl PlanStreamController {
         if self.width == width {
             return;
         }
+        let old_width = self.width;
         self.width = width;
         self.state.collector.set_width(width);
         if self.raw_source.is_empty() {
             return;
         }
+
+        // Recalculate emitted_stable_len for the new width so we don't
+        // re-queue lines that were already emitted at the old width.
+        if self.emitted_stable_len > 0 {
+            let emitted_bytes = source_bytes_for_rendered_count(
+                &self.raw_source,
+                old_width,
+                self.emitted_stable_len,
+            );
+            let mut emitted_at_new = Vec::new();
+            crate::markdown::append_markdown_agent(
+                &self.raw_source[..emitted_bytes],
+                self.width,
+                &mut emitted_at_new,
+            );
+            self.emitted_stable_len = emitted_at_new.len();
+        }
+
         self.recompute_streaming_render();
         self.rebuild_stable_queue_from_render();
     }
@@ -431,6 +469,35 @@ impl PlanStreamController {
         self.enqueued_stable_len = 0;
         self.emitted_stable_len = 0;
     }
+}
+
+/// Find the smallest newline-terminated prefix of `raw_source` whose
+/// rendering at `width` produces at least `target_count` lines.
+///
+/// Returns the byte offset (exclusive) of that prefix, or `raw_source.len()`
+/// if no newline boundary reaches the target (e.g. the tail of the emitted
+/// content was a partial source line that wrapped).
+///
+/// For non-table content (the only case where `emitted_stable_len > 0`),
+/// rendering a newline-terminated prefix produces a prefix of the full
+/// rendering, so this converges correctly.
+fn source_bytes_for_rendered_count(
+    raw_source: &str,
+    width: Option<usize>,
+    target_count: usize,
+) -> usize {
+    if target_count == 0 {
+        return 0;
+    }
+    for (i, _) in raw_source.match_indices('\n') {
+        let prefix = &raw_source[..=i];
+        let mut lines = Vec::new();
+        crate::markdown::append_markdown_agent(prefix, width, &mut lines);
+        if lines.len() >= target_count {
+            return i + 1;
+        }
+    }
+    raw_source.len()
 }
 
 fn parse_fence_marker(line: &str) -> Option<(char, usize)> {
@@ -679,6 +746,30 @@ mod tests {
         assert!(
             rendered.len() > 1,
             "expected resized content to occupy multiple lines, got {rendered:?}",
+        );
+    }
+
+    #[test]
+    fn controller_set_width_no_duplicate_after_emit() {
+        // Regression: if lines were already emitted at the old width and the
+        // terminal shrinks (causing those lines to expand), the queue must not
+        // re-enqueue the expanded suffix of already-emitted content.
+        let mut ctrl = StreamController::new(Some(120));
+        let line = "This is a long line that definitely wraps when the terminal shrinks to 24 columns.\n";
+        ctrl.push(line);
+        // Drain the queue — this content is now "emitted" (in transcript_cells).
+        let (cell, _) = ctrl.on_commit_tick_batch(usize::MAX);
+        assert!(cell.is_some(), "expected emitted cell");
+        assert_eq!(ctrl.queued_lines(), 0);
+
+        // Shrink the terminal — the emitted line now wraps to multiple lines.
+        ctrl.set_width(Some(24));
+
+        // Nothing should be queued because the content was already emitted.
+        assert_eq!(
+            ctrl.queued_lines(),
+            0,
+            "already-emitted content must not be re-queued after resize",
         );
     }
 
