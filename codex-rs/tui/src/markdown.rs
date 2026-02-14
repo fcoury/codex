@@ -11,6 +11,10 @@
 //!   markdown instead of fenced code.
 use ratatui::text::Line;
 
+/// Render markdown source to styled ratatui lines and append them to `lines`.
+///
+/// This is the general-purpose entry point used for plan blocks and history
+/// cells that already hold pre-processed markdown (no fence unwrapping).
 pub(crate) fn append_markdown(
     markdown_source: &str,
     width: Option<usize>,

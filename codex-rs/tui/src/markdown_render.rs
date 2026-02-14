@@ -192,10 +192,15 @@ impl TableState {
     }
 }
 
+/// Render markdown to styled ratatui `Text` without a width constraint.
+///
+/// Tables use their natural column widths and text is not word-wrapped.
 pub fn render_markdown_text(input: &str) -> Text<'static> {
     render_markdown_text_with_width(input, None)
 }
 
+/// Render markdown to styled ratatui `Text`, word-wrapping prose and
+/// constraining table column widths to fit within `width` columns.
 pub(crate) fn render_markdown_text_with_width(input: &str, width: Option<usize>) -> Text<'static> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
