@@ -537,8 +537,8 @@ pub(crate) struct App {
 
     /// Set to `true` when a resize reflow runs during an active stream, so
     /// that `ConsolidateAgentMessage` can schedule a re-reflow to pick up the
-    /// consolidated `AgentMarkdownCell` rendering. Reset to `false` when a
-    /// new stream starts (`StartCommitAnimation`).
+    /// consolidated `AgentMarkdownCell` rendering. Reset to `false` after
+    /// consolidation completes.
     reflow_ran_during_stream: bool,
 
     pub(crate) enhanced_keys_supported: bool,
@@ -1675,6 +1675,12 @@ impl App {
                         tui.frame_requester()
                             .schedule_frame_in(RESIZE_REFLOW_DEBOUNCE);
                     }
+
+                    // Reset the flag now that consolidation is complete.
+                    // This lives here (not in StartCommitAnimation) because
+                    // StartCommitAnimation fires on every committed chunk,
+                    // and resetting there would drop the flag mid-stream.
+                    self.reflow_ran_during_stream = false;
                 } else {
                     tracing::debug!(
                         "ConsolidateAgentMessage: no cells to consolidate (start={start}, end={end})"
@@ -1687,11 +1693,6 @@ impl App {
                 }
             }
             AppEvent::StartCommitAnimation => {
-                // New stream starting; reset the flag so ConsolidateAgentMessage
-                // only triggers a re-reflow if a resize actually happened during
-                // this stream's lifetime.
-                self.reflow_ran_during_stream = false;
-
                 if self
                     .commit_anim_running
                     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
