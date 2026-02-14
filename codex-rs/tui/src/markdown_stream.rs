@@ -1,11 +1,27 @@
+//! Newline-gated streaming accumulator for markdown source.
+//!
+//! `MarkdownStreamCollector` buffers incoming token deltas and exposes a
+//! commit boundary at each newline.  The stream controllers
+//! (`streaming/controller.rs`) call `commit_complete_source()` after each
+//! newline-bearing delta to obtain the completed prefix for re-rendering,
+//! leaving the trailing incomplete line in the buffer for the next delta.
+//!
+//! On finalization, `finalize_and_drain_source()` flushes whatever remains
+//! (the last line, which may lack a trailing newline).
+
 #[cfg(test)]
 use ratatui::text::Line;
 
 #[cfg(test)]
 use crate::markdown;
 
-/// Newline-gated accumulator that renders markdown and commits only fully
-/// completed logical lines.
+/// Newline-gated accumulator that buffers raw markdown source and commits
+/// only completed lines (terminated by `\n`).
+///
+/// The buffer tracks how many source bytes have already been committed via
+/// `committed_source_len`, so each `commit_complete_source()` call returns
+/// only the newly completed portion.  This design lets the stream controller
+/// re-render the entire accumulated source while only appending new content.
 pub(crate) struct MarkdownStreamCollector {
     buffer: String,
     committed_source_len: usize,

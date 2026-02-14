@@ -1,3 +1,18 @@
+//! Two-region streaming controllers for agent messages and proposed plans.
+//!
+//! Each stream partitions rendered markdown into a *stable region* (committed
+//! to scrollback via the animation queue in `StreamState`) and a *tail region*
+//! (mutable, displayed in the active-cell slot as `StreamingAgentTailCell`).
+//!
+//! `StreamCore` owns the shared bookkeeping: source accumulation, re-rendering,
+//! stable/tail partitioning, commit-animation queue management, and terminal
+//! resize handling.  `StreamController` and `PlanStreamController` are thin
+//! wrappers that add only their `emit()` styling and finalize return types.
+//!
+//! Table-aware holdback (`table_holdback_state`) keeps the entire buffer as
+//! tail while a table is being streamed, because each new row can change column
+//! widths and reshape every prior line.
+
 use crate::history_cell::HistoryCell;
 use crate::history_cell::{self};
 use crate::render::line_utils::prefix_lines;

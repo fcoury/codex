@@ -1,3 +1,14 @@
+//! Markdown-to-ratatui rendering engine.
+//!
+//! Consumes a `pulldown-cmark` event stream and produces `Vec<Line<'static>>`
+//! suitable for ratatui display.  Tables are rendered with Unicode box-drawing
+//! borders, adaptive column-width allocation (Narrative columns shrink first),
+//! and a pipe-format fallback when the terminal is too narrow.
+//!
+//! The public entry points are [`render_markdown_text`] (unbounded width) and
+//! [`render_markdown_text_with_width`] (bounded width for word-wrapping and
+//! table layout).
+
 use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::push_owned_lines;
 use crate::wrapping::RtOptions;
