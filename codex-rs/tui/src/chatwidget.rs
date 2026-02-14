@@ -6675,6 +6675,11 @@ impl ChatWidget {
         self.plan_stream_controller.is_some()
     }
 
+    /// Whether an agent message stream is active (not a plan stream).
+    pub(crate) fn has_active_agent_stream(&self) -> bool {
+        self.stream_controller.is_some()
+    }
+
     pub(crate) fn composer_is_empty(&self) -> bool {
         self.bottom_pane.composer_is_empty()
     }

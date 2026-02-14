@@ -953,12 +953,15 @@ impl App {
         self.has_emitted_history_lines = false;
         self.deferred_history_lines.clear();
 
-        // Track that a reflow happened during an active stream so
+        // Track that a reflow happened during an active agent stream so
         // ConsolidateAgentMessage can schedule a follow-up reflow with
         // the correct AgentMarkdownCell rendering. Only set the flag
-        // when a stream is actually running to avoid spurious reflows
-        // on the next consolidation if the user resizes while idle.
-        if self.commit_anim_running.load(Ordering::Relaxed) {
+        // for agent streams (not plan streams) because only agent
+        // streams produce ConsolidateAgentMessage, which clears the
+        // flag. Setting it during a plan stream would leave it set
+        // until the next unrelated agent consolidation, causing a
+        // spurious full reflow.
+        if self.chat_widget.has_active_agent_stream() {
             self.reflow_ran_during_stream = true;
         }
 
