@@ -458,6 +458,28 @@ fn rate_limit_error_kind(info: &CodexErrorInfo) -> Option<RateLimitErrorKind> {
     }
 }
 
+fn is_interrupt_droppable_stream_event(msg: &EventMsg) -> bool {
+    match msg {
+        EventMsg::AgentMessage(_)
+        | EventMsg::AgentMessageDelta(_)
+        | EventMsg::PlanDelta(_)
+        | EventMsg::AgentReasoning(_)
+        | EventMsg::AgentReasoningDelta(_)
+        | EventMsg::AgentReasoningRawContent(_)
+        | EventMsg::AgentReasoningRawContentDelta(_)
+        | EventMsg::AgentReasoningSectionBreak(_)
+        | EventMsg::AgentMessageContentDelta(_)
+        | EventMsg::ReasoningContentDelta(_)
+        | EventMsg::ReasoningRawContentDelta(_) => true,
+        EventMsg::ItemCompleted(event) => matches!(
+            &event.item,
+            codex_protocol::items::TurnItem::AgentMessage(_)
+                | codex_protocol::items::TurnItem::Plan(_)
+        ),
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ExternalEditorState {
     #[default]
@@ -535,6 +557,11 @@ pub(crate) struct ChatWidget {
     /// bottom pane is treated as "running" while this is populated, even if no agent turn is
     /// currently executing.
     mcp_startup_status: Option<HashMap<String, McpStartupStatus>>,
+    /// True once an interrupt was requested for the active turn.
+    ///
+    /// While this is set, inbound stream deltas are dropped locally so a large
+    /// queued backlog cannot keep rendering stale content after user interrupt.
+    interrupt_requested_for_turn: bool,
     connectors_cache: ConnectorsCacheState,
     connectors_prefetch_in_flight: bool,
     // Queue of interruptive UI events deferred during an active write cycle
@@ -1288,6 +1315,7 @@ impl ChatWidget {
 
     fn on_task_started(&mut self) {
         self.agent_turn_running = true;
+        self.interrupt_requested_for_turn = false;
         self.saw_plan_update_this_turn = false;
         self.saw_plan_item_this_turn = false;
         self.plan_delta_buffer.clear();
@@ -1345,6 +1373,7 @@ impl ChatWidget {
         // Mark task stopped and request redraw now that all content is in history.
         self.pending_status_indicator_restore = false;
         self.agent_turn_running = false;
+        self.interrupt_requested_for_turn = false;
         self.update_task_running_state();
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
@@ -1584,6 +1613,7 @@ impl ChatWidget {
         self.finalize_active_cell_as_failed();
         // Reset running state and clear streaming buffers.
         self.agent_turn_running = false;
+        self.interrupt_requested_for_turn = false;
         self.update_task_running_state();
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
@@ -2657,6 +2687,7 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
+            interrupt_requested_for_turn: false,
             connectors_cache: ConnectorsCacheState::default(),
             connectors_prefetch_in_flight: false,
             interrupts: InterruptManager::new(),
@@ -2822,6 +2853,7 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
+            interrupt_requested_for_turn: false,
             connectors_cache: ConnectorsCacheState::default(),
             connectors_prefetch_in_flight: false,
             interrupts: InterruptManager::new(),
@@ -2976,6 +3008,7 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
+            interrupt_requested_for_turn: false,
             connectors_cache: ConnectorsCacheState::default(),
             connectors_prefetch_in_flight: false,
             interrupts: InterruptManager::new(),
@@ -4010,6 +4043,14 @@ impl ChatWidget {
     /// `replay_initial_messages()`. Callers should treat `None` as a "fake" id
     /// that must not be used to correlate follow-up actions.
     fn dispatch_event_msg(&mut self, id: Option<String>, msg: EventMsg, from_replay: bool) {
+        if !from_replay
+            && self.interrupt_requested_for_turn
+            && is_interrupt_droppable_stream_event(&msg)
+        {
+            tracing::trace!("dropping stream event while interrupt is pending");
+            return;
+        }
+
         let is_stream_error = matches!(&msg, EventMsg::StreamError(_));
         if !is_stream_error {
             self.restore_retry_status_header_if_present();
@@ -6787,6 +6828,9 @@ impl ChatWidget {
     }
     /// Forward an `Op` directly to codex.
     pub(crate) fn submit_op(&mut self, op: Op) {
+        if matches!(&op, Op::Interrupt) && self.agent_turn_running {
+            self.interrupt_requested_for_turn = true;
+        }
         // Record outbound operation for session replay fidelity.
         crate::session_log::log_outbound_op(&op);
         if matches!(&op, Op::Review { .. }) && !self.bottom_pane.is_task_running() {
