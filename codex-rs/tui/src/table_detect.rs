@@ -53,9 +53,63 @@ pub(crate) fn is_table_delimiter_line(line: &str) -> bool {
         .is_some_and(|segments| segments.into_iter().all(is_table_delimiter_segment))
 }
 
+/// A single line and whether table detection should consider it.
+///
+/// `enabled` lets callers feed full source streams while masking contexts that
+/// should not participate in table detection (for example, non-markdown code
+/// fences). Disabled non-blank lines still break pending-header state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TableScanLine<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) enabled: bool,
+}
+
+/// Stateful table-pattern outcome for a scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TablePatternState {
+    None,
+    PendingHeader,
+    Confirmed,
+}
+
+fn is_header_candidate(line: TableScanLine<'_>) -> bool {
+    line.enabled && is_table_header_line(line.text) && !is_table_delimiter_line(line.text)
+}
+
+/// Scan a line stream for markdown-table structure.
+///
+/// `Confirmed` means a header row is immediately followed by a delimiter row.
+/// `PendingHeader` means the last non-blank line is a possible table header.
+/// `None` means neither condition currently holds.
+pub(crate) fn scan_table_pattern<'a>(
+    lines: impl IntoIterator<Item = TableScanLine<'a>>,
+) -> TablePatternState {
+    let lines = lines.into_iter().collect::<Vec<_>>();
+
+    for pair in lines.windows(2) {
+        let [header, delimiter] = pair else {
+            continue;
+        };
+        if is_header_candidate(*header)
+            && delimiter.enabled
+            && is_table_delimiter_line(delimiter.text)
+        {
+            return TablePatternState::Confirmed;
+        }
+    }
+
+    let last_nonblank = lines.iter().rev().find(|line| !line.text.trim().is_empty());
+    if last_nonblank.is_some_and(|line| is_header_candidate(*line)) {
+        TablePatternState::PendingHeader
+    } else {
+        TablePatternState::None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn parse_table_segments_basic() {
@@ -67,10 +121,7 @@ mod tests {
 
     #[test]
     fn parse_table_segments_no_outer_pipes() {
-        assert_eq!(
-            parse_table_segments("A | B | C"),
-            Some(vec!["A", "B", "C"])
-        );
+        assert_eq!(parse_table_segments("A | B | C"), Some(vec!["A", "B", "C"]));
     }
 
     #[test]
@@ -123,5 +174,69 @@ mod tests {
     #[test]
     fn is_table_header_line_all_empty_segments() {
         assert!(!is_table_header_line("| | |"));
+    }
+
+    #[test]
+    fn scan_table_pattern_returns_confirmed_for_header_delimiter_pair() {
+        let state = scan_table_pattern([
+            TableScanLine {
+                text: "| A | B |",
+                enabled: true,
+            },
+            TableScanLine {
+                text: "| --- | --- |",
+                enabled: true,
+            },
+        ]);
+        assert_eq!(state, TablePatternState::Confirmed);
+    }
+
+    #[test]
+    fn scan_table_pattern_returns_pending_for_trailing_header() {
+        let state = scan_table_pattern([
+            TableScanLine {
+                text: "intro",
+                enabled: true,
+            },
+            TableScanLine {
+                text: "| A | B |",
+                enabled: true,
+            },
+            TableScanLine {
+                text: "",
+                enabled: true,
+            },
+        ]);
+        assert_eq!(state, TablePatternState::PendingHeader);
+    }
+
+    #[test]
+    fn scan_table_pattern_returns_none_for_non_table_lines() {
+        let state = scan_table_pattern([
+            TableScanLine {
+                text: "hello world",
+                enabled: true,
+            },
+            TableScanLine {
+                text: "still prose",
+                enabled: true,
+            },
+        ]);
+        assert_eq!(state, TablePatternState::None);
+    }
+
+    #[test]
+    fn scan_table_pattern_disabled_line_clears_pending_state() {
+        let state = scan_table_pattern([
+            TableScanLine {
+                text: "| A | B |",
+                enabled: true,
+            },
+            TableScanLine {
+                text: "```rust",
+                enabled: false,
+            },
+        ]);
+        assert_eq!(state, TablePatternState::None);
     }
 }

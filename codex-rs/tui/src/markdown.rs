@@ -109,24 +109,17 @@ fn unwrap_markdown_fences(markdown_source: &str) -> String {
     }
 
     fn markdown_fence_contains_table(content: &str) -> bool {
-        use crate::table_detect;
-        let mut saw_candidate = false;
-        let mut saw_delimiter = false;
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if !table_detect::is_table_header_line(trimmed) {
-                continue;
-            }
-            if table_detect::is_table_delimiter_line(trimmed) {
-                saw_delimiter = true;
-            } else {
-                saw_candidate = true;
-            }
-        }
-        saw_candidate && saw_delimiter
+        use crate::table_detect::TablePatternState;
+        use crate::table_detect::TableScanLine;
+        use crate::table_detect::scan_table_pattern;
+
+        matches!(
+            scan_table_pattern(content.lines().map(|line| TableScanLine {
+                text: line,
+                enabled: true,
+            })),
+            TablePatternState::Confirmed
+        )
     }
 
     enum ActiveFence {
@@ -368,5 +361,17 @@ mod tests {
         append_markdown_agent(src, None, &mut out);
         let rendered = lines_to_strings(&out);
         assert_eq!(rendered, vec!["**bold**".to_string()]);
+    }
+
+    #[test]
+    fn append_markdown_agent_keeps_markdown_fence_for_pipe_text_without_table_pattern() {
+        let src = "```markdown\nA | B\n\n--- | ---\n```\n";
+        let mut out = Vec::new();
+        append_markdown_agent(src, None, &mut out);
+        let rendered = lines_to_strings(&out);
+        assert_eq!(
+            rendered,
+            vec!["A | B".to_string(), "".to_string(), "--- | ---".to_string()]
+        );
     }
 }

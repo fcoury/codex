@@ -17,6 +17,10 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::{self};
 use crate::render::line_utils::prefix_lines;
 use crate::style::proposed_plan_style;
+use crate::table_detect::TablePatternState;
+use crate::table_detect::TableScanLine;
+use crate::table_detect::parse_table_segments;
+use crate::table_detect::scan_table_pattern;
 use ratatui::prelude::Stylize;
 use ratatui::text::Line;
 use std::time::Duration;
@@ -145,6 +149,7 @@ impl StreamCore {
         // Recalculate emitted_stable_len for the new width so we don't
         // re-queue lines that were already emitted at the old width.
         if self.emitted_stable_len > 0 {
+            let old_emitted_stable_len = self.emitted_stable_len;
             let emitted_bytes = source_bytes_for_rendered_count(
                 &self.raw_source,
                 old_width,
@@ -156,7 +161,16 @@ impl StreamCore {
                 self.width,
                 &mut emitted_at_new,
             );
-            self.emitted_stable_len = emitted_at_new.len();
+            let new_emitted_stable_len = emitted_at_new.len();
+            tracing::debug!(
+                old_emitted_stable_len,
+                emitted_bytes,
+                new_emitted_stable_len,
+                ?old_width,
+                width = ?self.width,
+                "remapped emitted stable lines after resize",
+            );
+            self.emitted_stable_len = new_emitted_stable_len;
         }
 
         self.recompute_streaming_render();
@@ -231,8 +245,11 @@ impl StreamCore {
         self.enqueued_stable_len = target_stable_len;
     }
 
-    /// How many rendered lines to withhold as mutable tail. When a table is
-    /// detected, the entire buffer is tail; otherwise zero.
+    /// How many rendered lines to withhold as mutable tail.
+    ///
+    /// This is intentionally whole-buffer holdback, not per-table holdback:
+    /// when a table is pending/confirmed we keep *all* rendered lines mutable,
+    /// including mixed-in prose that appears before the table.
     fn active_tail_budget_lines(&self) -> usize {
         match table_holdback_state(&self.raw_source) {
             TableHoldbackState::Confirmed => self.rendered_lines.len(),
@@ -453,20 +470,36 @@ fn source_bytes_for_rendered_count(
     target_count: usize,
 ) -> usize {
     if target_count == 0 {
+        tracing::debug!(
+            target_count,
+            best_offset = 0,
+            rendered_count_at_best = 0,
+            ?width,
+            "source_bytes_for_rendered_count",
+        );
         return 0;
     }
     let mut best_offset = 0;
+    let mut rendered_count_at_best = 0;
     for (i, _) in raw_source.match_indices('\n') {
         let prefix = &raw_source[..=i];
         let mut lines = Vec::new();
         crate::markdown::append_markdown_agent(prefix, width, &mut lines);
         if lines.len() <= target_count {
             best_offset = i + 1;
+            rendered_count_at_best = lines.len();
         }
         if lines.len() >= target_count {
             break;
         }
     }
+    tracing::debug!(
+        target_count,
+        best_offset,
+        rendered_count_at_best,
+        ?width,
+        "source_bytes_for_rendered_count",
+    );
     best_offset
 }
 
@@ -575,10 +608,6 @@ fn table_candidate_text(line: &str) -> Option<&str> {
     parse_table_segments(stripped).map(|_| stripped)
 }
 
-use crate::table_detect::is_table_header_line;
-use crate::table_detect::is_table_delimiter_line;
-use crate::table_detect::parse_table_segments;
-
 /// Whether the accumulated raw source contains a markdown table that requires
 /// holdback of the mutable tail to prevent partial-table commits.
 enum TableHoldbackState {
@@ -597,43 +626,36 @@ enum TableHoldbackState {
 /// to decide the tail budget.
 fn table_holdback_state(source: &str) -> TableHoldbackState {
     let lines = parse_lines_with_fence_state(source);
-    for pair in lines.windows(2) {
-        let [header_line, delimiter_line] = pair else {
-            continue;
-        };
-        if header_line.fence_context == FenceContext::Other
-            || delimiter_line.fence_context == FenceContext::Other
-        {
-            continue;
+    let line_count = lines.len();
+    let state = scan_table_pattern(lines.into_iter().map(|line| TableScanLine {
+        text: if line.fence_context == FenceContext::Other {
+            line.text
+        } else {
+            table_candidate_text(line.text).unwrap_or(line.text)
+        },
+        enabled: line.fence_context != FenceContext::Other,
+    }));
+
+    match state {
+        TablePatternState::Confirmed => {
+            tracing::trace!(line_count, "table_holdback_state=confirmed");
+            TableHoldbackState::Confirmed
         }
-
-        let Some(header_text) = table_candidate_text(header_line.text) else {
-            continue;
-        };
-        let Some(delimiter_text) = table_candidate_text(delimiter_line.text) else {
-            continue;
-        };
-
-        if is_table_header_line(header_text) && is_table_delimiter_line(delimiter_text) {
-            return TableHoldbackState::Confirmed;
+        TablePatternState::PendingHeader => {
+            tracing::trace!(line_count, "table_holdback_state=pending_header");
+            TableHoldbackState::PendingHeader
         }
-    }
-
-    let pending_header = lines.iter().rev().find(|line| !line.text.trim().is_empty());
-    let pending_header = pending_header.is_some_and(|line| {
-        line.fence_context != FenceContext::Other
-            && table_candidate_text(line.text).is_some_and(is_table_header_line)
-    });
-    if pending_header {
-        TableHoldbackState::PendingHeader
-    } else {
-        TableHoldbackState::None
+        TablePatternState::None => {
+            tracing::trace!(line_count, "table_holdback_state=none");
+            TableHoldbackState::None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn lines_to_plain_strings(lines: &[ratatui::text::Line<'_>]) -> Vec<String> {
         lines
@@ -715,7 +737,8 @@ mod tests {
         // terminal shrinks (causing those lines to expand), the queue must not
         // re-enqueue the expanded suffix of already-emitted content.
         let mut ctrl = StreamController::new(Some(120));
-        let line = "This is a long line that definitely wraps when the terminal shrinks to 24 columns.\n";
+        let line =
+            "This is a long line that definitely wraps when the terminal shrinks to 24 columns.\n";
         ctrl.push(line);
         // Drain the queue — this content is now "emitted" (in transcript_cells).
         let (cell, _) = ctrl.on_commit_tick_batch(usize::MAX);
@@ -965,6 +988,38 @@ mod tests {
         let expected = lines_to_plain_strings(&rendered);
 
         assert_eq!(streamed, expected);
+    }
+
+    #[tokio::test]
+    async fn controller_holds_mixed_prose_and_table_until_finalize() {
+        let mut ctrl = StreamController::new(Some(80));
+        ctrl.push("Intro paragraph\n| A | B |\n");
+        let (first, first_idle) = ctrl.on_commit_tick();
+        assert!(first.is_none());
+        assert!(first_idle);
+
+        ctrl.push("| --- | --- |\n");
+        let (second, second_idle) = ctrl.on_commit_tick();
+        assert!(second.is_none());
+        assert!(second_idle);
+
+        let finalized = lines_to_plain_strings(
+            &ctrl
+                .finalize()
+                .0
+                .expect("expected finalized output")
+                .transcript_lines(u16::MAX),
+        );
+        assert!(
+            finalized
+                .iter()
+                .any(|line| line.contains("Intro paragraph")),
+            "expected prose to appear after finalize: {finalized:?}"
+        );
+        assert!(
+            finalized.iter().any(|line| line.contains('┌')),
+            "expected rendered table border after finalize: {finalized:?}"
+        );
     }
 
     #[tokio::test]
@@ -1295,20 +1350,30 @@ mod tests {
         let mut full = Vec::new();
         crate::markdown::append_markdown_agent(src, width, &mut full);
         let total = full.len();
-        assert!(total >= 3, "expected at least 3 rendered lines, got {total}");
+        assert!(
+            total >= 3,
+            "expected at least 3 rendered lines, got {total}"
+        );
 
         // Asking for 0 lines always returns offset 0.
         assert_eq!(source_bytes_for_rendered_count(src, width, 0), 0);
 
         // Asking for the full count returns the entire source.
-        assert_eq!(source_bytes_for_rendered_count(src, width, total), src.len());
+        assert_eq!(
+            source_bytes_for_rendered_count(src, width, total),
+            src.len()
+        );
 
         // Asking for 1 line returns a prefix that renders to at most 1 line.
         let off = source_bytes_for_rendered_count(src, width, 1);
         assert!(off > 0 && off <= src.len());
         let mut partial = Vec::new();
         crate::markdown::append_markdown_agent(&src[..off], width, &mut partial);
-        assert!(partial.len() <= 1, "expected <=1 line, got {}", partial.len());
+        assert!(
+            partial.len() <= 1,
+            "expected <=1 line, got {}",
+            partial.len()
+        );
     }
 
     #[test]
@@ -1320,7 +1385,10 @@ mod tests {
         let mut full = Vec::new();
         crate::markdown::append_markdown_agent(src, width, &mut full);
         let total = full.len();
-        assert!(total > 1, "expected wrapping at width 20, got {total} lines");
+        assert!(
+            total > 1,
+            "expected wrapping at width 20, got {total} lines"
+        );
 
         // Asking for 1 line: since the single source line wraps into
         // multiple rendered lines, the function should stop at the previous
@@ -1339,7 +1407,10 @@ mod tests {
         let mut full = Vec::new();
         crate::markdown::append_markdown_agent(src, width, &mut full);
         let total = full.len();
-        assert!(total >= 3, "expected at least 3 rendered lines, got {total}");
+        assert!(
+            total >= 3,
+            "expected at least 3 rendered lines, got {total}"
+        );
 
         // Prefix covering first two source lines should produce <= 2
         // rendered lines.

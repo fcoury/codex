@@ -542,7 +542,11 @@ pub(crate) struct App {
     /// Cleared in three places:
     /// 1. `ConsolidateAgentMessage` — normal completion (cells consolidated).
     /// 2. `ConsolidateAgentMessage` — no-cells-to-consolidate `else` branch.
-    /// 3. `clear_thread_state()` — thread switch / abort.
+    /// 3. `reset_for_thread_switch()` — thread switch / abort.
+    ///
+    /// Any stream termination path must clear this via
+    /// `clear_reflow_during_stream(...)` directly or by calling
+    /// `reset_for_thread_switch()`.
     reflow_ran_during_stream: bool,
 
     pub(crate) enhanced_keys_supported: bool,
@@ -892,7 +896,7 @@ impl App {
         self.has_emitted_history_lines = false;
         self.last_transcript_render_width = None;
         self.resize_reflow_pending_until = None;
-        self.reflow_ran_during_stream = false;
+        self.clear_reflow_during_stream("reset_for_thread_switch");
         self.backtrack = BacktrackState::default();
         self.backtrack_render_pending = false;
         tui.terminal.clear_scrollback()?;
@@ -937,6 +941,20 @@ impl App {
         self.resize_reflow_pending_until = Some(Instant::now() + RESIZE_REFLOW_DEBOUNCE);
     }
 
+    fn mark_reflow_during_stream(&mut self) {
+        if !self.reflow_ran_during_stream {
+            tracing::debug!("set reflow_ran_during_stream=true");
+        }
+        self.reflow_ran_during_stream = true;
+    }
+
+    fn clear_reflow_during_stream(&mut self, reason: &'static str) {
+        if self.reflow_ran_during_stream {
+            tracing::debug!(reason, "set reflow_ran_during_stream=false");
+        }
+        self.reflow_ran_during_stream = false;
+    }
+
     fn maybe_run_resize_reflow(&mut self, tui: &mut tui::Tui) -> Result<()> {
         let Some(deadline) = self.resize_reflow_pending_until else {
             return Ok(());
@@ -966,7 +984,7 @@ impl App {
         // until the next unrelated agent consolidation, causing a
         // spurious full reflow.
         if self.chat_widget.has_active_agent_stream() {
-            self.reflow_ran_during_stream = true;
+            self.mark_reflow_during_stream();
         }
 
         let width = tui.terminal.size()?.width;
@@ -1692,7 +1710,7 @@ impl App {
                     // This lives here (not in StartCommitAnimation) because
                     // StartCommitAnimation fires on every committed chunk,
                     // and resetting there would drop the flag mid-stream.
-                    self.reflow_ran_during_stream = false;
+                    self.clear_reflow_during_stream("consolidate_agent_message");
                 } else {
                     tracing::debug!(
                         "ConsolidateAgentMessage: no cells to consolidate (start={start}, end={end})"
@@ -1700,7 +1718,7 @@ impl App {
                     // Clear the flag even when there are no cells to
                     // consolidate so it never leaks into unrelated future
                     // streams.
-                    self.reflow_ran_during_stream = false;
+                    self.clear_reflow_during_stream("consolidate_agent_message_no_cells");
                 }
             }
             AppEvent::ApplyThreadRollback { num_turns } => {
@@ -2851,6 +2869,32 @@ mod tests {
             vec![base_cwd.join("rel")]
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn reflow_flag_helpers_mark_and_clear() {
+        let mut app = make_test_app().await;
+        assert_eq!(app.reflow_ran_during_stream, false);
+
+        app.mark_reflow_during_stream();
+        assert_eq!(app.reflow_ran_during_stream, true);
+
+        app.clear_reflow_during_stream("test");
+        assert_eq!(app.reflow_ran_during_stream, false);
+    }
+
+    #[tokio::test]
+    async fn reflow_flag_clear_sites_are_safe_when_flag_is_set() {
+        let mut app = make_test_app().await;
+        for reason in [
+            "consolidate_agent_message",
+            "consolidate_agent_message_no_cells",
+            "reset_for_thread_switch",
+        ] {
+            app.mark_reflow_during_stream();
+            app.clear_reflow_during_stream(reason);
+            assert_eq!(app.reflow_ran_during_stream, false);
+        }
     }
 
     #[tokio::test]
