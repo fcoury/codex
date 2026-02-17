@@ -113,6 +113,8 @@ fn unwrap_markdown_fences(markdown_source: &str) -> String {
         use crate::table_detect::TableScanLine;
         use crate::table_detect::scan_table_pattern;
 
+        // Reuse the shared scanner so fence unwrapping and streaming holdback
+        // agree on what constitutes a table header/delimiter pattern.
         matches!(
             scan_table_pattern(content.lines().map(|line| TableScanLine {
                 text: line,

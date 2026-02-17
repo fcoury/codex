@@ -593,6 +593,10 @@ fn parse_lines_with_fence_state(source: &str) -> Vec<ParsedLine<'_>> {
     lines
 }
 
+/// Normalize a line before table scanning.
+///
+/// Blockquote markers are stripped and only pipe-shaped lines are returned as
+/// candidates so the shared scanner does not treat arbitrary prose as a header.
 fn strip_blockquote_prefix(line: &str) -> &str {
     let mut rest = line.trim_start();
     loop {
@@ -603,6 +607,11 @@ fn strip_blockquote_prefix(line: &str) -> &str {
     }
 }
 
+/// Returns the normalized line text when it has pipe-table shape.
+///
+/// This helper keeps the higher-level holdback scan conservative: non-table
+/// prose still participates in pending-header reset behavior, but only
+/// pipe-shaped lines are considered table header candidates.
 fn table_candidate_text(line: &str) -> Option<&str> {
     let stripped = strip_blockquote_prefix(line).trim();
     parse_table_segments(stripped).map(|_| stripped)
@@ -624,6 +633,11 @@ enum TableHoldbackState {
 /// Scan `source` for pipe-table patterns (header row followed by delimiter row)
 /// outside of non-markdown fenced code blocks. Used by the stream controllers
 /// to decide the tail budget.
+///
+/// This adapts stream-specific context (fence-awareness and blockquote
+/// normalization) into the shared `table_detect::scan_table_pattern` state
+/// machine so markdown fence unwrapping and streaming holdback rely on the same
+/// header/delimiter recognition rules.
 fn table_holdback_state(source: &str) -> TableHoldbackState {
     let lines = parse_lines_with_fence_state(source);
     let line_count = lines.len();

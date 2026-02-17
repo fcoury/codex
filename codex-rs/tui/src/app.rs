@@ -941,6 +941,11 @@ impl App {
         self.resize_reflow_pending_until = Some(Instant::now() + RESIZE_REFLOW_DEBOUNCE);
     }
 
+    /// Marks that at least one width-driven transcript reflow happened while an
+    /// agent stream was still active.
+    ///
+    /// Consolidation uses this flag to schedule one follow-up reflow against the
+    /// final `AgentMarkdownCell` representation.
     fn mark_reflow_during_stream(&mut self) {
         if !self.reflow_ran_during_stream {
             tracing::debug!("set reflow_ran_during_stream=true");
@@ -948,6 +953,11 @@ impl App {
         self.reflow_ran_during_stream = true;
     }
 
+    /// Clears the resize-during-stream marker and logs the transition reason.
+    ///
+    /// Centralizing clears here keeps the lifecycle auditable in logs and
+    /// reduces the chance of adding a new stream-termination path that forgets
+    /// to reset the flag.
     fn clear_reflow_during_stream(&mut self, reason: &'static str) {
         if self.reflow_ran_during_stream {
             tracing::debug!(reason, "set reflow_ran_during_stream=false");

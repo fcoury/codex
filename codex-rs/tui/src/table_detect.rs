@@ -67,8 +67,11 @@ pub(crate) struct TableScanLine<'a> {
 /// Stateful table-pattern outcome for a scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TablePatternState {
+    /// No confirmed table and no trailing header candidate.
     None,
+    /// The last non-blank line is a header candidate waiting for a delimiter.
     PendingHeader,
+    /// A header row was followed immediately by a delimiter row.
     Confirmed,
 }
 
@@ -81,6 +84,10 @@ fn is_header_candidate(line: TableScanLine<'_>) -> bool {
 /// `Confirmed` means a header row is immediately followed by a delimiter row.
 /// `PendingHeader` means the last non-blank line is a possible table header.
 /// `None` means neither condition currently holds.
+///
+/// Disabled lines never contribute to a table match, but they still influence
+/// pending-header state because the scan tracks the last non-blank line in the
+/// full stream.
 pub(crate) fn scan_table_pattern<'a>(
     lines: impl IntoIterator<Item = TableScanLine<'a>>,
 ) -> TablePatternState {
