@@ -434,6 +434,9 @@ where
         if self.in_table_cell() {
             return;
         }
+        // Flush paragraph content now so push_output_line records the correct
+        // current_event_end (the paragraph's range end, not a later event's).
+        self.flush_current_line();
         self.needs_newline = true;
         self.in_paragraph = false;
         self.pending_marker_line = false;
@@ -465,6 +468,9 @@ where
         if self.in_table_cell() {
             return;
         }
+        // Flush heading content now so push_output_line records the correct
+        // current_event_end for source map accuracy.
+        self.flush_current_line();
         self.needs_newline = true;
         self.pop_inline_style();
     }
@@ -1837,5 +1843,24 @@ mod tests {
         let row = vec![make_cell("Status:"), make_cell(""), make_cell("")];
         let next = vec![make_cell("ok"), make_cell(""), make_cell("")];
         assert!(!W::is_spillover_row(&row, Some(&next)));
+    }
+
+    #[test]
+    fn source_map_pre_table_line_has_correct_offset() {
+        let source = "Intro line before table.\n| Key | Value |\n| --- | --- |\n";
+        let rendered = render_markdown_text_with_width_and_source_map(source, Some(80));
+        let text = lines_to_strings(&rendered.text);
+        // The intro line should have its source byte end at 25
+        // (end of "Intro line before table.\n"), not 55 (end of full source).
+        assert_eq!(text[0], "Intro line before table.");
+        assert!(
+            rendered.line_end_input_bytes[0] <= 25,
+            "intro line source byte should be <=25, got {}",
+            rendered.line_end_input_bytes[0],
+        );
+        // Blank line between paragraph and table
+        assert_eq!(text[1], "");
+        // Table lines
+        assert!(text[2].contains('┌'));
     }
 }

@@ -30,7 +30,6 @@
 //!
 //! - `emitted_stable_len <= enqueued_stable_len <= rendered_lines.len()`.
 //! - `rendered_line_end_source_bytes.len() == rendered_lines.len()`.
-//! - `rendered_line_end_source_totals.len() == rendered_lines.len()`.
 //! - `raw_source` is append-only until `reset()`; never modified mid-stream.
 //! - Tail starts exactly at `enqueued_stable_len`.
 //! - During confirmed table streaming, only lines from the table header onward
@@ -50,8 +49,6 @@ use std::time::Instant;
 use crate::table_detect::is_table_delimiter_line;
 use crate::table_detect::is_table_header_line;
 use crate::table_detect::parse_table_segments;
-use std::collections::HashMap;
-
 use super::StreamState;
 
 // ---------------------------------------------------------------------------
@@ -77,28 +74,16 @@ struct StreamCore {
     rendered_lines: Vec<Line<'static>>,
     /// Per-rendered-line source byte offsets (raw source coordinates).
     rendered_line_end_source_bytes: Vec<usize>,
-    /// Per-rendered-line total count of lines sharing that source byte offset.
-    rendered_line_end_source_totals: Vec<usize>,
     /// Lines enqueued into the commit-animation queue.
     enqueued_stable_len: usize,
     /// Lines actually emitted to scrollback.
     emitted_stable_len: usize,
-    /// Raw source boundary reached by emitted stable lines.
-    emitted_stable_source_bytes: usize,
-    /// How many emitted stable lines end exactly at `emitted_stable_source_bytes`.
-    emitted_stable_lines_at_source_byte: usize,
-    /// Total rendered lines ending at `emitted_stable_source_bytes` in current render.
-    emitted_stable_lines_at_source_byte_total: usize,
-    /// Cached rendered line count for prefix-before-table keyed by source start and width.
-    stable_prefix_len_cache: Option<StablePrefixLenCache>,
+    /// Source byte offset of the last emitted rendered line. Used to remap
+    /// `emitted_stable_len` after a terminal resize: on re-render, snap to
+    /// the nearest complete source-line boundary via `partition_point`.
+    emitted_source_boundary: usize,
     /// Incremental holdback scanner state for append-only source updates.
     holdback_scanner: TableHoldbackScanner,
-}
-
-struct StablePrefixLenCache {
-    source_start: usize,
-    width: Option<usize>,
-    stable_prefix_len: usize,
 }
 
 impl StreamCore {
@@ -109,13 +94,9 @@ impl StreamCore {
             raw_source: String::new(),
             rendered_lines: Vec::new(),
             rendered_line_end_source_bytes: Vec::new(),
-            rendered_line_end_source_totals: Vec::new(),
             enqueued_stable_len: 0,
             emitted_stable_len: 0,
-            emitted_stable_source_bytes: 0,
-            emitted_stable_lines_at_source_byte: 0,
-            emitted_stable_lines_at_source_byte_total: 0,
-            stable_prefix_len_cache: None,
+            emitted_source_boundary: 0,
             holdback_scanner: TableHoldbackScanner::new(),
         }
     }
@@ -160,9 +141,8 @@ impl StreamCore {
     /// Step animation: dequeue one line, update the emitted count.
     fn tick(&mut self) -> Vec<Line<'static>> {
         let step = self.state.step();
-        let emitted_start = self.emitted_stable_len;
         self.emitted_stable_len += step.len();
-        self.advance_emitted_source_boundary(emitted_start, self.emitted_stable_len);
+        self.advance_emitted_source_boundary();
         step
     }
 
@@ -175,9 +155,8 @@ impl StreamCore {
         if step.is_empty() {
             return step;
         }
-        let emitted_start = self.emitted_stable_len;
         self.emitted_stable_len += step.len();
-        self.advance_emitted_source_boundary(emitted_start, self.emitted_stable_len);
+        self.advance_emitted_source_boundary();
         step
     }
 
@@ -209,8 +188,8 @@ impl StreamCore {
     /// Update rendering width and rebuild queued stable lines for the new layout.
     ///
     /// Re-renders once at the new width and remaps already-emitted progress by
-    /// source boundary (`emitted_stable_source_bytes`) plus tie-break count for
-    /// wrapped lines that share the same line-end source offset.
+    /// snapping to the nearest complete source-line boundary via
+    /// `emitted_source_boundary` and `partition_point`.
     fn set_width(&mut self, width: Option<usize>) {
         if self.width == width {
             return;
@@ -222,8 +201,9 @@ impl StreamCore {
         }
 
         self.recompute_streaming_render();
-        self.emitted_stable_len = self.remap_emitted_len_from_source_boundary();
-        self.sync_emitted_source_counters_from_render();
+        self.emitted_stable_len = self
+            .remap_emitted_len_from_source_boundary()
+            .min(self.rendered_lines.len());
         self.rebuild_stable_queue_from_render();
     }
 
@@ -233,13 +213,9 @@ impl StreamCore {
         self.raw_source.clear();
         self.rendered_lines.clear();
         self.rendered_line_end_source_bytes.clear();
-        self.rendered_line_end_source_totals.clear();
         self.enqueued_stable_len = 0;
         self.emitted_stable_len = 0;
-        self.emitted_stable_source_bytes = 0;
-        self.emitted_stable_lines_at_source_byte = 0;
-        self.emitted_stable_lines_at_source_byte_total = 0;
-        self.stable_prefix_len_cache = None;
+        self.emitted_source_boundary = 0;
         self.holdback_scanner.reset();
     }
 
@@ -248,21 +224,8 @@ impl StreamCore {
         let rendered = render_markdown_agent_with_source_map(&self.raw_source, self.width);
         self.rendered_lines = rendered.lines;
         self.rendered_line_end_source_bytes = rendered.line_end_source_bytes;
-        let mut source_totals: HashMap<usize, usize> = HashMap::new();
-        for source_end in &self.rendered_line_end_source_bytes {
-            *source_totals.entry(*source_end).or_insert(0) += 1;
-        }
-        self.rendered_line_end_source_totals = self
-            .rendered_line_end_source_bytes
-            .iter()
-            .map(|source_end| source_totals.get(source_end).copied().unwrap_or(1))
-            .collect();
         debug_assert_eq!(
             self.rendered_line_end_source_bytes.len(),
-            self.rendered_lines.len()
-        );
-        debug_assert_eq!(
-            self.rendered_line_end_source_totals.len(),
             self.rendered_lines.len()
         );
     }
@@ -325,7 +288,7 @@ impl StreamCore {
     /// header line onward is kept mutable so earlier prose can continue
     /// streaming. When no table is detected, everything flows directly to
     /// stable. This is the core decision point for the holdback mechanism.
-    fn active_tail_budget_lines(&mut self) -> usize {
+    fn active_tail_budget_lines(&self) -> usize {
         let scan_start = Instant::now();
         let holdback_state = self.holdback_scanner.state();
         let tail_budget = match holdback_state {
@@ -346,134 +309,52 @@ impl StreamCore {
         tail_budget
     }
 
-    fn tail_budget_from_source_start(&mut self, source_start: usize) -> usize {
+    /// Compute tail budget from source byte offset using binary search.
+    ///
+    /// `rendered_line_end_source_bytes` is non-decreasing, so `partition_point`
+    /// finds how many rendered lines have source byte offsets strictly less than
+    /// `source_start` — that's the stable prefix length. Everything from there
+    /// onward is the mutable tail budget.
+    fn tail_budget_from_source_start(&self, source_start: usize) -> usize {
         if source_start == 0 {
             return self.rendered_lines.len();
         }
         let source_start = source_start.min(self.raw_source.len());
-        let stable_prefix_len = self.stable_prefix_len_for_source_start(source_start);
+        let stable_prefix_len = self
+            .rendered_line_end_source_bytes
+            .partition_point(|&b| b <= source_start);
         self.rendered_lines.len().saturating_sub(stable_prefix_len)
     }
 
-    fn stable_prefix_len_for_source_start(&mut self, source_start: usize) -> usize {
-        if let Some(cache) = &self.stable_prefix_len_cache
-            && cache.source_start == source_start
-            && cache.width == self.width
-        {
-            tracing::trace!(
-                source_start,
-                width = ?self.width,
-                stable_prefix_len = cache.stable_prefix_len,
-                "table holdback stable-prefix cache hit",
-            );
-            return cache.stable_prefix_len;
-        }
-
-        let render_start = Instant::now();
-        let mut stable_prefix_render = Vec::new();
-        append_markdown_agent(
-            &self.raw_source[..source_start.min(self.raw_source.len())],
-            self.width,
-            &mut stable_prefix_render,
-        );
-        let stable_prefix_len = stable_prefix_render.len();
-        tracing::trace!(
-            source_start,
-            width = ?self.width,
-            stable_prefix_len,
-            elapsed_us = render_start.elapsed().as_micros(),
-            "table holdback stable-prefix render",
-        );
-        self.stable_prefix_len_cache = Some(StablePrefixLenCache {
-            source_start,
-            width: self.width,
-            stable_prefix_len,
-        });
-        stable_prefix_len
-    }
-
-    fn advance_emitted_source_boundary(&mut self, emitted_start: usize, emitted_end: usize) {
-        if emitted_start >= emitted_end || self.rendered_line_end_source_bytes.is_empty() {
+    /// Update `emitted_source_boundary` to the source byte offset of the last
+    /// emitted rendered line. Called after `emitted_stable_len` is incremented.
+    fn advance_emitted_source_boundary(&mut self) {
+        if self.emitted_stable_len == 0 || self.rendered_line_end_source_bytes.is_empty() {
             return;
         }
-
-        let end = emitted_end.min(self.rendered_line_end_source_bytes.len());
-        for (offset, line_end_source) in self.rendered_line_end_source_bytes[emitted_start..end]
-            .iter()
-            .enumerate()
-        {
-            let line_index = emitted_start + offset;
-            if *line_end_source > self.emitted_stable_source_bytes {
-                self.emitted_stable_source_bytes = *line_end_source;
-                self.emitted_stable_lines_at_source_byte = 1;
-                self.emitted_stable_lines_at_source_byte_total = self
-                    .rendered_line_end_source_totals
-                    .get(line_index)
-                    .copied()
-                    .unwrap_or(1);
-            } else if *line_end_source == self.emitted_stable_source_bytes {
-                self.emitted_stable_lines_at_source_byte += 1;
-            }
-        }
+        let idx = (self.emitted_stable_len - 1)
+            .min(self.rendered_line_end_source_bytes.len() - 1);
+        self.emitted_source_boundary = self.rendered_line_end_source_bytes[idx];
     }
 
+    /// Remap `emitted_stable_len` to the new render after a resize.
+    ///
+    /// Uses `emitted_source_boundary` (the source byte offset of the last
+    /// emitted rendered line before resize) and `partition_point` to snap to
+    /// the nearest complete source-line boundary in the new render. This may
+    /// shift ±1 source line between stable/tail during resize, which is
+    /// imperceptible since resize already triggers a full-transcript reflow.
     fn remap_emitted_len_from_source_boundary(&self) -> usize {
-        if self.emitted_stable_len == 0 {
+        if self.emitted_stable_len == 0 || self.emitted_source_boundary == 0 {
             return 0;
         }
-        if self.emitted_stable_source_bytes >= self.raw_source.len() {
+        if self.emitted_source_boundary >= self.raw_source.len() {
             return self.rendered_lines.len();
         }
-
-        let mut lines_before = 0usize;
-        let mut lines_at = 0usize;
-        for line_end_source in &self.rendered_line_end_source_bytes {
-            if *line_end_source < self.emitted_stable_source_bytes {
-                lines_before += 1;
-            } else if *line_end_source == self.emitted_stable_source_bytes {
-                lines_at += 1;
-            }
-        }
-        let emitted_at_boundary = if self.emitted_stable_lines_at_source_byte
-            >= self.emitted_stable_lines_at_source_byte_total
-        {
-            lines_at
-        } else if lines_at >= self.emitted_stable_lines_at_source_byte {
-            self.emitted_stable_lines_at_source_byte
-        } else {
-            0
-        };
-        lines_before
-            + emitted_at_boundary.min(self.rendered_lines.len().saturating_sub(lines_before))
+        self.rendered_line_end_source_bytes
+            .partition_point(|&b| b <= self.emitted_source_boundary)
     }
 
-    fn sync_emitted_source_counters_from_render(&mut self) {
-        let emitted_len = self
-            .emitted_stable_len
-            .min(self.rendered_line_end_source_bytes.len());
-        if emitted_len == 0 {
-            self.emitted_stable_source_bytes = 0;
-            self.emitted_stable_lines_at_source_byte = 0;
-            self.emitted_stable_lines_at_source_byte_total = 0;
-            return;
-        }
-
-        let boundary = self.rendered_line_end_source_bytes[emitted_len - 1];
-        let emitted_at_boundary = self.rendered_line_end_source_bytes[..emitted_len]
-            .iter()
-            .rev()
-            .take_while(|line_end| **line_end == boundary)
-            .count();
-        let total_at_boundary = self
-            .rendered_line_end_source_totals
-            .get(emitted_len - 1)
-            .copied()
-            .unwrap_or(1);
-
-        self.emitted_stable_source_bytes = boundary;
-        self.emitted_stable_lines_at_source_byte = emitted_at_boundary;
-        self.emitted_stable_lines_at_source_byte_total = total_at_boundary;
-    }
 }
 
 /// Controller for streaming agent message content with table-aware holdback.
@@ -1224,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn remap_emitted_len_preserves_source_boundary_tie_breaks() {
+    fn remap_emitted_len_snaps_to_source_boundary() {
         let mut core = StreamCore::new(Some(80));
         core.raw_source = "line\nline\nline\n".to_string();
         core.rendered_lines = vec![
@@ -1234,24 +1115,35 @@ mod tests {
             Line::from("row-3"),
             Line::from("row-4"),
         ];
+        // Simulate: rows 0-1 share source byte 5, row 2 at 9, rows 3-4 share 14.
         core.rendered_line_end_source_bytes = vec![5, 5, 9, 14, 14];
-        core.rendered_line_end_source_totals = vec![2, 2, 1, 2, 2];
-        core.emitted_stable_len = 3;
-        core.emitted_stable_source_bytes = 5;
-        core.emitted_stable_lines_at_source_byte_total = 2;
 
-        core.emitted_stable_lines_at_source_byte = 1;
-        assert_eq!(
-            core.remap_emitted_len_from_source_boundary(),
-            1,
-            "expected one emitted line at source boundary when one was previously emitted",
-        );
-
-        core.emitted_stable_lines_at_source_byte = 2;
+        // emitted_source_boundary=5 → partition_point(|&b| b <= 5) finds 2
+        // (rows 0 and 1 both have byte 5, which is <=5).
+        core.emitted_stable_len = 2;
+        core.emitted_source_boundary = 5;
         assert_eq!(
             core.remap_emitted_len_from_source_boundary(),
             2,
-            "expected all lines at source boundary when boundary was fully emitted",
+            "should snap to all lines at source boundary 5",
+        );
+
+        // emitted_source_boundary=9 → partition_point finds 3 (rows 0,1,2).
+        core.emitted_stable_len = 3;
+        core.emitted_source_boundary = 9;
+        assert_eq!(
+            core.remap_emitted_len_from_source_boundary(),
+            3,
+            "should include through source boundary 9",
+        );
+
+        // emitted_source_boundary at end of source → return all lines.
+        core.emitted_stable_len = 5;
+        core.emitted_source_boundary = 14;
+        assert_eq!(
+            core.remap_emitted_len_from_source_boundary(),
+            core.rendered_lines.len(),
+            "boundary at source end should return all rendered lines",
         );
     }
 
@@ -1951,5 +1843,41 @@ mod tests {
             remaining.iter().any(|line| line.contains("tail line")),
             "un-emitted content should remain after resize remap: {remaining:?}",
         );
+    }
+
+    #[test]
+    fn emitted_stable_len_clamped_after_dramatic_shrink() {
+        // Push many lines at wide width, emit several, then shrink dramatically.
+        // The clamp ensures emitted_stable_len <= rendered_lines.len().
+        let mut ctrl = StreamController::new(Some(120));
+        for i in 0..10 {
+            ctrl.push(&format!("Line {i} has some content that fits at wide width.\n"));
+        }
+
+        // Emit several lines via ticks.
+        for _ in 0..5 {
+            let (cell, _idle) = ctrl.on_commit_tick();
+            assert!(cell.is_some());
+        }
+
+        // Dramatically shrink — fewer columns means wrapping creates more rendered
+        // lines, but some edge cases could produce fewer lines if content collapses.
+        ctrl.set_width(Some(10));
+
+        // Core invariant: emitted_stable_len must not exceed rendered_lines.len().
+        assert!(
+            ctrl.core.emitted_stable_len <= ctrl.core.rendered_lines.len(),
+            "emitted_stable_len ({}) must not exceed rendered_lines.len() ({})",
+            ctrl.core.emitted_stable_len,
+            ctrl.core.rendered_lines.len(),
+        );
+
+        // Finalize should succeed without panic and return remaining content.
+        let (cell, source) = ctrl.finalize();
+        assert!(source.is_some(), "expected source from finalize");
+        // The finalized cell should contain any un-emitted content.
+        if ctrl.core.emitted_stable_len < ctrl.core.rendered_lines.len() {
+            assert!(cell.is_some(), "expected remaining content in finalize");
+        }
     }
 }
