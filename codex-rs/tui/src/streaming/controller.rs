@@ -434,6 +434,9 @@ impl StreamCore {
                 lines_at += 1;
             }
         }
+        // Tie-break wrapped lines ending at the same source byte:
+        // if we previously emitted every wrapped line at the boundary (>= total), keep emitting
+        // all of them after reflow; otherwise preserve the prior partial-count progress.
         let emitted_at_boundary = if self.emitted_stable_lines_at_source_byte
             >= self.emitted_stable_lines_at_source_byte_total
         {

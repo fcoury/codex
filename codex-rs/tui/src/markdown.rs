@@ -129,6 +129,7 @@ impl NormalizedMarkdown {
     }
 
     fn raw_source_offset(&self, normalized_offset: usize) -> usize {
+        debug_assert!(normalized_offset <= self.text.len());
         if normalized_offset == 0 {
             return 0;
         }

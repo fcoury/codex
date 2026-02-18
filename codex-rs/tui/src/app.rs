@@ -1069,6 +1069,9 @@ impl App {
         }
 
         let width = tui.terminal.size()?.width;
+        // Reflow is rebuilt from a snapshot of transcript cells. App events are processed on the
+        // same loop between draws, so any InsertHistoryCell that arrives after this clone is
+        // intentionally excluded from this pass and rendered by its normal insert path.
         for cell in self.transcript_cells.clone() {
             self.insert_history_cell_lines(tui, cell.as_ref(), width);
         }

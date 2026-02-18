@@ -973,6 +973,9 @@ where
         }
 
         let mut total_width: usize = widths.iter().sum();
+        const SHRINK_ITERATION_WARN_THRESHOLD: usize = 1_000;
+        let mut shrink_iterations = 0usize;
+        let mut warned_pathological_shrink = false;
 
         while total_width > max_width {
             let Some(idx) = Self::next_column_to_shrink(&widths, &floors, &metrics) else {
@@ -980,6 +983,17 @@ where
             };
             widths[idx] -= 1;
             total_width -= 1;
+            shrink_iterations += 1;
+            if !warned_pathological_shrink && shrink_iterations >= SHRINK_ITERATION_WARN_THRESHOLD {
+                warned_pathological_shrink = true;
+                tracing::warn!(
+                    shrink_iterations,
+                    total_width,
+                    max_width,
+                    columns = widths.len(),
+                    "table width shrink loop exceeded expected iteration budget"
+                );
+            }
         }
 
         if total_width > max_width {

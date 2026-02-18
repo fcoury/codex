@@ -95,8 +95,9 @@ where
     let scroll_bottom = area.top().saturating_sub(1);
     let mut advance_row = cursor_top;
     for line in wrapped {
-        // Explicitly anchor before each line advance to avoid terminal wrap-pending drift when
-        // prior content reached the right edge.
+        // Explicitly anchor before each line advance to avoid terminal wrap-pending drift.
+        // This is intentionally unconditional because some terminals can drift even when the
+        // previous line did not visibly hit the right edge.
         queue!(writer, MoveTo(0, advance_row), Print("\n"))?;
         if advance_row < scroll_bottom {
             advance_row += 1;

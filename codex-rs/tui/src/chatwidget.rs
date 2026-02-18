@@ -470,6 +470,8 @@ fn is_interrupt_droppable_stream_event(msg: &EventMsg) -> bool {
         | EventMsg::AgentMessageContentDelta(_)
         | EventMsg::ReasoningContentDelta(_)
         | EventMsg::ReasoningRawContentDelta(_) => true,
+        // During interrupt we still process non-message ItemCompleted events (for example tool
+        // completions) so command/resource side effects can close out cleanly.
         EventMsg::ItemCompleted(event) => matches!(
             &event.item,
             codex_protocol::items::TurnItem::AgentMessage(_)
