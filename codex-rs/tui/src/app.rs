@@ -231,6 +231,7 @@ fn emit_project_config_warnings(app_event_tx: &AppEventSender, config: &Config) 
     )));
 }
 
+#[cfg(test)]
 fn trailing_agent_message_run_start(transcript_cells: &[Arc<dyn HistoryCell>]) -> usize {
     let end = transcript_cells.len();
     let mut start = end;
@@ -254,6 +255,18 @@ fn trailing_agent_message_run_start(transcript_cells: &[Arc<dyn HistoryCell>]) -
     }
 
     start
+}
+
+/// Whether a resize reflow has occurred during an active agent stream.
+///
+/// When a reflow runs while streaming, `ConsolidateAgentMessage` must
+/// schedule a re-reflow to pick up the new `AgentMarkdownCell` rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReflowState {
+    /// No reflow has run during the current stream (or no stream is active).
+    Idle,
+    /// A resize reflow ran while an agent stream was active.
+    PendingDuringStream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -564,15 +577,24 @@ pub(crate) struct App {
     has_emitted_history_lines: bool,
     last_transcript_render_width: Option<u16>,
     resize_reflow_pending_until: Option<Instant>,
-    /// Set to `true` when a resize reflow runs during an active agent stream (`SetWidth` handler),
-    /// so that `ConsolidateAgentMessage` can schedule a re-reflow to pick up the
-    /// `AgentMarkdownCell` rendering.
+    /// Tracks whether a resize reflow has run during the current agent stream.
     ///
-    /// Cleared in three places:
+    /// Transitions to `PendingDuringStream` in the `SetWidth` handler.
+    /// Returns to `Idle` in three places:
     /// 1. `ConsolidateAgentMessage` - normal completion (cells consolidated).
     /// 2. `ConsolidateAgentMessage` - no-cells-to-consolidate `else` branch.
-    /// 3. `clear_thread_state()` - thread switch / abort.
-    reflow_ran_during_stream: bool,
+    /// 3. `reset_for_thread_switch()` - thread switch / abort.
+    reflow_state: ReflowState,
+
+    /// Index into `transcript_cells` where the current contiguous run of
+    /// streaming `AgentMessageCell`s begins.  Avoids an O(N) backward walk on
+    /// every commit-tick and consolidate.
+    ///
+    /// - **Set**: In `InsertHistoryCell` when the inserted cell is an
+    ///   `AgentMessageCell` and no run is active yet.
+    /// - **Cleared**: On `ConsolidateAgentMessage` (after splice), on thread
+    ///   switch, and when a non-agent-message cell is inserted.
+    current_agent_run_start: Option<usize>,
 
     pub(crate) enhanced_keys_supported: bool,
 
@@ -941,7 +963,8 @@ impl App {
         self.has_emitted_history_lines = false;
         self.last_transcript_render_width = None;
         self.resize_reflow_pending_until = None;
-        self.reflow_ran_during_stream = false;
+        self.reflow_state = ReflowState::Idle;
+        self.current_agent_run_start = None;
         self.backtrack = BacktrackState::default();
         self.backtrack_render_pending = false;
         tui.terminal.clear_scrollback()?;
@@ -1065,7 +1088,7 @@ impl App {
         // unconsolidated AgentMessageCells are still pending consolidation so
         // ConsolidateAgentMessage can schedule a follow-up reflow.
         if self.should_mark_reflow_as_stream_time() {
-            self.reflow_ran_during_stream = true;
+            self.reflow_state = ReflowState::PendingDuringStream;
         }
 
         let width = tui.terminal.size()?.width;
@@ -1077,9 +1100,7 @@ impl App {
     }
 
     fn should_mark_reflow_as_stream_time(&self) -> bool {
-        self.chat_widget.has_active_agent_stream()
-            || trailing_agent_message_run_start(&self.transcript_cells)
-                < self.transcript_cells.len()
+        self.chat_widget.has_active_agent_stream() || self.current_agent_run_start.is_some()
     }
 
     fn reset_thread_event_state(&mut self) {
@@ -1379,7 +1400,8 @@ impl App {
             has_emitted_history_lines: false,
             last_transcript_render_width: None,
             resize_reflow_pending_until: None,
-            reflow_ran_during_stream: false,
+            reflow_state: ReflowState::Idle,
+            current_agent_run_start: None,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
             backtrack: BacktrackState::default(),
@@ -1777,6 +1799,16 @@ impl App {
                     t.insert_cell(cell.clone());
                     tui.frame_requester().schedule_frame();
                 }
+
+                // Track the start of the current contiguous AgentMessageCell run.
+                if cell.as_any().is::<history_cell::AgentMessageCell>() {
+                    if self.current_agent_run_start.is_none() {
+                        self.current_agent_run_start = Some(self.transcript_cells.len());
+                    }
+                } else {
+                    self.current_agent_run_start = None;
+                }
+
                 self.transcript_cells.push(cell.clone());
                 self.insert_history_cell_lines(
                     tui,
@@ -1785,14 +1817,16 @@ impl App {
                 );
             }
             AppEvent::ConsolidateAgentMessage(source) => {
-                // Walk backward to find the contiguous run of streaming AgentMessageCells that
-                // belong to the just-finalized stream
+                // Use the tracked run start instead of walking backward.
                 let end = self.transcript_cells.len();
+                let start = self
+                    .current_agent_run_start
+                    .unwrap_or(end);
                 tracing::debug!(
-                    "ConsolidateAgentMessage: transcript_cells.len()={end}, source_len={}",
+                    "ConsolidateAgentMessage: transcript_cells.len()={end}, source_len={}, start={start}",
                     source.len()
                 );
-                let start = trailing_agent_message_run_start(&self.transcript_cells);
+                self.current_agent_run_start = None;
                 if start < end {
                     tracing::debug!(
                         "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
@@ -1811,18 +1845,18 @@ impl App {
                     // If a resize reflow ran while these cells were still unconsolidated
                     // AgentMessageCells, the scrollback has stale table rendering. Schedule a
                     // re-reflow.
-                    if self.reflow_ran_during_stream {
+                    if self.reflow_state == ReflowState::PendingDuringStream {
                         self.schedule_resize_reflow();
                         tui.frame_requester()
                             .schedule_frame_in(RESIZE_REFLOW_DEBOUNCE);
                     }
 
-                    self.reflow_ran_during_stream = false;
+                    self.reflow_state = ReflowState::Idle;
                 } else {
                     tracing::debug!(
                         "ConsolidateAgentMessage: no cells to consolidate(start={start}, end={end})",
                     );
-                    self.reflow_ran_during_stream = false;
+                    self.reflow_state = ReflowState::Idle;
                 }
             }
             AppEvent::ApplyThreadRollback { num_turns } => {
@@ -3380,6 +3414,8 @@ mod tests {
     #[tokio::test]
     async fn resize_reflow_repro_marks_stream_time_before_consolidation() {
         let mut app = make_test_app().await;
+        // Simulate what InsertHistoryCell does: set the run start, then push.
+        app.current_agent_run_start = Some(app.transcript_cells.len());
         app.transcript_cells.push(Arc::new(AgentMessageCell::new(
             vec![Line::from("| Key | Value |")],
             false,
@@ -3430,7 +3466,8 @@ mod tests {
             has_emitted_history_lines: false,
             last_transcript_render_width: None,
             resize_reflow_pending_until: None,
-            reflow_ran_during_stream: false,
+            reflow_state: ReflowState::Idle,
+            current_agent_run_start: None,
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
@@ -3491,7 +3528,8 @@ mod tests {
                 has_emitted_history_lines: false,
                 last_transcript_render_width: None,
                 resize_reflow_pending_until: None,
-                reflow_ran_during_stream: false,
+                reflow_state: ReflowState::Idle,
+                current_agent_run_start: None,
                 enhanced_keys_supported: false,
                 commit_anim_running: Arc::new(AtomicBool::new(false)),
                 status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),

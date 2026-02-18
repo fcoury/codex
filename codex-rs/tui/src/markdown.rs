@@ -139,6 +139,16 @@ impl NormalizedMarkdown {
             .segments
             .partition_point(|segment| segment.normalized_start < normalized_offset);
         if idx == 0 {
+            // This can only happen if `segments` is empty (no source ranges were
+            // pushed) or `normalized_offset` is before the first segment's start.
+            // Both conditions imply offset 0 is the only safe answer.
+            debug_assert!(
+                self.segments.is_empty()
+                    || normalized_offset <= self.segments[0].normalized_start,
+                "partition_point returned 0 for normalized_offset={normalized_offset} \
+                 with first segment at {}",
+                self.segments.first().map_or(0, |s| s.normalized_start),
+            );
             return 0;
         }
         let segment = &self.segments[idx - 1];
@@ -171,23 +181,10 @@ fn unwrap_markdown_fences_with_mapping(markdown_source: &str) -> NormalizedMarkd
             return None;
         }
         let trimmed = &without_newline[leading_ws..];
-        let marker = *trimmed.as_bytes().first()?;
-        if marker != b'`' && marker != b'~' {
-            return None;
-        }
-        let len = trimmed
-            .as_bytes()
-            .iter()
-            .take_while(|byte| **byte == marker)
-            .count();
-        if len < 3 {
-            return None;
-        }
-        let rest = trimmed[len..].trim();
-        let info = rest.split_whitespace().next().unwrap_or_default();
-        let is_markdown = info.eq_ignore_ascii_case("md") || info.eq_ignore_ascii_case("markdown");
+        let (marker_char, len) = table_detect::parse_fence_marker(trimmed)?;
+        let is_markdown = table_detect::is_markdown_fence_info(trimmed, len);
         Some(Fence {
-            marker,
+            marker: marker_char as u8,
             len,
             is_markdown,
         })
@@ -204,18 +201,13 @@ fn unwrap_markdown_fences_with_mapping(markdown_source: &str) -> NormalizedMarkd
             return false;
         }
         let trimmed = &without_newline[leading_ws..];
-        if !trimmed.as_bytes().starts_with(&[fence.marker]) {
-            return false;
+        if let Some((marker_char, len)) = table_detect::parse_fence_marker(trimmed) {
+            marker_char as u8 == fence.marker
+                && len >= fence.len
+                && trimmed[len..].trim().is_empty()
+        } else {
+            false
         }
-        let len = trimmed
-            .as_bytes()
-            .iter()
-            .take_while(|byte| **byte == fence.marker)
-            .count();
-        if len < fence.len {
-            return false;
-        }
-        trimmed[len..].trim().is_empty()
     }
 
     fn markdown_fence_contains_table(content: &str) -> bool {

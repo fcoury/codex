@@ -15,8 +15,9 @@
 //! every column's width and reshape all prior rows.  The holdback mechanism
 //! (`table_holdback_state`) detects pipe-table patterns (header + delimiter
 //! pair) in the accumulated source and keeps content from the table header
-//! onward as mutable tail until the stream finalizes.  Lines in `Outside` and `Markdown`
-//! fence contexts are scanned; lines inside non-markdown fences are skipped.
+//! onward as mutable tail until the stream finalizes.  Lines in `FenceKind::Outside`
+//! and `FenceKind::Markdown` contexts are scanned; lines inside non-markdown fences
+//! are skipped.
 //!
 //! ## Resize handling
 //!
@@ -49,6 +50,9 @@ use std::time::Instant;
 use crate::table_detect::is_table_delimiter_line;
 use crate::table_detect::is_table_header_line;
 use crate::table_detect::parse_table_segments;
+use crate::table_detect::strip_blockquote_prefix;
+use crate::table_detect::FenceKind;
+use crate::table_detect::FenceTracker;
 use super::StreamState;
 
 // ---------------------------------------------------------------------------
@@ -546,136 +550,39 @@ impl PlanStreamController {
 // Table holdback infrastructure
 // ---------------------------------------------------------------------------
 
-/// Return fence marker character and run length for a potential fence line.
-///
-/// Recognises backtick and tilde fences with a minimum run of 3.
-/// Used by `parse_lines_with_fence_state` to track fence open/close transitions.
-fn parse_fence_marker(line: &str) -> Option<(char, usize)> {
-    let mut chars = line.chars();
-    let first = chars.next()?;
-    if first != '`' && first != '~' {
-        return None;
-    }
-    let mut len = 1usize;
-    for ch in chars {
-        if ch == first {
-            len += 1;
-        } else {
-            break;
-        }
-    }
-    if len < 3 {
-        return None;
-    }
-    Some((first, len))
-}
-
 /// A source line annotated with whether it falls inside a fenced code block.
 #[cfg(test)]
 struct ParsedLine<'a> {
     text: &'a str,
-    fence_context: FenceContext,
+    fence_context: FenceKind,
     source_start: usize,
-}
-
-/// Where a source line sits relative to fenced code blocks.
-///
-/// Table holdback only applies to lines that are `Outside` or inside a
-/// `Markdown` fence. Lines inside `Other` fences (e.g. `sh`, `rust`) are
-/// ignored by the table scanner because their pipe characters are code, not
-/// table syntax.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FenceContext {
-    /// Not inside any fenced code block.
-    Outside,
-    /// Inside a `` ```md `` or `` ```markdown `` fence.
-    Markdown,
-    /// Inside a fence with a non-markdown info string.
-    Other,
-}
-
-fn is_markdown_fence(trimmed_line: &str, marker_len: usize) -> bool {
-    let info = trimmed_line[marker_len..]
-        .split_whitespace()
-        .next()
-        .unwrap_or_default();
-    info.eq_ignore_ascii_case("md") || info.eq_ignore_ascii_case("markdown")
 }
 
 /// Parse source into lines tagged with fenced-code context for table scanning.
 ///
-/// Fence close markers must use the same marker character and at least the
-/// opening marker length, with no trailing content. This avoids accidentally
-/// closing on shorter markers that appear inside longer fences.
+/// Uses [`FenceTracker`] from `table_detect` for fence state transitions.
 #[cfg(test)]
 fn parse_lines_with_fence_state(source: &str) -> Vec<ParsedLine<'_>> {
-    let mut in_fence = false;
-    let mut fence_char = '\0';
-    let mut fence_len = 0usize;
-    let mut fence_context = FenceContext::Other;
+    let mut tracker = FenceTracker::new();
     let mut lines = Vec::new();
     let mut source_start = 0usize;
 
     for raw_line in source.split('\n') {
+        // Record the line's context BEFORE advancing (the line's content
+        // belongs to the context that was active when it was encountered).
         lines.push(ParsedLine {
             text: raw_line,
-            fence_context: if in_fence {
-                fence_context
-            } else {
-                FenceContext::Outside
-            },
+            fence_context: tracker.kind(),
             source_start,
         });
 
-        let leading_spaces = raw_line
-            .as_bytes()
-            .iter()
-            .take_while(|byte| **byte == b' ')
-            .count();
-        if leading_spaces > 3 {
-            continue;
-        }
-        let trimmed = &raw_line[leading_spaces..];
-        let fence_scan_text = strip_blockquote_prefix(trimmed);
-        if let Some((marker, len)) = parse_fence_marker(fence_scan_text) {
-            if !in_fence {
-                in_fence = true;
-                fence_char = marker;
-                fence_len = len;
-                fence_context = if is_markdown_fence(fence_scan_text, len) {
-                    FenceContext::Markdown
-                } else {
-                    FenceContext::Other
-                };
-            } else if marker == fence_char
-                && len >= fence_len
-                && fence_scan_text[len..].trim().is_empty()
-            {
-                in_fence = false;
-                fence_len = 0;
-                fence_context = FenceContext::Other;
-            }
-        }
+        tracker.advance(raw_line);
         source_start = source_start
             .saturating_add(raw_line.len())
             .saturating_add(1);
     }
 
     lines
-}
-
-/// Peel all leading `>` blockquote markers from a line.
-///
-/// Tables can appear inside blockquotes (`> | A | B |`), so the holdback
-/// scanner must strip these markers before checking for table syntax.
-fn strip_blockquote_prefix(line: &str) -> &str {
-    let mut rest = line.trim_start();
-    loop {
-        let Some(stripped) = rest.strip_prefix('>') else {
-            return rest;
-        };
-        rest = stripped.strip_prefix(' ').unwrap_or(stripped).trim_start();
-    }
 }
 
 /// Strip blockquote prefixes and return the trimmed text if it contains
@@ -706,35 +613,20 @@ enum TableHoldbackState {
 #[derive(Clone, Copy)]
 struct PreviousLineState {
     source_start: usize,
-    fence_context: FenceContext,
+    fence_kind: FenceKind,
     is_header: bool,
-}
-
-#[derive(Clone, Copy)]
-struct FenceScanState {
-    in_fence: bool,
-    fence_char: char,
-    fence_len: usize,
-    fence_context: FenceContext,
-}
-
-impl FenceScanState {
-    fn new() -> Self {
-        Self {
-            in_fence: false,
-            fence_char: '\0',
-            fence_len: 0,
-            fence_context: FenceContext::Other,
-        }
-    }
 }
 
 /// Incremental scanner for table holdback state on append-only source streams.
 struct TableHoldbackScanner {
     source_offset: usize,
-    fence_state: FenceScanState,
+    fence_tracker: FenceTracker,
     previous_line: Option<PreviousLineState>,
     pending_header_start: Option<usize>,
+    /// Source byte offset of the first confirmed table's header row.
+    /// Once set, never cleared until `reset()` (stream finalization).
+    /// This is intentional: holdback is monotonic for a single stream because
+    /// subsequent tables can reshape rendering of earlier content.
     confirmed_table_start: Option<usize>,
 }
 
@@ -742,7 +634,7 @@ impl TableHoldbackScanner {
     fn new() -> Self {
         Self {
             source_offset: 0,
-            fence_state: FenceScanState::new(),
+            fence_tracker: FenceTracker::new(),
             previous_line: None,
             pending_header_start: None,
             confirmed_table_start: None,
@@ -786,13 +678,9 @@ impl TableHoldbackScanner {
     fn push_line(&mut self, source_line: &str) {
         let line = source_line.strip_suffix('\n').unwrap_or(source_line);
         let source_start = self.source_offset;
-        let fence_context = if self.fence_state.in_fence {
-            self.fence_state.fence_context
-        } else {
-            FenceContext::Outside
-        };
+        let fence_kind = self.fence_tracker.kind();
 
-        let candidate_text = if fence_context == FenceContext::Other {
+        let candidate_text = if fence_kind == FenceKind::Other {
             None
         } else {
             table_candidate_text(line)
@@ -802,8 +690,8 @@ impl TableHoldbackScanner {
 
         if self.confirmed_table_start.is_none()
             && let Some(previous_line) = self.previous_line
-            && previous_line.fence_context != FenceContext::Other
-            && fence_context != FenceContext::Other
+            && previous_line.fence_kind != FenceKind::Other
+            && fence_kind != FenceKind::Other
             && previous_line.is_header
             && is_delimiter
         {
@@ -812,7 +700,7 @@ impl TableHoldbackScanner {
         }
 
         if self.confirmed_table_start.is_none() && !line.trim().is_empty() {
-            if fence_context != FenceContext::Other && is_header {
+            if fence_kind != FenceKind::Other && is_header {
                 self.pending_header_start = Some(source_start);
             } else {
                 self.pending_header_start = None;
@@ -821,46 +709,12 @@ impl TableHoldbackScanner {
 
         self.previous_line = Some(PreviousLineState {
             source_start,
-            fence_context,
+            fence_kind,
             is_header,
         });
 
-        self.advance_fence_state(line);
+        self.fence_tracker.advance(line);
         self.source_offset = self.source_offset.saturating_add(source_line.len());
-    }
-
-    fn advance_fence_state(&mut self, raw_line: &str) {
-        let leading_spaces = raw_line
-            .as_bytes()
-            .iter()
-            .take_while(|byte| **byte == b' ')
-            .count();
-        if leading_spaces > 3 {
-            return;
-        }
-
-        let trimmed = &raw_line[leading_spaces..];
-        let fence_scan_text = strip_blockquote_prefix(trimmed);
-        if let Some((marker, len)) = parse_fence_marker(fence_scan_text) {
-            if !self.fence_state.in_fence {
-                self.fence_state.in_fence = true;
-                self.fence_state.fence_char = marker;
-                self.fence_state.fence_len = len;
-                self.fence_state.fence_context = if is_markdown_fence(fence_scan_text, len) {
-                    FenceContext::Markdown
-                } else {
-                    FenceContext::Other
-                };
-            } else if marker == self.fence_state.fence_char
-                && len >= self.fence_state.fence_len
-                && fence_scan_text[len..].trim().is_empty()
-            {
-                self.fence_state.in_fence = false;
-                self.fence_state.fence_char = '\0';
-                self.fence_state.fence_len = 0;
-                self.fence_state.fence_context = FenceContext::Other;
-            }
-        }
     }
 }
 
@@ -868,7 +722,7 @@ impl TableHoldbackScanner {
 /// blocks.
 ///
 /// Walks consecutive line pairs looking for a header + delimiter match. Lines
-/// inside `FenceContext::Other` fences are skipped. The scan also peels
+/// inside `FenceKind::Other` fences are skipped. The scan also peels
 /// blockquote prefixes (`>`) before checking for table syntax, so tables nested
 /// inside blockquotes are detected.
 ///
@@ -882,8 +736,8 @@ fn table_holdback_state(source: &str) -> TableHoldbackState {
         let [header_line, delimiter_line] = pair else {
             continue;
         };
-        if header_line.fence_context == FenceContext::Other
-            || delimiter_line.fence_context == FenceContext::Other
+        if header_line.fence_context == FenceKind::Other
+            || delimiter_line.fence_context == FenceKind::Other
         {
             continue;
         }
@@ -904,7 +758,7 @@ fn table_holdback_state(source: &str) -> TableHoldbackState {
 
     let pending_header = lines.iter().rev().find(|line| !line.text.trim().is_empty());
     if let Some(line) = pending_header
-        && line.fence_context != FenceContext::Other
+        && line.fence_context != FenceKind::Other
         && table_candidate_text(line.text).is_some_and(is_table_header_line)
     {
         return TableHoldbackState::PendingHeader {
@@ -1843,6 +1697,112 @@ mod tests {
             remaining.iter().any(|line| line.contains("tail line")),
             "un-emitted content should remain after resize remap: {remaining:?}",
         );
+    }
+
+    #[test]
+    fn partition_point_tail_budget_matches_prefix_render() {
+        // Verify partition_point approach produces consistent tail budget
+        // for several (source, table_start) pairs.
+        let cases: Vec<(&str, usize)> = vec![
+            // Paragraph before table.
+            (
+                "Hello world.\n\n| A | B |\n|---|---|\n| 1 | 2 |\n",
+                14,
+            ),
+            // Heading before table.
+            (
+                "## Title\n\n| X | Y |\n|---|---|\n| a | b |\n",
+                10,
+            ),
+            // Table at start.
+            ("| A | B |\n|---|---|\n| 1 | 2 |\n", 0),
+        ];
+        for (source, table_start) in cases {
+            let rendered =
+                crate::markdown::render_markdown_agent_with_source_map(source, Some(80));
+            let stable_prefix_len = rendered
+                .line_end_source_bytes
+                .partition_point(|&b| b <= table_start);
+            let tail_budget = rendered.lines.len().saturating_sub(stable_prefix_len);
+            // The tail budget must be non-zero when a table exists and positive
+            // for any source_start > 0.
+            if table_start == 0 {
+                assert_eq!(
+                    tail_budget,
+                    rendered.lines.len(),
+                    "table at start should hold back all lines for source: {source:?}",
+                );
+            } else {
+                assert!(
+                    tail_budget > 0,
+                    "expected non-zero tail budget for source: {source:?}",
+                );
+                assert!(
+                    stable_prefix_len > 0,
+                    "expected non-zero stable prefix for source with pre-table content: {source:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remap_after_resize_snaps_to_source_boundary() {
+        // Push content, emit some (not all) lines, then resize.
+        // Verify emitted_stable_len stays consistent after the remap.
+        let mut ctrl = StreamController::new(Some(40));
+        ctrl.push("Alpha bravo charlie delta echo foxtrot golf hotel.\n");
+        ctrl.push("India juliet kilo lima mike november oscar papa.\n");
+
+        // Emit only 1 line (partial drain).
+        let (_cell, _idle) = ctrl.on_commit_tick();
+        let emitted_before = ctrl.core.emitted_stable_len;
+        assert!(emitted_before > 0);
+
+        // Resize to wider → fewer wrapped lines.
+        ctrl.set_width(Some(120));
+        assert!(
+            ctrl.core.emitted_stable_len <= ctrl.core.rendered_lines.len(),
+            "emitted_stable_len must not exceed rendered_lines after resize",
+        );
+
+        // Resize to narrower → more wrapped lines.
+        ctrl.set_width(Some(15));
+        assert!(
+            ctrl.core.emitted_stable_len <= ctrl.core.rendered_lines.len(),
+            "emitted_stable_len must not exceed rendered_lines after narrow resize",
+        );
+
+        // Finalize should produce remaining content without panic.
+        let (cell, source) = ctrl.finalize();
+        assert!(source.is_some());
+        // After partial emit + narrow resize, there should be remaining content.
+        assert!(cell.is_some(), "expected remaining lines after resize");
+    }
+
+    #[test]
+    fn resize_during_wrapped_paragraph_does_not_lose_lines() {
+        // Push two source lines, emit one wrapped line from the first.
+        // Resize and verify the second source line is still available.
+        let mut ctrl = StreamController::new(Some(20));
+        ctrl.push("First source line with some words.\n");
+        ctrl.push("Second source line that should remain.\n");
+
+        // Emit one wrapped line from the first source line.
+        let (first, _) = ctrl.on_commit_tick();
+        assert!(first.is_some());
+
+        // Resize to wider width.
+        ctrl.set_width(Some(80));
+
+        // Invariant: emitted_stable_len <= rendered_lines.len().
+        assert!(
+            ctrl.core.emitted_stable_len <= ctrl.core.rendered_lines.len(),
+            "emitted_stable_len must not exceed rendered_lines",
+        );
+
+        // Finalize: at minimum the source should be captured.
+        let (_cell, source) = ctrl.finalize();
+        assert!(source.is_some(), "expected source from finalize");
     }
 
     #[test]

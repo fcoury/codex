@@ -978,18 +978,68 @@ where
             }
         }
 
-        let mut total_width: usize = widths.iter().sum();
-
-        while total_width > max_width {
-            let Some(idx) = Self::next_column_to_shrink(&widths, &floors, &metrics) else {
-                break;
-            };
-            widths[idx] -= 1;
-            total_width -= 1;
-        }
+        let total_width: usize = widths.iter().sum();
 
         if total_width > max_width {
-            return None;
+            let mut remaining_excess = total_width - max_width;
+
+            // Distribute excess proportionally, Narrative columns first.
+            // This matches the one-at-a-time priority but in O(cols) passes
+            // instead of O(excess) iterations.
+            for target_kind in [TableColumnKind::Narrative, TableColumnKind::Structured] {
+                if remaining_excess == 0 {
+                    break;
+                }
+
+                let kind_slack: usize = widths
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| metrics[*idx].kind == target_kind)
+                    .map(|(idx, w)| w.saturating_sub(floors[idx]))
+                    .sum();
+
+                if kind_slack == 0 {
+                    continue;
+                }
+
+                let absorb = remaining_excess.min(kind_slack);
+                let mut budget = absorb;
+                let mut slack_pool = kind_slack;
+
+                for (idx, w) in widths.iter_mut().enumerate() {
+                    if budget == 0 || slack_pool == 0 {
+                        break;
+                    }
+                    if metrics[idx].kind != target_kind {
+                        continue;
+                    }
+                    let slack = w.saturating_sub(floors[idx]);
+                    if slack == 0 {
+                        continue;
+                    }
+                    // Each column absorbs a share proportional to its slack.
+                    let share = (slack * budget / slack_pool).max(1).min(slack).min(budget);
+                    *w -= share;
+                    budget -= share;
+                    slack_pool -= slack;
+                }
+                remaining_excess -= absorb - budget;
+            }
+
+            // Remainder pass: any leftover 1 char at a time via existing heuristic
+            // (handles rounding edge cases and respects header_guard/density_guard).
+            let mut current_total: usize = widths.iter().sum();
+            while current_total > max_width {
+                let Some(idx) = Self::next_column_to_shrink(&widths, &floors, &metrics) else {
+                    break;
+                };
+                widths[idx] -= 1;
+                current_total -= 1;
+            }
+
+            if current_total > max_width {
+                return None;
+            }
         }
 
         Some(widths)

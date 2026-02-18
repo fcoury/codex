@@ -557,11 +557,16 @@ pub(crate) struct ChatWidget {
     /// bottom pane is treated as "running" while this is populated, even if no agent turn is
     /// currently executing.
     mcp_startup_status: Option<HashMap<String, McpStartupStatus>>,
-    /// True once an interrupt was requested for the active turn.
+    /// Monotonic counter incremented on each new agent turn.
+    current_turn_id: u64,
+    /// Set to `Some(current_turn_id)` when the user interrupts the active turn.
     ///
-    /// While this is set, inbound stream deltas are dropped locally so a large
-    /// queued backlog cannot keep rendering stale content after user interrupt.
-    interrupt_requested_for_turn: bool,
+    /// While `interrupted_turn_id == Some(current_turn_id)`, inbound stream
+    /// deltas are dropped locally so a large queued backlog cannot keep
+    /// rendering stale content after user interrupt.  The turn counter ensures
+    /// an interrupt for turn N does not accidentally suppress events for turn
+    /// N+1.
+    interrupted_turn_id: Option<u64>,
     connectors_cache: ConnectorsCacheState,
     connectors_prefetch_in_flight: bool,
     // Queue of interruptive UI events deferred during an active write cycle
@@ -1328,7 +1333,8 @@ impl ChatWidget {
     fn on_task_started(&mut self) {
         self.agent_turn_running = true;
         self.turn_sleep_inhibitor.set_turn_running(true);
-        self.interrupt_requested_for_turn = false;
+        self.current_turn_id = self.current_turn_id.wrapping_add(1);
+        self.interrupted_turn_id = None;
         self.saw_plan_update_this_turn = false;
         self.saw_plan_item_this_turn = false;
         self.plan_delta_buffer.clear();
@@ -1387,7 +1393,7 @@ impl ChatWidget {
         self.pending_status_indicator_restore = false;
         self.agent_turn_running = false;
         self.turn_sleep_inhibitor.set_turn_running(false);
-        self.interrupt_requested_for_turn = false;
+        self.interrupted_turn_id = None;
         self.update_task_running_state();
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
@@ -1628,7 +1634,7 @@ impl ChatWidget {
         // Reset running state and clear streaming buffers.
         self.agent_turn_running = false;
         self.turn_sleep_inhibitor.set_turn_running(false);
-        self.interrupt_requested_for_turn = false;
+        self.interrupted_turn_id = None;
         self.update_task_running_state();
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
@@ -2720,7 +2726,8 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
-            interrupt_requested_for_turn: false,
+            current_turn_id: 0,
+            interrupted_turn_id: None,
             connectors_cache: ConnectorsCacheState::default(),
             connectors_prefetch_in_flight: false,
             interrupts: InterruptManager::new(),
@@ -2888,7 +2895,8 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
-            interrupt_requested_for_turn: false,
+            current_turn_id: 0,
+            interrupted_turn_id: None,
             connectors_cache: ConnectorsCacheState::default(),
             connectors_prefetch_in_flight: false,
             interrupts: InterruptManager::new(),
@@ -3045,7 +3053,8 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
-            interrupt_requested_for_turn: false,
+            current_turn_id: 0,
+            interrupted_turn_id: None,
             connectors_cache: ConnectorsCacheState::default(),
             connectors_prefetch_in_flight: false,
             interrupts: InterruptManager::new(),
@@ -4110,7 +4119,7 @@ impl ChatWidget {
     /// that must not be used to correlate follow-up actions.
     fn dispatch_event_msg(&mut self, id: Option<String>, msg: EventMsg, from_replay: bool) {
         if !from_replay
-            && self.interrupt_requested_for_turn
+            && self.interrupted_turn_id == Some(self.current_turn_id)
             && is_interrupt_droppable_stream_event(&msg)
         {
             tracing::trace!("dropping stream event while interrupt is pending");
@@ -6935,7 +6944,7 @@ impl ChatWidget {
     /// Forward an `Op` directly to codex.
     pub(crate) fn submit_op(&mut self, op: Op) {
         if matches!(&op, Op::Interrupt) && self.agent_turn_running {
-            self.interrupt_requested_for_turn = true;
+            self.interrupted_turn_id = Some(self.current_turn_id);
         }
         // Record outbound operation for session replay fidelity.
         crate::session_log::log_outbound_op(&op);

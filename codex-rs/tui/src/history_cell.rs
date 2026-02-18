@@ -525,6 +525,22 @@ impl StreamingAgentTailCell {
 
 impl HistoryCell for StreamingAgentTailCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        // Unlike `AgentMarkdownCell` (which re-renders from markdown source via
+        // `append_markdown_agent` at the target width), this cell receives
+        // pre-rendered `Line`s from the streaming controller.  We use
+        // `word_wrap_lines` to re-wrap them with the bullet prefix because the
+        // lines were rendered at the stream's current width and may need
+        // re-wrapping when the terminal is narrower.
+        //
+        // Guard against impossibly narrow widths, matching AgentMarkdownCell.
+        let Some(_wrap_width) = crate::width::usable_content_width_u16(width, 2) else {
+            let prefix = if self.is_first_line {
+                "• ".dim()
+            } else {
+                "  ".into()
+            };
+            return vec![Line::from(prefix)];
+        };
         word_wrap_lines(
             &self.lines,
             RtOptions::new(width as usize)
@@ -4036,5 +4052,16 @@ mod tests {
             transcript_cells[1].as_any().is::<AgentMarkdownCell>(),
             "second cell should be AgentMarkdownCell"
         );
+    }
+
+    #[test]
+    fn streaming_tail_cell_narrow_width_does_not_panic() {
+        let cell = StreamingAgentTailCell::new(vec![Line::raw("hello")], true);
+        // Width 0 and width 2 (just enough for prefix, no content) should
+        // return a fallback line without panicking.
+        let lines_0 = cell.display_lines(0);
+        assert!(!lines_0.is_empty());
+        let lines_2 = cell.display_lines(2);
+        assert!(!lines_2.is_empty());
     }
 }
