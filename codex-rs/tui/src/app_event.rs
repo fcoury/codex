@@ -36,13 +36,8 @@ pub(crate) enum WindowsSandboxEnableMode {
     Legacy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) enum WindowsSandboxFallbackReason {
-    ElevationFailed,
-}
-
 #[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct ConnectorsSnapshot {
     pub(crate) connectors: Vec<AppInfo>,
 }
@@ -128,6 +123,16 @@ pub(crate) enum AppEvent {
 
     InsertHistoryCell(Box<dyn HistoryCell>),
 
+    /// Replace the contiguous run of streaming `AgentMessageCell`s at the end of
+    /// the transcript with a single `AgentMarkdownCell` that stores the raw
+    /// markdown source.
+    ///
+    /// Emitted by `ChatWidget::flush_answer_stream_with_separator` after stream
+    /// finalization. The `App` handler walks backward through `transcript_cells`
+    /// to find the `AgentMessageCell` run and splices in the consolidated cell.
+    /// If `reflow_ran_during_stream` is set, a follow-up reflow is scheduled.
+    ConsolidateAgentMessage(String),
+
     /// Apply rollback semantics to local transcript cells.
     ///
     /// This is emitted when rollback was not initiated by the current
@@ -205,7 +210,6 @@ pub(crate) enum AppEvent {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     OpenWindowsSandboxFallbackPrompt {
         preset: ApprovalPreset,
-        reason: WindowsSandboxFallbackReason,
     },
 
     /// Begin the elevated Windows sandbox setup flow.
@@ -377,5 +381,6 @@ pub(crate) enum FeedbackCategory {
     BadResult,
     GoodResult,
     Bug,
+    SafetyCheck,
     Other,
 }
