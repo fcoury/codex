@@ -7,7 +7,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_channel::unbounded;
+pub use codex_app_server_protocol::AppBranding;
 pub use codex_app_server_protocol::AppInfo;
+pub use codex_app_server_protocol::AppMetadata;
 use codex_protocol::protocol::SandboxPolicy;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -50,6 +52,19 @@ pub async fn list_accessible_connectors_from_mcp_tools(
     config: &Config,
 ) -> anyhow::Result<Vec<AppInfo>> {
     list_accessible_connectors_from_mcp_tools_with_options(config, false).await
+}
+
+pub async fn list_cached_accessible_connectors_from_mcp_tools(
+    config: &Config,
+) -> Option<Vec<AppInfo>> {
+    if !config.features.enabled(Feature::Apps) {
+        return Some(Vec::new());
+    }
+
+    let auth_manager = auth_manager_from_config(config);
+    let auth = auth_manager.auth().await;
+    let cache_key = accessible_connectors_cache_key(config, auth.as_ref());
+    read_cached_accessible_connectors(&cache_key)
 }
 
 pub async fn list_accessible_connectors_from_mcp_tools_with_options(
@@ -307,6 +322,9 @@ where
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
             install_url: Some(connector_install_url(&connector_name, &connector_id)),
             is_accessible: true,
             is_enabled: true,

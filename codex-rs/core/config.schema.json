@@ -6,8 +6,28 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
-    "AgentsToml": {
+    "AgentRoleToml": {
       "additionalProperties": false,
+      "properties": {
+        "config_file": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            }
+          ],
+          "description": "Path to a role-specific config layer."
+        },
+        "description": {
+          "description": "Human-facing role documentation used in spawn tool guidance.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "AgentsToml": {
+      "additionalProperties": {
+        "$ref": "#/definitions/AgentRoleToml"
+      },
       "properties": {
         "max_threads": {
           "description": "Maximum number of agent threads that can be open concurrently. When unset, no limit is enforced.",
@@ -188,7 +208,13 @@
             "apps": {
               "type": "boolean"
             },
+            "apps_mcp_gateway": {
+              "type": "boolean"
+            },
             "child_agents_md": {
+              "type": "boolean"
+            },
+            "codex_git_commit": {
               "type": "boolean"
             },
             "collab": {
@@ -230,10 +256,16 @@
             "memory_tool": {
               "type": "boolean"
             },
+            "multi_agent": {
+              "type": "boolean"
+            },
             "personality": {
               "type": "boolean"
             },
             "powershell_utf8": {
+              "type": "boolean"
+            },
+            "prevent_idle_sleep": {
               "type": "boolean"
             },
             "remote_models": {
@@ -430,6 +462,43 @@
           "type": "string"
         }
       ]
+    },
+    "MemoriesToml": {
+      "additionalProperties": false,
+      "description": "Memories settings loaded from config.toml.",
+      "properties": {
+        "max_raw_memories_for_global": {
+          "description": "Maximum number of recent raw memories retained for global consolidation.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_rollout_age_days": {
+          "description": "Maximum age of the threads used for memories.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "max_rollouts_per_startup": {
+          "description": "Maximum number of rollout candidates processed per pass.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "min_rollout_idle_hours": {
+          "description": "Minimum idle time between last thread activity and memory creation (hours). > 12h recommended.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "phase_1_model": {
+          "description": "Model used for thread summarisation.",
+          "type": "string"
+        },
+        "phase_2_model": {
+          "description": "Model used for memory consolidation.",
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "ModeKind": {
       "description": "Initial collaboration mode to use when the TUI starts.",
@@ -1242,6 +1311,10 @@
       "default": null,
       "description": "Preferred backend for storing CLI auth credentials. file (default): Use a file in the Codex home directory. keyring: Use an OS-specific keyring service. auto: Use the keyring if available, otherwise use a file."
     },
+    "commit_attribution": {
+      "description": "Optional commit attribution text for commit message co-author trailers.\n\nSet to an empty string to disable automatic commit attribution.",
+      "type": "string"
+    },
     "compact_prompt": {
       "description": "Compact prompt used for history compaction.",
       "type": "string"
@@ -1275,7 +1348,13 @@
         "apps": {
           "type": "boolean"
         },
+        "apps_mcp_gateway": {
+          "type": "boolean"
+        },
         "child_agents_md": {
+          "type": "boolean"
+        },
+        "codex_git_commit": {
           "type": "boolean"
         },
         "collab": {
@@ -1317,10 +1396,16 @@
         "memory_tool": {
           "type": "boolean"
         },
+        "multi_agent": {
+          "type": "boolean"
+        },
         "personality": {
           "type": "boolean"
         },
         "powershell_utf8": {
+          "type": "boolean"
+        },
+        "prevent_idle_sleep": {
           "type": "boolean"
         },
         "remote_models": {
@@ -1474,6 +1559,14 @@
       "default": {},
       "description": "Definition for MCP servers that Codex can reach out to for tool calls.",
       "type": "object"
+    },
+    "memories": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/MemoriesToml"
+        }
+      ],
+      "description": "Memories subsystem settings."
     },
     "model": {
       "description": "Optional override of model selection.",

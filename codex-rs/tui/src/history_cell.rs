@@ -49,6 +49,7 @@ use codex_protocol::account::PlanType;
 use codex_protocol::mcp::Resource;
 use codex_protocol::mcp::ResourceTemplate;
 use codex_protocol::models::WebSearchAction;
+use codex_protocol::models::local_image_label_text;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
@@ -65,6 +66,7 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Styled;
 use ratatui::style::Stylize;
+use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::any::Any;
@@ -143,6 +145,9 @@ impl Renderable for Box<dyn HistoryCell> {
             let overflow = lines.len().saturating_sub(usize::from(area.height));
             u16::try_from(overflow).unwrap_or(u16::MAX)
         };
+        // Active-cell content can reflow dramatically during resize/stream updates. Clear the
+        // entire draw area first so stale glyphs from previous frames never linger.
+        Clear.render(area, buf);
         Paragraph::new(Text::from(lines))
             .scroll((y, 0))
             .render(area, buf);
@@ -168,6 +173,7 @@ pub(crate) struct UserHistoryCell {
     pub text_elements: Vec<TextElement>,
     #[allow(dead_code)]
     pub local_image_paths: Vec<PathBuf>,
+    pub remote_image_urls: Vec<String>,
 }
 
 /// Build logical lines for a user message with styled text elements.
@@ -236,10 +242,22 @@ fn build_user_message_lines_with_elements(
     raw_lines
 }
 
+fn remote_image_display_line(style: Style, index: usize) -> Line<'static> {
+    Line::from(local_image_label_text(index)).style(style)
+}
+
+fn trim_trailing_blank_lines(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    while lines
+        .last()
+        .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
+    {
+        lines.pop();
+    }
+    lines
+}
+
 impl HistoryCell for UserHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
         let wrap_width = width
             .saturating_sub(
                 LIVE_PREFIX_COLS + 1, /* keep a one-column right margin for wrapping */
@@ -249,13 +267,35 @@ impl HistoryCell for UserHistoryCell {
         let style = user_message_style();
         let element_style = style.fg(Color::Cyan);
 
-        let wrapped = if self.text_elements.is_empty() {
-            word_wrap_lines(
-                self.message.split('\n').map(|l| Line::from(l).style(style)),
+        let wrapped_remote_images = if self.remote_image_urls.is_empty() {
+            None
+        } else {
+            Some(word_wrap_lines(
+                self.remote_image_urls
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, _url)| {
+                        remote_image_display_line(element_style, idx.saturating_add(1))
+                    }),
+                RtOptions::new(usize::from(wrap_width))
+                    .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
+            ))
+        };
+
+        let wrapped_message = if self.message.is_empty() && self.text_elements.is_empty() {
+            None
+        } else if self.text_elements.is_empty() {
+            let message_without_trailing_newlines = self.message.trim_end_matches(['\r', '\n']);
+            let wrapped = word_wrap_lines(
+                message_without_trailing_newlines
+                    .split('\n')
+                    .map(|line| Line::from(line).style(style)),
                 // Wrap algorithm matches textarea.rs.
                 RtOptions::new(usize::from(wrap_width))
                     .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
-            )
+            );
+            let wrapped = trim_trailing_blank_lines(wrapped);
+            (!wrapped.is_empty()).then_some(wrapped)
         } else {
             let raw_lines = build_user_message_lines_with_elements(
                 &self.message,
@@ -263,17 +303,56 @@ impl HistoryCell for UserHistoryCell {
                 style,
                 element_style,
             );
-            word_wrap_lines(
+            let wrapped = word_wrap_lines(
                 raw_lines,
                 RtOptions::new(usize::from(wrap_width))
                     .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
-            )
+            );
+            let wrapped = trim_trailing_blank_lines(wrapped);
+            (!wrapped.is_empty()).then_some(wrapped)
         };
 
-        lines.push(Line::from("").style(style));
-        lines.extend(prefix_lines(wrapped, "› ".bold().dim(), "  ".into()));
+        if wrapped_remote_images.is_none() && wrapped_message.is_none() {
+            return Vec::new();
+        }
+
+        let mut lines: Vec<Line<'static>> = vec![Line::from("").style(style)];
+
+        if let Some(wrapped_remote_images) = wrapped_remote_images {
+            lines.extend(prefix_lines(
+                wrapped_remote_images,
+                "  ".into(),
+                "  ".into(),
+            ));
+            if wrapped_message.is_some() {
+                lines.push(Line::from("").style(style));
+            }
+        }
+
+        if let Some(wrapped_message) = wrapped_message {
+            lines.extend(prefix_lines(
+                wrapped_message,
+                "› ".bold().dim(),
+                "  ".into(),
+            ));
+        }
+
         lines.push(Line::from("").style(style));
         lines
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.display_lines(width)
+            .len()
+            .try_into()
+            .unwrap_or(u16::MAX)
+    }
+
+    fn desired_transcript_height(&self, width: u16) -> u16 {
+        self.display_lines(width)
+            .len()
+            .try_into()
+            .unwrap_or(u16::MAX)
     }
 }
 
@@ -297,7 +376,7 @@ impl ReasoningSummaryCell {
         let mut lines: Vec<Line<'static>> = Vec::new();
         append_markdown(
             &self.content,
-            Some((width as usize).saturating_sub(2)),
+            crate::width::usable_content_width_u16(width, 2),
             &mut lines,
         );
         let summary_style = Style::default().dim().italic();
@@ -364,6 +443,87 @@ impl AgentMessageCell {
 }
 
 impl HistoryCell for AgentMessageCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        word_wrap_lines(
+            &self.lines,
+            RtOptions::new(width as usize)
+                .initial_indent(if self.is_first_line {
+                    "• ".dim().into()
+                } else {
+                    "  ".into()
+                })
+                .subsequent_indent("  ".into()),
+        )
+    }
+
+    fn is_stream_continuation(&self) -> bool {
+        !self.is_first_line
+    }
+}
+
+/// A consolidated agent message cell that stores raw markdown source and
+/// re-renders from it at any width.
+///
+/// After a stream finalizes, the `ConsolidateAgentMessage` handler in `App`
+/// replaces the contiguous run of `AgentMessageCell`s with a single
+/// `AgentMarkdownCell`. On terminal resize, `display_lines(width)` re-renders
+/// from source via `append_markdown_agent`, producing correctly-sized tables
+/// with box-drawing borders.
+///
+/// Uses `prefix_lines` (not `word_wrap_lines`) so table rows with box-drawing
+/// characters pass through without re-wrapping.
+#[derive(Debug)]
+pub(crate) struct AgentMarkdownCell {
+    markdown_source: String,
+}
+
+impl AgentMarkdownCell {
+    pub(crate) fn new(markdown_source: String) -> Self {
+        Self { markdown_source }
+    }
+}
+
+impl HistoryCell for AgentMarkdownCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let Some(wrap_width) = crate::width::usable_content_width_u16(width, 2) else {
+            return prefix_lines(vec![Line::default()], "• ".dim(), "  ".into());
+        };
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        // Re-render markdown from source at the current width. Reserve 2 columns for the "• " /
+        // " " prefix prepended below.
+        crate::markdown::append_markdown_agent(&self.markdown_source, Some(wrap_width), &mut lines);
+        // Use prefix_lines (not word_wrap_lines) so table rows with box-drawing characters are not
+        // broken by word-wrapping. The markdown renderer already output to wrap_width.
+        prefix_lines(lines, "• ".dim(), "  ".into())
+    }
+}
+
+/// Transient active-cell representation of the mutable tail of an agent stream.
+///
+/// During streaming, lines that have not yet been committed to scrollback (because they belong to
+/// an in-progress table or are the last incomplete line) are displayed via this cell in the
+/// `active_cell` slot.  It is replaced on every delta and cleared when the stream finalizes.
+///
+/// Unlike `AgentMessageCell`, this cell is never committed to the transcript. It exists only as a
+/// live preview of content that will eventually be emitted as stable `AgentMessageCell`s or
+/// consolidated into an `AgentMarkdownCell`.
+#[derive(Debug)]
+pub(crate) struct StreamingAgentTailCell {
+    lines: Vec<Line<'static>>,
+    is_first_line: bool,
+}
+
+impl StreamingAgentTailCell {
+    pub(crate) fn new(lines: Vec<Line<'static>>, is_first_line: bool) -> Self {
+        Self {
+            lines,
+            is_first_line,
+        }
+    }
+}
+
+impl HistoryCell for StreamingAgentTailCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         word_wrap_lines(
             &self.lines,
@@ -1018,11 +1178,13 @@ pub(crate) fn new_user_prompt(
     message: String,
     text_elements: Vec<TextElement>,
     local_image_paths: Vec<PathBuf>,
+    remote_image_urls: Vec<String>,
 ) -> UserHistoryCell {
     UserHistoryCell {
         message,
         text_elements,
         local_image_paths,
+        remote_image_urls,
     }
 }
 
@@ -2307,6 +2469,8 @@ mod tests {
     use codex_protocol::parse_command::ParsedCommand;
     use dirs::home_dir;
     use pretty_assertions::assert_eq;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -3359,6 +3523,7 @@ mod tests {
             message: msg.to_string(),
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
+            remote_image_urls: Vec::new(),
         };
 
         // Small width to force wrapping more clearly. Effective wrap width is width-2 due to the ▌ prefix and trailing space.
@@ -3367,6 +3532,120 @@ mod tests {
         let rendered = render_lines(&lines).join("\n");
 
         insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn user_history_cell_renders_remote_image_urls() {
+        let cell = UserHistoryCell {
+            message: "describe these".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: vec!["https://example.com/example.png".to_string()],
+        };
+
+        let rendered = render_lines(&cell.display_lines(80)).join("\n");
+
+        assert!(rendered.contains("[Image #1]"));
+        assert!(rendered.contains("describe these"));
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn user_history_cell_summarizes_inline_data_urls() {
+        let cell = UserHistoryCell {
+            message: "describe inline image".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: vec!["data:image/png;base64,aGVsbG8=".to_string()],
+        };
+
+        let rendered = render_lines(&cell.display_lines(80)).join("\n");
+
+        assert!(rendered.contains("[Image #1]"));
+        assert!(rendered.contains("describe inline image"));
+    }
+
+    #[test]
+    fn user_history_cell_numbers_multiple_remote_images() {
+        let cell = UserHistoryCell {
+            message: "describe both".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: vec![
+                "https://example.com/one.png".to_string(),
+                "https://example.com/two.png".to_string(),
+            ],
+        };
+
+        let rendered = render_lines(&cell.display_lines(80)).join("\n");
+
+        assert!(rendered.contains("[Image #1]"));
+        assert!(rendered.contains("[Image #2]"));
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn user_history_cell_height_matches_rendered_lines_with_remote_images() {
+        let cell = UserHistoryCell {
+            message: "line one\nline two".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: vec![
+                "https://example.com/one.png".to_string(),
+                "https://example.com/two.png".to_string(),
+            ],
+        };
+
+        let width = 80;
+        let rendered_len: u16 = cell
+            .display_lines(width)
+            .len()
+            .try_into()
+            .unwrap_or(u16::MAX);
+        assert_eq!(cell.desired_height(width), rendered_len);
+        assert_eq!(cell.desired_transcript_height(width), rendered_len);
+    }
+
+    #[test]
+    fn user_history_cell_trims_trailing_blank_message_lines() {
+        let cell = UserHistoryCell {
+            message: "line one\n\n   \n\t \n".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: vec!["https://example.com/one.png".to_string()],
+        };
+
+        let rendered = render_lines(&cell.display_lines(80));
+        let trailing_blank_count = rendered
+            .iter()
+            .rev()
+            .take_while(|line| line.trim().is_empty())
+            .count();
+        assert_eq!(trailing_blank_count, 1);
+        assert!(rendered.iter().any(|line| line.contains("line one")));
+    }
+
+    #[test]
+    fn user_history_cell_trims_trailing_blank_message_lines_with_text_elements() {
+        let message = "tokenized\n\n\n".to_string();
+        let cell = UserHistoryCell {
+            message,
+            text_elements: vec![TextElement::new(
+                (0..8).into(),
+                Some("tokenized".to_string()),
+            )],
+            local_image_paths: Vec::new(),
+            remote_image_urls: vec!["https://example.com/one.png".to_string()],
+        };
+
+        let rendered = render_lines(&cell.display_lines(80));
+        let trailing_blank_count = rendered
+            .iter()
+            .rev()
+            .take_while(|line| line.trim().is_empty())
+            .count();
+        assert_eq!(trailing_blank_count, 1);
+        assert!(rendered.iter().any(|line| line.contains("tokenized")));
     }
 
     #[test]
@@ -3507,6 +3786,255 @@ mod tests {
                 "⚠ Feature flag `foo`".to_string(),
                 "Use flag `bar` instead.".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn agent_markdown_cell_renders_table_at_different_widths() {
+        let source = "| Name | Role |\n|------|------|\n| Alice | Engineer |\n| Bob | Designer |\n";
+        let cell = AgentMarkdownCell::new(source.to_string());
+
+        // At width 80 the table should render with box-drawing characters.
+        let lines_80 = render_lines(&cell.display_lines(80));
+        assert!(
+            lines_80.iter().any(|l| l.contains('┌')),
+            "expected box-drawing table at width 80: {lines_80:?}"
+        );
+        // Verify the "• " leader is present on the first line.
+        assert!(
+            lines_80[0].starts_with("• "),
+            "first line should start with bullet prefix: {:?}",
+            lines_80[0]
+        );
+
+        // At width 40 the table should also render correctly (re-rendered from
+        // source, not just word-wrapped).
+        let lines_40 = render_lines(&cell.display_lines(40));
+        assert!(
+            lines_40.iter().any(|l| l.contains('┌')),
+            "expected box-drawing table at width 40: {lines_40:?}"
+        );
+
+        // Verify table borders are intact (not broken by naive word-wrapping).
+        // Every line with a box char should have matching left/right borders.
+        for line in &lines_40 {
+            let trimmed = line.trim();
+            if trimmed.starts_with('│') {
+                assert!(
+                    trimmed.ends_with('│'),
+                    "table row should have matching right border: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_markdown_cell_narrow_width_shows_prefix_only() {
+        let source = "| Name | Role |\n|------|------|\n| Alice | Engineer |\n";
+        let cell = AgentMarkdownCell::new(source.to_string());
+
+        let lines = render_lines(&cell.display_lines(2));
+        assert_eq!(lines, vec!["• ".to_string()]);
+    }
+
+    #[test]
+    fn wrapped_and_prefixed_cells_handle_tiny_widths() {
+        let user_cell = UserHistoryCell {
+            message: "tiny width coverage for wrapped user history".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: Vec::new(),
+        };
+        let agent_message_cell = AgentMessageCell::new(vec!["tiny width agent line".into()], true);
+        let reasoning_cell = ReasoningSummaryCell::new(
+            "Plan".to_string(),
+            "Reasoning summary content for tiny widths.".to_string(),
+            false,
+        );
+        let agent_markdown_cell =
+            AgentMarkdownCell::new("| A | B |\n|---|---|\n| x | y |\n".to_string());
+
+        for width in 1..=4 {
+            assert!(
+                !user_cell.display_lines(width).is_empty(),
+                "user cell should render at width {width}",
+            );
+            assert!(
+                !agent_message_cell.display_lines(width).is_empty(),
+                "agent message cell should render at width {width}",
+            );
+            assert!(
+                !reasoning_cell.display_lines(width).is_empty(),
+                "reasoning cell should render at width {width}",
+            );
+            assert!(
+                !agent_markdown_cell.display_lines(width).is_empty(),
+                "agent markdown cell should render at width {width}",
+            );
+        }
+    }
+
+    #[test]
+    fn render_clears_area_when_cell_content_shrinks() {
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+
+        let first: Box<dyn HistoryCell> = Box::new(PlainHistoryCell::new(vec![
+            Line::from("STALE ROW 1"),
+            Line::from("STALE ROW 2"),
+            Line::from("STALE ROW 3"),
+            Line::from("STALE ROW 4"),
+        ]));
+        first.render(area, &mut buf);
+
+        let second: Box<dyn HistoryCell> =
+            Box::new(PlainHistoryCell::new(vec![Line::from("fresh")]));
+        second.render(area, &mut buf);
+
+        let mut rendered_rows: Vec<String> = Vec::new();
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buf.cell((x, y)).expect("cell should exist").symbol());
+            }
+            rendered_rows.push(row);
+        }
+
+        assert!(
+            rendered_rows.iter().all(|row| !row.contains("STALE")),
+            "rendered buffer should not retain stale glyphs: {rendered_rows:?}",
+        );
+        assert!(
+            rendered_rows
+                .first()
+                .is_some_and(|row| row.contains("fresh")),
+            "expected fresh content in first row: {rendered_rows:?}",
+        );
+    }
+
+    #[test]
+    fn agent_markdown_cell_survives_insert_history_rewrap() {
+        let source = "\
+  | Milestone | Target Date | Outcome | Extended Context |
+  |-----------|-------------|---------|------------------|
+  | Canary Rollout | 2026-01-15 | Completed | Canary remained at limited traffic longer than planned because p95 latency briefly regressed during
+  cold-cache periods |
+  | Regional Expansion | 2026-01-29 | Completed | Expansion succeeded with stable error rates, though internal analytics lagged temporarily |
+  ";
+        let cell = AgentMarkdownCell::new(source.to_string());
+        let width: u16 = 80;
+        let lines = cell.display_lines(width);
+
+        // Simulate what insert_history_lines does: word_wrap_lines with
+        // the terminal width and no indent.
+        let rewrapped = word_wrap_lines(&lines, width as usize);
+        let before = render_lines(&lines);
+        let after = render_lines(&rewrapped);
+        assert_eq!(
+            before, after,
+            "word_wrap_lines should not alter lines that already fit within width"
+        );
+    }
+
+    #[test]
+    fn agent_markdown_cell_table_fits_within_narrow_width() {
+        let source = "\
+  | Milestone | Target Date | Outcome | Extended Context |
+  |-----------|-------------|---------|------------------|
+  | Canary Rollout | 2026-01-15 | Completed | Canary remained at limited traffic longer than planned because p95 latency briefly regressed during
+  cold-cache periods |
+  | Regional Expansion | 2026-01-29 | Completed | Expansion succeeded with stable error rates, though internal analytics lagged temporarily |
+  | Legacy Decommission | 2026-02-10 | In Progress | Most legacy jobs are drained, but final shutdown is blocked by one compliance export workflow |
+  ";
+        let cell = AgentMarkdownCell::new(source.to_string());
+
+        // Render at a narrow width (simulating terminal resize).
+        let narrow_width: u16 = 80;
+        let lines = cell.display_lines(narrow_width);
+        let rendered = render_lines(&lines);
+
+        // Every rendered line must fit within the target width.
+        for line in &rendered {
+            let display_width = unicode_width::UnicodeWidthStr::width(line.as_str());
+            assert!(
+                display_width <= narrow_width as usize,
+                "line exceeds width {narrow_width}: ({display_width} chars) {line:?}"
+            );
+        }
+
+        // Table should still have box-drawing characters.
+        assert!(
+            rendered.iter().any(|l| l.contains('┌')),
+            "expected box-drawing table: {rendered:?}"
+        );
+    }
+
+    /// Simulate the consolidation backward-walk logic from `App::handle_event`
+    /// to verify it correctly identifies and replaces `AgentMessageCell` runs.
+    #[test]
+    fn consolidation_walker_replaces_agent_message_cells() {
+        use std::sync::Arc;
+
+        // Build a transcript with: [UserCell, AgentMsg(head), AgentMsg(cont), AgentMsg(cont)]
+        let user = Arc::new(UserHistoryCell {
+            message: "hello".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: Vec::new(),
+        }) as Arc<dyn HistoryCell>;
+        let head = Arc::new(AgentMessageCell::new(vec![Line::from("line 1")], true))
+            as Arc<dyn HistoryCell>;
+        let cont1 = Arc::new(AgentMessageCell::new(vec![Line::from("line 2")], false))
+            as Arc<dyn HistoryCell>;
+        let cont2 = Arc::new(AgentMessageCell::new(vec![Line::from("line 3")], false))
+            as Arc<dyn HistoryCell>;
+
+        let mut transcript_cells: Vec<Arc<dyn HistoryCell>> =
+            vec![user.clone(), head, cont1, cont2];
+
+        // Run the same consolidation logic as the handler.
+        let source = "line 1\nline 2\nline 3\n".to_string();
+        let end = transcript_cells.len();
+        let mut start = end;
+        while start > 0
+            && transcript_cells[start - 1].is_stream_continuation()
+            && transcript_cells[start - 1]
+                .as_any()
+                .is::<AgentMessageCell>()
+        {
+            start -= 1;
+        }
+        if start > 0
+            && transcript_cells[start - 1]
+                .as_any()
+                .is::<AgentMessageCell>()
+            && !transcript_cells[start - 1].is_stream_continuation()
+        {
+            start -= 1;
+        }
+
+        assert_eq!(
+            start, 1,
+            "should find all 3 agent cells starting at index 1"
+        );
+        assert_eq!(end, 4);
+
+        // Splice.
+        let consolidated: Arc<dyn HistoryCell> = Arc::new(AgentMarkdownCell::new(source));
+        transcript_cells.splice(start..end, std::iter::once(consolidated));
+
+        assert_eq!(transcript_cells.len(), 2, "should be [user, consolidated]");
+
+        // Verify first cell is still the user cell.
+        assert!(
+            transcript_cells[0].as_any().is::<UserHistoryCell>(),
+            "first cell should be UserHistoryCell"
+        );
+
+        // Verify second cell is AgentMarkdownCell.
+        assert!(
+            transcript_cells[1].as_any().is::<AgentMarkdownCell>(),
+            "second cell should be AgentMarkdownCell"
         );
     }
 }
