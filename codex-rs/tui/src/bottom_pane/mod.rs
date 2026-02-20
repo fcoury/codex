@@ -743,6 +743,10 @@ impl BottomPane {
         self.composer.is_empty()
     }
 
+    pub(crate) fn composer_is_vim_insert(&self) -> bool {
+        self.composer.is_vim_insert()
+    }
+
     pub(crate) fn is_task_running(&self) -> bool {
         self.is_task_running
     }

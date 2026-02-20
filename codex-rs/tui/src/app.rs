@@ -71,9 +71,11 @@ use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use ratatui::crossterm::execute;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -606,7 +608,23 @@ fn normalize_harness_overrides_for_cwd(
     Ok(overrides)
 }
 
+fn cursor_style_for_vim_insert(vim_insert: bool) -> SetCursorStyle {
+    if vim_insert {
+        SetCursorStyle::SteadyBar
+    } else {
+        SetCursorStyle::DefaultUserShape
+    }
+}
+
 impl App {
+    fn sync_cursor_style(&mut self, tui: &mut tui::Tui) {
+        let cursor_style = cursor_style_for_vim_insert(self.chat_widget.composer_is_vim_insert());
+
+        if let Err(err) = execute!(tui.terminal.backend_mut(), cursor_style) {
+            tracing::debug!(error = %err, "failed to set cursor style");
+        }
+    }
+
     pub fn chatwidget_init_for_forked_or_resumed_thread(
         &self,
         tui: &mut tui::Tui,
@@ -1345,6 +1363,7 @@ impl App {
                     {
                         return Ok(AppRunControl::Continue);
                     }
+                    self.sync_cursor_style(tui);
                     tui.draw(
                         self.chat_widget.desired_height(tui.terminal.size()?.width),
                         |frame| {
@@ -2913,6 +2932,19 @@ mod tests {
             vec![base_cwd.join("rel")]
         );
         Ok(())
+    }
+
+    #[test]
+    fn cursor_style_for_non_insert_is_default_shape() {
+        assert_eq!(
+            format!("{}", cursor_style_for_vim_insert(false)),
+            "\x1b[0 q"
+        );
+    }
+
+    #[test]
+    fn cursor_style_for_insert_is_steady_bar() {
+        assert_eq!(format!("{}", cursor_style_for_vim_insert(true)), "\x1b[6 q");
     }
 
     #[tokio::test]

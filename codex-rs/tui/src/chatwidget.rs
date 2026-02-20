@@ -6723,6 +6723,10 @@ impl ChatWidget {
         self.bottom_pane.composer_is_empty()
     }
 
+    pub(crate) fn composer_is_vim_insert(&self) -> bool {
+        self.bottom_pane.composer_is_vim_insert()
+    }
+
     pub(crate) fn submit_user_message_with_mode(
         &mut self,
         text: String,
