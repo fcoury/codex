@@ -2698,6 +2698,9 @@ impl ChatWidget {
         }
         widget
             .bottom_pane
+            .set_vim_enabled(widget.config.tui_vim_mode_default);
+        widget
+            .bottom_pane
             .set_steer_enabled(widget.config.features.enabled(Feature::Steer));
         widget
             .bottom_pane
@@ -2865,6 +2868,9 @@ impl ChatWidget {
         }
         widget
             .bottom_pane
+            .set_vim_enabled(widget.config.tui_vim_mode_default);
+        widget
+            .bottom_pane
             .set_steer_enabled(widget.config.features.enabled(Feature::Steer));
         widget
             .bottom_pane
@@ -3019,6 +3025,9 @@ impl ChatWidget {
         if let Ok(keymap) = RuntimeKeymap::from_config(&widget.config.tui_keymap) {
             widget.bottom_pane.set_keymap_bindings(&keymap);
         }
+        widget
+            .bottom_pane
+            .set_vim_enabled(widget.config.tui_vim_mode_default);
         widget
             .bottom_pane
             .set_steer_enabled(widget.config.features.enabled(Feature::Steer));
@@ -3328,13 +3337,7 @@ impl ChatWidget {
                 self.open_permissions_popup();
             }
             SlashCommand::Vim => {
-                let enabled = self.bottom_pane.toggle_vim_enabled();
-                let message = if enabled {
-                    "Vim mode enabled."
-                } else {
-                    "Vim mode disabled."
-                };
-                self.add_info_message(message.to_string(), None);
+                self.toggle_vim_mode_and_notify();
             }
             SlashCommand::ElevateSandbox => {
                 #[cfg(target_os = "windows")]
@@ -6753,6 +6756,16 @@ impl ChatWidget {
 
     pub(crate) fn composer_is_vim_insert(&self) -> bool {
         self.bottom_pane.composer_is_vim_insert()
+    }
+
+    pub(crate) fn toggle_vim_mode_and_notify(&mut self) {
+        let enabled = self.bottom_pane.toggle_vim_enabled();
+        let message = if enabled {
+            "Vim mode enabled."
+        } else {
+            "Vim mode disabled."
+        };
+        self.add_info_message(message.to_string(), None);
     }
 
     pub(crate) fn submit_user_message_with_mode(

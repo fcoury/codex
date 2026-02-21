@@ -304,6 +304,11 @@ impl BottomPane {
         enabled
     }
 
+    pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
+        self.composer.set_vim_enabled(enabled);
+        self.request_redraw();
+    }
+
     pub fn status_widget(&self) -> Option<&StatusIndicatorWidget> {
         self.status.as_ref()
     }
@@ -764,6 +769,11 @@ impl BottomPane {
 
     pub(crate) fn composer_is_vim_insert(&self) -> bool {
         self.composer.is_vim_insert()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composer_is_vim_enabled(&self) -> bool {
+        self.composer.is_vim_enabled()
     }
 
     pub(crate) fn is_task_running(&self) -> bool {

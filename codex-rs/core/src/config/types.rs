@@ -605,6 +605,11 @@ pub struct Tui {
     #[serde(default = "default_true")]
     pub show_tooltips: bool,
 
+    /// Start the composer in Vim mode (`Normal`) by default.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub vim_mode_default: bool,
+
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
     ///
     /// - `auto` (default): Disable alternate screen in Zellij, enable elsewhere.
@@ -648,6 +653,8 @@ pub use super::tui_keymap::TuiKeymapPreset;
 pub use super::tui_keymap::TuiListKeymap;
 pub use super::tui_keymap::TuiOnboardingKeymap;
 pub use super::tui_keymap::TuiPagerKeymap;
+pub use super::tui_keymap::TuiVimNormalKeymap;
+pub use super::tui_keymap::TuiVimOperatorKeymap;
 
 /// Settings for notices we display to users via the tui and app-server clients
 /// (primarily the Codex IDE extension). NOTE: these are different from

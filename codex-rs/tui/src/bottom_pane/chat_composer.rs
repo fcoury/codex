@@ -527,7 +527,7 @@ impl ChatComposer {
         self.queue_keys = keymap.composer.queue.clone();
         self.toggle_shortcuts_keys = keymap.composer.toggle_shortcuts.clone();
         self.editor_keymap = keymap.editor.clone();
-        self.textarea.set_keymap_bindings(&self.editor_keymap);
+        self.textarea.set_keymap_bindings(keymap);
         self.footer_external_editor_key = primary_binding(&keymap.app.open_external_editor);
         self.footer_edit_previous_key = primary_binding(&keymap.chat.edit_previous_message);
         self.footer_show_transcript_key = primary_binding(&keymap.app.open_transcript);
@@ -818,6 +818,11 @@ impl ChatComposer {
 
     pub(crate) fn is_vim_insert(&self) -> bool {
         self.textarea.is_vim_insert()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_vim_enabled(&self) -> bool {
+        self.textarea.is_vim_enabled()
     }
 
     fn vim_mode_indicator_span(&self) -> Option<Span<'static>> {
@@ -1461,7 +1466,7 @@ impl ChatComposer {
         if self.disable_paste_burst {
             // When burst detection is disabled, treat IME/non-ASCII input as normal typing.
             // In particular, do not retro-capture or buffer already-inserted prefix text.
-            self.textarea.input_with_keymap(input, &self.editor_keymap);
+            self.textarea.input(input);
             let text_after = self.textarea.text();
             self.pending_pastes
                 .retain(|(placeholder, _)| text_after.contains(placeholder));
@@ -1518,7 +1523,7 @@ impl ChatComposer {
         if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
             self.handle_paste(pasted);
         }
-        self.textarea.input_with_keymap(input, &self.editor_keymap);
+        self.textarea.input(input);
 
         let text_after = self.textarea.text();
         self.pending_pastes
@@ -2842,7 +2847,7 @@ impl ChatComposer {
             Some(self.textarea.element_payloads())
         };
 
-        self.textarea.input_with_keymap(input, &self.editor_keymap);
+        self.textarea.input(input);
 
         if let Some(elements_before) = elements_before {
             self.reconcile_deleted_elements(elements_before);

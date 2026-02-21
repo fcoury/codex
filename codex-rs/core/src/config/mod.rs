@@ -257,6 +257,9 @@ pub struct Config {
     /// Show startup tooltips in the TUI welcome screen.
     pub show_tooltips: bool,
 
+    /// Start the composer in Vim mode (`Normal`) by default.
+    pub tui_vim_mode_default: bool,
+
     /// Start the TUI in the specified collaboration mode (plan/default).
 
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
@@ -2070,6 +2073,11 @@ impl Config {
                 .unwrap_or_default(),
             animations: cfg.tui.as_ref().map(|t| t.animations).unwrap_or(true),
             show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),
+            tui_vim_mode_default: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.vim_mode_default)
+                .unwrap_or(false),
             tui_alternate_screen: cfg
                 .tui
                 .as_ref()
@@ -2494,6 +2502,7 @@ allowed_domains = ["openai.com"]
                 notification_method: NotificationMethod::Auto,
                 animations: true,
                 show_tooltips: true,
+                vim_mode_default: false,
                 alternate_screen: AltScreenMode::Auto,
                 status_line: None,
                 keymap: TuiKeymap::default(),
@@ -4598,6 +4607,7 @@ model_verbosity = "high"
                 tui_notification_method: Default::default(),
                 animations: true,
                 show_tooltips: true,
+                tui_vim_mode_default: false,
                 analytics_enabled: Some(true),
                 feedback_enabled: true,
                 tui_alternate_screen: AltScreenMode::Auto,
@@ -4717,6 +4727,7 @@ model_verbosity = "high"
             tui_notification_method: Default::default(),
             animations: true,
             show_tooltips: true,
+            tui_vim_mode_default: false,
             analytics_enabled: Some(true),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
@@ -4834,6 +4845,7 @@ model_verbosity = "high"
             tui_notification_method: Default::default(),
             animations: true,
             show_tooltips: true,
+            tui_vim_mode_default: false,
             analytics_enabled: Some(false),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
@@ -4937,6 +4949,7 @@ model_verbosity = "high"
             tui_notification_method: Default::default(),
             animations: true,
             show_tooltips: true,
+            tui_vim_mode_default: false,
             analytics_enabled: Some(true),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
@@ -5695,6 +5708,8 @@ mod notifications_tests {
         notifications: Notifications,
         #[serde(default)]
         notification_method: NotificationMethod,
+        #[serde(default)]
+        vim_mode_default: bool,
     }
 
     #[derive(Deserialize, Debug, PartialEq)]
@@ -5735,5 +5750,24 @@ mod notifications_tests {
         let parsed: RootTomlTest =
             toml::from_str(toml).expect("deserialize notification_method=\"bel\"");
         assert_eq!(parsed.tui.notification_method, NotificationMethod::Bel);
+    }
+
+    #[test]
+    fn test_tui_vim_mode_default_defaults_to_false() {
+        let toml = r#"
+            [tui]
+        "#;
+        let parsed: RootTomlTest = toml::from_str(toml).expect("deserialize empty [tui] table");
+        assert!(!parsed.tui.vim_mode_default);
+    }
+
+    #[test]
+    fn test_tui_vim_mode_default_true() {
+        let toml = r#"
+            [tui]
+            vim_mode_default = true
+        "#;
+        let parsed: RootTomlTest = toml::from_str(toml).expect("deserialize vim_mode_default=true");
+        assert!(parsed.tui.vim_mode_default);
     }
 }
