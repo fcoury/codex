@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use crate::exec_command::relativize_to_home;
 use crate::render::Insets;
+use crate::render::highlight::highlight_code_line_to_spans;
 use crate::render::line_utils::prefix_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::InsetRenderable;
@@ -22,6 +23,7 @@ use codex_core::git_info::get_git_repo_root;
 use codex_core::protocol::FileChange;
 
 // Internal representation for diff line rendering
+#[derive(Copy, Clone)]
 enum DiffLineType {
     Insert,
     Delete,
@@ -42,13 +44,13 @@ impl DiffSummary {
 impl Renderable for FileChange {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let mut lines = vec![];
-        render_change(self, &mut lines, area.width as usize);
+        render_change(self, &mut lines, area.width as usize, None);
         Paragraph::new(lines).render(area, buf);
     }
 
     fn desired_height(&self, width: u16) -> u16 {
         let mut lines = vec![];
-        render_change(self, &mut lines, width as usize);
+        render_change(self, &mut lines, width as usize, None);
         lines.len() as u16
     }
 }
@@ -186,14 +188,21 @@ fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<RtL
         }
 
         let mut lines = vec![];
-        render_change(&r.change, &mut lines, wrap_cols - 4);
+        let language_path = r.move_path.as_ref().unwrap_or(&r.path);
+        let language_hint = language_path.to_str();
+        render_change(&r.change, &mut lines, wrap_cols - 4, language_hint);
         out.extend(prefix_lines(lines, "    ".into(), "    ".into()));
     }
 
     out
 }
 
-fn render_change(change: &FileChange, out: &mut Vec<RtLine<'static>>, width: usize) {
+fn render_change(
+    change: &FileChange,
+    out: &mut Vec<RtLine<'static>>,
+    width: usize,
+    language_hint: Option<&str>,
+) {
     match change {
         FileChange::Add { content } => {
             let line_number_width = line_number_width(content.lines().count());
@@ -204,6 +213,7 @@ fn render_change(change: &FileChange, out: &mut Vec<RtLine<'static>>, width: usi
                     raw,
                     width,
                     line_number_width,
+                    language_hint,
                 ));
             }
         }
@@ -216,6 +226,7 @@ fn render_change(change: &FileChange, out: &mut Vec<RtLine<'static>>, width: usi
                     raw,
                     width,
                     line_number_width,
+                    language_hint,
                 ));
             }
         }
@@ -265,6 +276,7 @@ fn render_change(change: &FileChange, out: &mut Vec<RtLine<'static>>, width: usi
                                     s,
                                     width,
                                     line_number_width,
+                                    language_hint,
                                 ));
                                 new_ln += 1;
                             }
@@ -276,6 +288,7 @@ fn render_change(change: &FileChange, out: &mut Vec<RtLine<'static>>, width: usi
                                     s,
                                     width,
                                     line_number_width,
+                                    language_hint,
                                 ));
                                 old_ln += 1;
                             }
@@ -287,6 +300,7 @@ fn render_change(change: &FileChange, out: &mut Vec<RtLine<'static>>, width: usi
                                     s,
                                     width,
                                     line_number_width,
+                                    language_hint,
                                 ));
                                 old_ln += 1;
                                 new_ln += 1;
@@ -348,6 +362,7 @@ fn push_wrapped_diff_line(
     text: &str,
     width: usize,
     line_number_width: usize,
+    language_hint: Option<&str>,
 ) -> Vec<RtLine<'static>> {
     let ln_str = line_number.to_string();
     let mut remaining_text: &str = text;
@@ -382,25 +397,52 @@ fn push_wrapped_diff_line(
             // Build gutter (right-aligned line number plus spacer) as a dimmed span
             let gutter = format!("{ln_str:>gutter_width$} ");
             // Content with a sign ('+'/'-'/' ') styled per diff kind
-            let content = format!("{sign_char}{chunk}");
-            lines.push(RtLine::from(vec![
+            let mut spans = vec![
                 RtSpan::styled(gutter, style_gutter()),
-                RtSpan::styled(content, line_style),
-            ]));
+                RtSpan::styled(sign_char.to_string(), line_style),
+            ];
+            spans.extend(styled_payload_spans(chunk, language_hint, kind, line_style));
+            lines.push(RtLine::from(spans));
             first = false;
         } else {
             // Continuation lines keep a space for the sign column so content aligns
             let gutter = format!("{:gutter_width$}  ", "");
-            lines.push(RtLine::from(vec![
-                RtSpan::styled(gutter, style_gutter()),
-                RtSpan::styled(chunk.to_string(), line_style),
-            ]));
+            let mut spans = vec![RtSpan::styled(gutter, style_gutter())];
+            spans.extend(styled_payload_spans(chunk, language_hint, kind, line_style));
+            lines.push(RtLine::from(spans));
         }
         if remaining_text.is_empty() {
             break;
         }
     }
     lines
+}
+
+fn styled_payload_spans(
+    chunk: &str,
+    language_hint: Option<&str>,
+    kind: DiffLineType,
+    base_style: Style,
+) -> Vec<RtSpan<'static>> {
+    if chunk.is_empty() {
+        return Vec::new();
+    }
+
+    let spans = highlight_code_line_to_spans(chunk, None, language_hint);
+    if spans.is_empty() {
+        return vec![RtSpan::styled(chunk.to_string(), base_style)];
+    }
+
+    spans
+        .into_iter()
+        .map(|span| {
+            let style = match kind {
+                DiffLineType::Insert | DiffLineType::Delete => span.style.patch(base_style),
+                DiffLineType::Context => span.style,
+            };
+            RtSpan::styled(span.content.to_string(), style)
+        })
+        .collect()
 }
 
 fn line_number_width(max_line_number: usize) -> usize {
@@ -497,8 +539,14 @@ mod tests {
         let long_line = "this is a very long line that should wrap across multiple terminal columns and continue";
 
         // Call the wrapping function directly so we can precisely control the width
-        let lines =
-            push_wrapped_diff_line(1, DiffLineType::Insert, long_line, 80, line_number_width(1));
+        let lines = push_wrapped_diff_line(
+            1,
+            DiffLineType::Insert,
+            long_line,
+            80,
+            line_number_width(1),
+            Some("txt"),
+        );
 
         // Render into a small terminal to capture the visual layout
         snapshot_lines("wrap_behavior_insert", lines, 90, 8);

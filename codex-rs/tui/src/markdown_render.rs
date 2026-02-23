@@ -1,3 +1,4 @@
+use crate::render::highlight::highlight_code_to_lines;
 use crate::render::line_utils::line_to_static;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
@@ -105,6 +106,8 @@ where
     current_subsequent_indent: Vec<Span<'static>>,
     current_line_style: Style,
     current_line_in_code_block: bool,
+    code_block_language: Option<String>,
+    code_block_buffer: String,
 }
 
 impl<'a, I> Writer<'a, I>
@@ -130,6 +133,8 @@ where
             current_subsequent_indent: Vec::new(),
             current_line_style: Style::default(),
             current_line_in_code_block: false,
+            code_block_language: None,
+            code_block_buffer: String::new(),
         }
     }
 
@@ -274,6 +279,16 @@ where
     }
 
     fn text(&mut self, text: CowStr<'a>) {
+        if self.in_code_block {
+            if self.pending_marker_line {
+                self.push_line(Line::default());
+                self.pending_marker_line = false;
+            }
+            self.code_block_buffer.push_str(text.as_ref());
+            self.needs_newline = false;
+            return;
+        }
+
         if self.pending_marker_line {
             self.push_line(Line::default());
         }
@@ -338,10 +353,18 @@ where
     }
 
     fn hard_break(&mut self) {
+        if self.in_code_block {
+            self.code_block_buffer.push('\n');
+            return;
+        }
         self.push_line(Line::default());
     }
 
     fn soft_break(&mut self) {
+        if self.in_code_block {
+            self.code_block_buffer.push('\n');
+            return;
+        }
         self.push_line(Line::default());
     }
 
@@ -394,12 +417,14 @@ where
         self.needs_newline = false;
     }
 
-    fn start_codeblock(&mut self, _lang: Option<String>, indent: Option<Span<'static>>) {
+    fn start_codeblock(&mut self, lang: Option<String>, indent: Option<Span<'static>>) {
         self.flush_current_line();
         if !self.text.lines.is_empty() {
             self.push_blank_line();
         }
         self.in_code_block = true;
+        self.code_block_language = lang;
+        self.code_block_buffer.clear();
         self.indent_stack.push(IndentContext::new(
             vec![indent.unwrap_or_default()],
             None,
@@ -409,9 +434,31 @@ where
     }
 
     fn end_codeblock(&mut self) {
+        self.flush_code_block();
         self.needs_newline = true;
         self.in_code_block = false;
+        self.code_block_language = None;
+        self.code_block_buffer.clear();
         self.indent_stack.pop();
+    }
+
+    fn flush_code_block(&mut self) {
+        let source = self
+            .code_block_buffer
+            .lines()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let highlighted =
+            highlight_code_to_lines(&source, self.code_block_language.as_deref(), None);
+
+        for (index, line) in highlighted.into_iter().enumerate() {
+            if index > 0 || line.spans.is_empty() {
+                self.push_line(Line::default());
+            }
+            for span in line.spans {
+                self.push_span(span);
+            }
+        }
     }
 
     fn push_inline_style(&mut self, style: Style) {

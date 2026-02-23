@@ -23,6 +23,20 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+arborium-bash = { workspace = true }
+arborium-c = { workspace = true }
+arborium-cpp = { workspace = true }
+arborium-diff = { workspace = true }
+arborium-go = { workspace = true }
+arborium-javascript = { workspace = true }
+arborium-json = { workspace = true }
+arborium-python = { workspace = true }
+arborium-rust = { workspace = true }
+arborium-theme = { workspace = true }
+arborium-toml = { workspace = true }
+arborium-tsx = { workspace = true }
+arborium-typescript = { workspace = true }
+arborium-yaml = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
@@ -90,7 +104,6 @@ toml = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-tree-sitter-bash = { workspace = true }
 tree-sitter-highlight = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }

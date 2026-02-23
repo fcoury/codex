@@ -1,4 +1,5 @@
 use pretty_assertions::assert_eq;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -652,10 +653,14 @@ fn link() {
 }
 
 #[test]
-fn code_block_unhighlighted() {
+fn code_block_highlighted_when_language_hint_present() {
     let text = render_markdown_text("```rust\nfn main() {}\n```\n");
-    let expected = Text::from_iter([Line::from_iter(["", "fn main() {}"])]);
-    assert_eq!(text, expected);
+    let has_styled_span = text
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .any(|span| span.style != Style::default());
+    assert!(has_styled_span);
 }
 
 #[test]
