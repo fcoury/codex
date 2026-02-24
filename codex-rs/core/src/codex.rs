@@ -48,6 +48,7 @@ use crate::util::error_or_panic;
 use crate::ws_version_from_features;
 use async_channel::Receiver;
 use async_channel::Sender;
+use async_channel::TrySendError;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
 use codex_hooks::HookPayload;
@@ -137,6 +138,8 @@ use crate::error::Result as CodexResult;
 #[cfg(test)]
 use crate::exec::StreamOutput;
 use codex_config::CONFIG_TOML_FILE;
+
+const REALTIME_MIRROR_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
@@ -536,6 +539,7 @@ pub(crate) struct Session {
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
     next_internal_sub_id: AtomicU64,
+    realtime_mirror_tx: Sender<String>,
 }
 
 /// The context needed for a single turn of the thread.
@@ -1358,6 +1362,8 @@ impl Session {
         );
         state.set_startup_regular_task(startup_regular_task);
 
+        let (realtime_mirror_tx, realtime_mirror_rx) =
+            async_channel::bounded::<String>(REALTIME_MIRROR_QUEUE_CAPACITY);
         let sess = Arc::new(Session {
             conversation_id,
             tx_event: tx_event.clone(),
@@ -1370,7 +1376,9 @@ impl Session {
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
+            realtime_mirror_tx,
         });
+        Self::start_realtime_mirror_worker(Arc::clone(&sess), realtime_mirror_rx);
         if let Some(network_policy_decider_session) = network_policy_decider_session {
             let mut guard = network_policy_decider_session.write().await;
             *guard = Arc::downgrade(&sess);
@@ -2217,27 +2225,38 @@ impl Session {
         )
     }
 
+    fn start_realtime_mirror_worker(sess: Arc<Self>, realtime_mirror_rx: Receiver<String>) {
+        tokio::spawn(async move {
+            while let Ok(text) = realtime_mirror_rx.recv().await {
+                if sess.conversation.running_state().await.is_none() {
+                    continue;
+                }
+                if let Err(err) = sess.conversation.text_in(text).await {
+                    debug!("failed to mirror event text to realtime conversation: {err}");
+                }
+            }
+        });
+    }
+
     /// Persist the event to rollout and send it to clients.
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
         let legacy_source = msg.clone();
-        let mirror_source = legacy_source.clone();
         let event = Event {
             id: turn_context.sub_id.clone(),
             msg,
         };
         self.send_event_raw(event).await;
-        let conversation = Arc::clone(&self.conversation);
-        tokio::spawn(async move {
-            let Some(text) = realtime_text_for_event(&mirror_source) else {
-                return;
-            };
-            if conversation.running_state().await.is_none() {
-                return;
+        if let Some(text) = realtime_text_for_event(&legacy_source) {
+            match self.realtime_mirror_tx.try_send(text) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    warn!("dropping mirrored realtime text due to full queue");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    debug!("dropping mirrored realtime text because queue is closed");
+                }
             }
-            if let Err(err) = conversation.text_in(text).await {
-                debug!("failed to mirror event text to realtime conversation: {err}");
-            }
-        });
+        }
 
         let show_raw_agent_reasoning = self.show_raw_agent_reasoning();
         for legacy in legacy_source.as_legacy_events(show_raw_agent_reasoning) {
@@ -7981,6 +8000,7 @@ mod tests {
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
+            realtime_mirror_tx: async_channel::unbounded::<String>().0,
         };
 
         (session, turn_context)
@@ -8134,6 +8154,7 @@ mod tests {
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
+            realtime_mirror_tx: async_channel::unbounded::<String>().0,
         });
 
         (session, turn_context, rx_event)
