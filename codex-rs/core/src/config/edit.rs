@@ -1,4 +1,5 @@
 use crate::config::types::McpServerConfig;
+use crate::config::types::ModelTogglePairEntry;
 use crate::config::types::Notice;
 use crate::path_utils::resolve_symlink_write_paths;
 use crate::path_utils::write_atomically;
@@ -24,6 +25,10 @@ pub enum ConfigEdit {
     SetModel {
         model: Option<String>,
         effort: Option<ReasoningEffort>,
+    },
+    /// Persist the two-entry model toggle pair under `[tui]`.
+    SetModelTogglePair {
+        pair: Option<Vec<ModelTogglePairEntry>>,
     },
     /// Update the active (or default) model personality.
     SetModelPersonality { personality: Option<Personality> },
@@ -299,6 +304,26 @@ impl ConfigDocument {
                     effort.map(|effort| value(effort.to_string())),
                 );
                 mutated
+            }),
+            ConfigEdit::SetModelTogglePair { pair } => Ok(match pair {
+                Some(entries) if !entries.is_empty() => {
+                    let mut tables = ArrayOfTables::new();
+                    for entry in entries {
+                        let mut table = TomlTable::new();
+                        table.set_implicit(false);
+                        table.insert("model", value(entry.model.clone()));
+                        if let Some(effort) = entry.effort {
+                            table.insert("effort", value(effort.to_string()));
+                        }
+                        tables.push(table);
+                    }
+                    self.write_value(
+                        Scope::Global,
+                        &["tui", "model_toggle_pair"],
+                        TomlItem::ArrayOfTables(tables),
+                    )
+                }
+                _ => self.clear(Scope::Global, &["tui", "model_toggle_pair"]),
             }),
             ConfigEdit::SetModelPersonality { personality } => Ok(self.write_profile_value(
                 &["personality"],
@@ -743,6 +768,18 @@ impl ConfigEditsBuilder {
         self.edits.push(ConfigEdit::SetModel {
             model: model.map(ToOwned::to_owned),
             effort,
+        });
+        self
+    }
+
+    /// Persist TUI quick-toggle history under `[tui].model_toggle_pair`.
+    ///
+    /// Passing `None` or an empty slice clears the persisted value. Callers
+    /// should only provide the most-recent two entries; longer lists are not
+    /// expected and may obscure recency semantics for Ctrl+O toggling.
+    pub fn set_model_toggle_pair(mut self, pair: Option<&[ModelTogglePairEntry]>) -> Self {
+        self.edits.push(ConfigEdit::SetModelTogglePair {
+            pair: pair.map(<[ModelTogglePairEntry]>::to_vec),
         });
         self
     }
@@ -1747,6 +1784,69 @@ foo = { command = "cmd" , enabled = false }
 model_reasoning_effort = "high"
 "#;
         assert_eq!(contents, expected);
+    }
+
+    #[tokio::test]
+    async fn async_builder_set_model_toggle_pair_persists_and_clears() {
+        let tmp = tempdir().expect("tmpdir");
+        let codex_home = tmp.path().to_path_buf();
+        let pair = vec![
+            ModelTogglePairEntry {
+                model: "o3".to_string(),
+                effort: Some(ReasoningEffort::High),
+            },
+            ModelTogglePairEntry {
+                model: "gpt-5.1-codex".to_string(),
+                effort: Some(ReasoningEffort::Medium),
+            },
+        ];
+
+        ConfigEditsBuilder::new(&codex_home)
+            .set_model_toggle_pair(Some(&pair))
+            .apply()
+            .await
+            .expect("persist pair");
+
+        let raw = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+        let config: TomlValue = toml::from_str(&raw).expect("parse config");
+        let pair_array = config
+            .get("tui")
+            .and_then(TomlValue::as_table)
+            .and_then(|tui| tui.get("model_toggle_pair"))
+            .and_then(TomlValue::as_array)
+            .expect("model_toggle_pair array");
+        assert_eq!(pair_array.len(), 2);
+        assert_eq!(
+            pair_array[0]
+                .get("model")
+                .and_then(TomlValue::as_str)
+                .expect("first model"),
+            "o3"
+        );
+        assert_eq!(
+            pair_array[1]
+                .get("model")
+                .and_then(TomlValue::as_str)
+                .expect("second model"),
+            "gpt-5.1-codex"
+        );
+
+        ConfigEditsBuilder::new(&codex_home)
+            .set_model_toggle_pair(None)
+            .apply()
+            .await
+            .expect("clear pair");
+
+        let raw = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+        let config: TomlValue = toml::from_str(&raw).expect("parse config");
+        assert!(
+            config
+                .get("tui")
+                .and_then(TomlValue::as_table)
+                .and_then(|tui| tui.get("model_toggle_pair"))
+                .is_none(),
+            "expected model_toggle_pair to be removed"
+        );
     }
 
     #[test]

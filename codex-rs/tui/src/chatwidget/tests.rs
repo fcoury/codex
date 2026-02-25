@@ -20,6 +20,7 @@ use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::Constrained;
 use codex_core::config::ConstraintError;
+use codex_core::config::types::ModelTogglePairEntry;
 #[cfg(target_os = "windows")]
 use codex_core::config::types::WindowsSandboxModeToml;
 use codex_core::config_loader::RequirementSource;
@@ -1694,6 +1695,7 @@ async fn make_chatwidget_manual(
         show_welcome_banner: true,
         queued_user_messages: VecDeque::new(),
         queued_message_edit_binding: crate::key_hint::alt(KeyCode::Up),
+        recent_model_history: VecDeque::with_capacity(2),
         suppress_session_configured_redraw: false,
         pending_notification: None,
         quit_shortcut_expires_at: None,
@@ -2278,15 +2280,13 @@ async fn reasoning_selection_in_plan_mode_without_effort_change_does_not_open_sc
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::UpdateModel(model) if model == "gpt-5.1-codex-max"
+            AppEvent::UpdateModelSelection {
+                model,
+                effort: Some(_),
+                scope: crate::app_event::ModelEffortScope::Global
+            } if model == "gpt-5.1-codex-max"
         )),
-        "expected model update event; events: {events:?}"
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, AppEvent::UpdateReasoningEffort(Some(_)))),
-        "expected reasoning update event; events: {events:?}"
+        "expected atomic model selection update event; events: {events:?}"
     );
 }
 
@@ -2363,15 +2363,13 @@ async fn reasoning_selection_in_plan_mode_model_switch_does_not_open_scope_promp
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::UpdateModel(model) if model == "gpt-5"
+            AppEvent::UpdateModelSelection {
+                model,
+                effort: Some(_),
+                scope: crate::app_event::ModelEffortScope::Global
+            } if model == "gpt-5"
         )),
-        "expected model update event; events: {events:?}"
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, AppEvent::UpdateReasoningEffort(Some(_)))),
-        "expected reasoning update event; events: {events:?}"
+        "expected atomic model selection update event; events: {events:?}"
     );
 }
 
@@ -2454,15 +2452,23 @@ async fn plan_reasoning_scope_popup_plan_only_does_not_update_all_modes_reasonin
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::UpdatePlanModeReasoningEffort(Some(ReasoningEffortConfig::High))
+            AppEvent::UpdateModelSelection {
+                model,
+                effort: Some(ReasoningEffortConfig::High),
+                scope: crate::app_event::ModelEffortScope::PlanMode
+            } if model == "gpt-5.1-codex-max"
         )),
         "expected plan-only reasoning update; events: {events:?}"
     );
     assert!(
-        events
-            .iter()
-            .all(|event| !matches!(event, AppEvent::UpdateReasoningEffort(_))),
-        "did not expect all-modes reasoning update; events: {events:?}"
+        events.iter().all(|event| !matches!(
+            event,
+            AppEvent::UpdateModelSelection {
+                scope: crate::app_event::ModelEffortScope::Global,
+                ..
+            }
+        )),
+        "did not expect global model+effort update; events: {events:?}"
     );
 }
 
@@ -5780,7 +5786,7 @@ async fn server_overloaded_error_does_not_switch_models() {
     });
 
     while let Ok(event) = rx.try_recv() {
-        if let AppEvent::UpdateModel(model) = event {
+        if let AppEvent::UpdateModelSelection { model, .. } = event {
             assert_eq!(
                 model, "gpt-5.2-codex",
                 "did not expect model switch on server-overloaded error"
@@ -6029,11 +6035,263 @@ async fn single_reasoning_option_skips_selection() {
     }
 
     assert!(
-        events
-            .iter()
-            .any(|ev| matches!(ev, AppEvent::UpdateReasoningEffort(Some(effort)) if *effort == ReasoningEffortConfig::High)),
-        "expected reasoning effort to be applied automatically; events: {events:?}"
+        events.iter().any(|ev| matches!(
+            ev,
+            AppEvent::UpdateModelSelection {
+                model,
+                effort: Some(effort),
+                scope: crate::app_event::ModelEffortScope::Global
+            } if model == "model-with-single-reasoning" && *effort == ReasoningEffortConfig::High
+        )),
+        "expected atomic model+effort selection to be applied automatically; events: {events:?}"
     );
+}
+
+#[tokio::test]
+async fn model_history_stays_empty_before_session_configured() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
+    assert!(chat.recent_model_history.is_empty());
+}
+
+#[tokio::test]
+async fn model_history_reselect_deduplicates_and_promotes() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.record_model_history_selection("gpt-5".to_string(), Some(ReasoningEffortConfig::Low));
+    chat.record_model_history_selection(
+        "gpt-5.1-codex-max".to_string(),
+        Some(ReasoningEffortConfig::High),
+    );
+    chat.record_model_history_selection("gpt-5".to_string(), Some(ReasoningEffortConfig::Medium));
+
+    let entries: Vec<ModelHistoryEntry> = chat.recent_model_history.iter().cloned().collect();
+    assert_eq!(
+        entries,
+        vec![
+            ModelHistoryEntry {
+                model: "gpt-5".to_string(),
+                effort: Some(ReasoningEffortConfig::Medium),
+            },
+            ModelHistoryEntry {
+                model: "gpt-5.1-codex-max".to_string(),
+                effort: Some(ReasoningEffortConfig::High),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn model_history_effort_updates_for_current_model() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.set_model("gpt-5.1-codex-max");
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
+
+    let entry = chat
+        .recent_model_history
+        .iter()
+        .find(|entry| entry.model == "gpt-5.1-codex-max")
+        .expect("expected entry for switched model");
+    assert_eq!(
+        entry,
+        &ModelHistoryEntry {
+            model: "gpt-5.1-codex-max".to_string(),
+            effort: Some(ReasoningEffortConfig::XHigh),
+        }
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_model_history_effort_updates_after_model_switch() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let plan_mask =
+        collaboration_modes::mask_for_kind(chat.models_manager.as_ref(), ModeKind::Plan)
+            .expect("expected plan collaboration mode");
+    chat.set_collaboration_mask(plan_mask);
+
+    chat.set_model("gpt-5.1-codex-max");
+    chat.set_plan_mode_reasoning_effort(Some(ReasoningEffortConfig::Low));
+
+    let entry = chat
+        .recent_model_history
+        .iter()
+        .find(|entry| entry.model == "gpt-5.1-codex-max")
+        .expect("expected entry for switched model");
+    assert_eq!(
+        entry,
+        &ModelHistoryEntry {
+            model: "gpt-5.1-codex-max".to_string(),
+            effort: Some(ReasoningEffortConfig::Low),
+        }
+    );
+}
+
+#[tokio::test]
+async fn model_history_other_entry_none_with_single_entry() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.seed_model_history_if_empty();
+    let other = chat.other_recent_model_entry(chat.current_model());
+    assert_eq!(other, None);
+}
+
+#[tokio::test]
+async fn session_configured_uses_persisted_pair_other_when_default_present() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let default_model = chat.current_model().to_string();
+    chat.config.tui_model_toggle_pair = Some(vec![
+        ModelTogglePairEntry {
+            model: "o3".to_string(),
+            effort: Some(ReasoningEffortConfig::High),
+        },
+        ModelTogglePairEntry {
+            model: default_model.clone(),
+            effort: Some(ReasoningEffortConfig::Low),
+        },
+    ]);
+
+    chat.on_session_configured(codex_protocol::protocol::SessionConfiguredEvent {
+        session_id: ThreadId::new(),
+        forked_from_id: None,
+        thread_name: None,
+        model: default_model.clone(),
+        model_provider_id: "openai".to_string(),
+        approval_policy: AskForApproval::Never,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        cwd: PathBuf::from("/tmp"),
+        reasoning_effort: Some(ReasoningEffortConfig::Medium),
+        history_log_id: 0,
+        history_entry_count: 0,
+        initial_messages: None,
+        network_proxy: None,
+        rollout_path: None,
+    });
+
+    let entries: Vec<ModelHistoryEntry> = chat.recent_model_history.iter().cloned().collect();
+    assert_eq!(
+        entries,
+        vec![
+            ModelHistoryEntry {
+                model: default_model,
+                effort: Some(ReasoningEffortConfig::Medium),
+            },
+            ModelHistoryEntry {
+                model: "o3".to_string(),
+                effort: Some(ReasoningEffortConfig::High),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn session_configured_replaces_current_when_default_not_in_persisted_pair() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let default_model = chat.current_model().to_string();
+    chat.config.tui_model_toggle_pair = Some(vec![
+        ModelTogglePairEntry {
+            model: "o3".to_string(),
+            effort: Some(ReasoningEffortConfig::High),
+        },
+        ModelTogglePairEntry {
+            model: "gpt-4.1".to_string(),
+            effort: Some(ReasoningEffortConfig::Low),
+        },
+    ]);
+
+    chat.on_session_configured(codex_protocol::protocol::SessionConfiguredEvent {
+        session_id: ThreadId::new(),
+        forked_from_id: None,
+        thread_name: None,
+        model: default_model.clone(),
+        model_provider_id: "openai".to_string(),
+        approval_policy: AskForApproval::Never,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        cwd: PathBuf::from("/tmp"),
+        reasoning_effort: Some(ReasoningEffortConfig::Medium),
+        history_log_id: 0,
+        history_entry_count: 0,
+        initial_messages: None,
+        network_proxy: None,
+        rollout_path: None,
+    });
+
+    let entries: Vec<ModelHistoryEntry> = chat.recent_model_history.iter().cloned().collect();
+    assert_eq!(
+        entries,
+        vec![
+            ModelHistoryEntry {
+                model: default_model,
+                effort: Some(ReasoningEffortConfig::Medium),
+            },
+            ModelHistoryEntry {
+                model: "o3".to_string(),
+                effort: Some(ReasoningEffortConfig::High),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn session_configured_does_not_restore_stale_startup_toggle_pair() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let startup_model = chat.current_model().to_string();
+    chat.config.tui_model_toggle_pair = Some(vec![
+        ModelTogglePairEntry {
+            model: "o3".to_string(),
+            effort: Some(ReasoningEffortConfig::High),
+        },
+        ModelTogglePairEntry {
+            model: startup_model.clone(),
+            effort: Some(ReasoningEffortConfig::Low),
+        },
+    ]);
+
+    let session_configured = |model: &str| codex_protocol::protocol::SessionConfiguredEvent {
+        session_id: ThreadId::new(),
+        forked_from_id: None,
+        thread_name: None,
+        model: model.to_string(),
+        model_provider_id: "openai".to_string(),
+        approval_policy: AskForApproval::Never,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        cwd: PathBuf::from("/tmp"),
+        reasoning_effort: Some(ReasoningEffortConfig::Medium),
+        history_log_id: 0,
+        history_entry_count: 0,
+        initial_messages: None,
+        network_proxy: None,
+        rollout_path: None,
+    };
+
+    chat.on_session_configured(session_configured(&startup_model));
+    chat.set_model("model-c");
+    chat.set_model("model-d");
+
+    let expected_live_history = vec![
+        ModelHistoryEntry {
+            model: "model-d".to_string(),
+            effort: Some(ReasoningEffortConfig::Medium),
+        },
+        ModelHistoryEntry {
+            model: "model-c".to_string(),
+            effort: Some(ReasoningEffortConfig::Medium),
+        },
+    ];
+    let before_second_session_configured: Vec<ModelHistoryEntry> =
+        chat.recent_model_history.iter().cloned().collect();
+    assert_eq!(before_second_session_configured, expected_live_history);
+
+    chat.on_session_configured(session_configured("model-d"));
+
+    let after_second_session_configured: Vec<ModelHistoryEntry> =
+        chat.recent_model_history.iter().cloned().collect();
+    assert_eq!(after_second_session_configured, expected_live_history);
 }
 
 #[tokio::test]

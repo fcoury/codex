@@ -45,6 +45,7 @@ use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
+use codex_core::config::types::ModelTogglePairEntry;
 use codex_core::config_loader::ConfigLayerStackOrdering;
 use codex_core::features::Feature;
 use codex_core::models_manager::manager::RefreshStrategy;
@@ -517,8 +518,11 @@ async fn handle_model_migration_prompt_if_needed(
 
                 config.model = Some(target_model.clone());
                 config.model_reasoning_effort = mapped_effort;
-                app_event_tx.send(AppEvent::UpdateModel(target_model.clone()));
-                app_event_tx.send(AppEvent::UpdateReasoningEffort(mapped_effort));
+                app_event_tx.send(AppEvent::UpdateModelSelection {
+                    model: target_model.clone(),
+                    effort: mapped_effort,
+                    scope: crate::app_event::ModelEffortScope::Global,
+                });
                 app_event_tx.send(AppEvent::PersistModelSelection {
                     model: target_model.clone(),
                     effort: mapped_effort,
@@ -1925,13 +1929,13 @@ impl App {
             AppEvent::ConnectorsLoaded { result, is_final } => {
                 self.chat_widget.on_connectors_loaded(result, is_final);
             }
-            AppEvent::UpdateReasoningEffort(effort) => {
-                self.on_update_reasoning_effort(effort);
-                self.refresh_status_line();
-            }
-            AppEvent::UpdateModel(model) => {
-                self.chat_widget.set_model(&model);
-                self.refresh_status_line();
+            AppEvent::UpdateModelSelection {
+                model,
+                effort,
+                scope,
+            } => {
+                self.apply_model_selection_update(&model, effort, scope)
+                    .await;
             }
             AppEvent::UpdateCollaborationMode(mask) => {
                 self.chat_widget.set_collaboration_mask(mask);
@@ -3007,6 +3011,47 @@ impl App {
         self.chat_widget.set_reasoning_effort(effort);
     }
 
+    async fn apply_model_selection_update(
+        &mut self,
+        model: &str,
+        effort: Option<ReasoningEffortConfig>,
+        scope: crate::app_event::ModelEffortScope,
+    ) {
+        let should_persist_toggle_pair = matches!(
+            scope,
+            crate::app_event::ModelEffortScope::Global
+                | crate::app_event::ModelEffortScope::PlanMode
+        ) && self.chat_widget.thread_id().is_some();
+        self.chat_widget.set_model(model);
+        match scope {
+            crate::app_event::ModelEffortScope::Global => {
+                self.on_update_reasoning_effort(effort);
+            }
+            crate::app_event::ModelEffortScope::PlanMode => {
+                self.config.plan_mode_reasoning_effort = effort;
+                self.chat_widget.set_plan_mode_reasoning_effort(effort);
+            }
+        }
+        self.refresh_status_line();
+        if should_persist_toggle_pair {
+            self.persist_model_toggle_pair().await;
+        }
+    }
+
+    async fn persist_model_toggle_pair(&mut self) {
+        let pair: Option<Vec<ModelTogglePairEntry>> =
+            self.chat_widget.model_toggle_pair_for_persist();
+        if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
+            .set_model_toggle_pair(pair.as_deref())
+            .apply()
+            .await
+        {
+            tracing::error!(error = %err, "failed to persist model toggle pair");
+            self.chat_widget
+                .add_error_message(format!("Failed to save model toggle pair: {err}"));
+        }
+    }
+
     fn on_update_personality(&mut self, personality: Personality) {
         self.config.personality = Some(personality);
         self.chat_widget.set_personality(personality);
@@ -4029,6 +4074,100 @@ mod tests {
             app.config.model_reasoning_effort,
             Some(ReasoningEffortConfig::High)
         );
+    }
+
+    #[tokio::test]
+    async fn update_model_selection_before_session_does_not_clear_model_toggle_pair() -> Result<()>
+    {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let codex_home = tempdir()?;
+        let codex_home = codex_home.path().to_path_buf();
+        app.config.codex_home = codex_home.clone();
+
+        let persisted_pair = vec![
+            ModelTogglePairEntry {
+                model: "o3".to_string(),
+                effort: Some(ReasoningEffortConfig::Medium),
+            },
+            ModelTogglePairEntry {
+                model: "gpt-5-codex".to_string(),
+                effort: Some(ReasoningEffortConfig::High),
+            },
+        ];
+        ConfigEditsBuilder::new(&app.config.codex_home)
+            .set_model_toggle_pair(Some(&persisted_pair))
+            .apply()
+            .await
+            .expect("persist model toggle pair");
+
+        let config_path = codex_home.join("config.toml");
+        let raw_before = std::fs::read_to_string(&config_path)?;
+        let selected_model = app.chat_widget.current_model().to_string();
+        app.apply_model_selection_update(
+            &selected_model,
+            Some(ReasoningEffortConfig::High),
+            crate::app_event::ModelEffortScope::Global,
+        )
+        .await;
+
+        let raw_after = std::fs::read_to_string(config_path)?;
+        assert_eq!(raw_after, raw_before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_model_selection_plan_mode_persists_model_toggle_pair() -> Result<()> {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let codex_home = tempdir()?;
+        let codex_home = codex_home.path().to_path_buf();
+        app.config.codex_home = codex_home.clone();
+        let session_id = ThreadId::new();
+        app.chat_widget.handle_codex_event(Event {
+            id: String::new(),
+            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                session_id,
+                forked_from_id: None,
+                thread_name: None,
+                model: app.chat_widget.current_model().to_string(),
+                model_provider_id: "test-provider".to_string(),
+                approval_policy: AskForApproval::Never,
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                cwd: app.config.cwd.clone(),
+                reasoning_effort: Some(ReasoningEffortConfig::Medium),
+                history_log_id: 0,
+                history_entry_count: 0,
+                initial_messages: None,
+                network_proxy: None,
+                rollout_path: Some(PathBuf::new()),
+            }),
+        });
+
+        let selected_model = "gpt-5-codex".to_string();
+        app.apply_model_selection_update(
+            &selected_model,
+            Some(ReasoningEffortConfig::High),
+            crate::app_event::ModelEffortScope::PlanMode,
+        )
+        .await;
+
+        let config_path = codex_home.join("config.toml");
+        let raw = std::fs::read_to_string(config_path)?;
+        let parsed: toml::Value = toml::from_str(&raw)?;
+        let pair = parsed
+            .get("tui")
+            .and_then(toml::Value::as_table)
+            .and_then(|tui| tui.get("model_toggle_pair"))
+            .and_then(toml::Value::as_array)
+            .expect("model_toggle_pair persisted");
+        let selected_entry_has_high_effort = pair.iter().any(|entry| {
+            entry.get("model").and_then(toml::Value::as_str) == Some(selected_model.as_str())
+                && entry.get("effort").and_then(toml::Value::as_str) == Some("high")
+        });
+        assert!(
+            selected_entry_has_high_effort,
+            "expected persisted plan-mode model entry to carry high effort"
+        );
+        Ok(())
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ use crate::config::types::McpServerDisabledReason;
 use crate::config::types::McpServerTransportConfig;
 use crate::config::types::MemoriesConfig;
 use crate::config::types::MemoriesToml;
+use crate::config::types::ModelTogglePairEntry;
 use crate::config::types::Notice;
 use crate::config::types::NotificationMethod;
 use crate::config::types::Notifications;
@@ -168,6 +169,11 @@ pub struct Config {
 
     /// Optional override of model selection.
     pub model: Option<String>,
+    /// Effective TUI model-toggle pair loaded from `[tui].model_toggle_pair`.
+    ///
+    /// This field is kept on runtime [`Config`] so TUI code can access
+    /// sanitized toggle history without reading raw TOML structures.
+    pub tui_model_toggle_pair: Option<Vec<ModelTogglePairEntry>>,
 
     /// Model used specifically for review sessions.
     pub review_model: Option<String>,
@@ -1996,9 +2002,33 @@ impl Config {
         } else {
             network.enabled().then_some(network)
         };
+        let tui_model_toggle_pair = cfg
+            .tui
+            .as_ref()
+            .and_then(|tui| tui.model_toggle_pair.clone())
+            .map(|entries| {
+                let mut sanitized: Vec<ModelTogglePairEntry> = Vec::with_capacity(2);
+                for entry in entries {
+                    let model = entry.model.trim();
+                    if model.is_empty()
+                        || sanitized.iter().any(|candidate| candidate.model == model)
+                    {
+                        continue;
+                    }
+                    sanitized.push(ModelTogglePairEntry {
+                        model: model.to_string(),
+                        effort: entry.effort,
+                    });
+                    if sanitized.len() == 2 {
+                        break;
+                    }
+                }
+                sanitized
+            });
 
         let config = Self {
             model,
+            tui_model_toggle_pair,
             review_model,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
@@ -2576,6 +2606,7 @@ theme = "dracula"
                 alternate_screen: AltScreenMode::Auto,
                 status_line: None,
                 theme: None,
+                model_toggle_pair: None,
             }
         );
     }
@@ -4629,6 +4660,7 @@ model_verbosity = "high"
         assert_eq!(
             Config {
                 model: Some("o3".to_string()),
+                tui_model_toggle_pair: None,
                 review_model: None,
                 model_context_window: None,
                 model_auto_compact_token_limit: None,
@@ -4752,6 +4784,7 @@ model_verbosity = "high"
         )?;
         let expected_gpt3_profile_config = Config {
             model: Some("gpt-3.5-turbo".to_string()),
+            tui_model_toggle_pair: None,
             review_model: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
@@ -4873,6 +4906,7 @@ model_verbosity = "high"
         )?;
         let expected_zdr_profile_config = Config {
             model: Some("o3".to_string()),
+            tui_model_toggle_pair: None,
             review_model: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
@@ -4980,6 +5014,7 @@ model_verbosity = "high"
         )?;
         let expected_gpt5_profile_config = Config {
             model: Some("gpt-5.1".to_string()),
+            tui_model_toggle_pair: None,
             review_model: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,

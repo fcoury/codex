@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use wildmatch::WildMatchPattern;
 
+use codex_protocol::openai_models::ReasoningEffort;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -27,6 +28,20 @@ pub const DEFAULT_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 16;
 pub const DEFAULT_MEMORIES_MAX_ROLLOUT_AGE_DAYS: i64 = 30;
 pub const DEFAULT_MEMORIES_MIN_ROLLOUT_IDLE_HOURS: i64 = 6;
 pub const DEFAULT_MEMORIES_MAX_RAW_MEMORIES_FOR_GLOBAL: usize = 1_024;
+
+/// A persisted model + reasoning-effort pairing used by the TUI quick toggle.
+///
+/// The TUI stores at most two of these entries in recency order under
+/// `[tui].model_toggle_pair`. The loader sanitizes this data on read by
+/// trimming model names, dropping empty values, and deduplicating by model slug.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ModelTogglePairEntry {
+    /// Model slug used for selection.
+    pub model: String,
+    /// Global or Plan-mode reasoning effort associated with this model.
+    pub effort: Option<ReasoningEffort>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -688,6 +703,15 @@ pub struct Tui {
     /// Use `/theme` in the TUI or see `$CODEX_HOME/themes` for custom themes.
     #[serde(default)]
     pub theme: Option<String>,
+
+    /// Persisted ring for Ctrl+O model switching in the TUI.
+    ///
+    /// This data is intentionally scoped under `[tui]` because it captures UI
+    /// recency state, not a cross-client model preference. Runtime loading
+    /// enforces a maximum of two valid unique entries.
+    #[serde(default)]
+    #[schemars(length(max = 2))]
+    pub model_toggle_pair: Option<Vec<ModelTogglePairEntry>>,
 }
 
 const fn default_true() -> bool {
