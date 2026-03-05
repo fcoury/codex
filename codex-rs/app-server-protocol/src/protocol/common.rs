@@ -129,7 +129,6 @@ macro_rules! client_request_definitions {
                     .unwrap_or_else(|| "<unknown>".to_string())
             }
         }
-
         impl crate::experimental_api::ExperimentalApi for ClientRequest {
             fn experimental_reason(&self) -> Option<&'static str> {
                 match self {

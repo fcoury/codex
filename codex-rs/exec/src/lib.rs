@@ -949,6 +949,106 @@ where
     })
 }
 
+async fn await_session_configured_event(
+    client: &mut InProcessAppServerClient,
+    config: &Config,
+    thread_id: &str,
+    error_seen: &mut bool,
+    buffered_events: &mut VecDeque<InProcessServerEvent>,
+) -> Result<SessionConfiguredEvent, String> {
+    const SESSION_CONFIGURED_TIMEOUT: Duration = Duration::from_secs(10);
+    let wait_result = timeout(SESSION_CONFIGURED_TIMEOUT, async {
+        loop {
+            let server_event = client.next_event().await;
+            let Some(server_event) = server_event else {
+                return Err("event stream ended before session configured".to_string());
+            };
+
+            match &server_event {
+                InProcessServerEvent::ServerRequest(request) => {
+                    handle_server_request(client, request.clone(), config, thread_id, error_seen)
+                        .await;
+                }
+                InProcessServerEvent::ServerNotification(_) => {
+                    buffered_events.push_back(server_event);
+                }
+                InProcessServerEvent::LegacyNotification(notification) => {
+                    let event = match legacy_notification_to_event(notification.clone()) {
+                        Ok(event) => event,
+                        Err(err) => {
+                            warn!("{err}");
+                            buffered_events.push_back(server_event);
+                            continue;
+                        }
+                    };
+
+                    if let EventMsg::SessionConfigured(session_configured) = event.msg
+                        && session_configured.session_id.to_string() == thread_id
+                    {
+                        return Ok(session_configured);
+                    }
+                    buffered_events.push_back(server_event);
+                }
+                InProcessServerEvent::Lagged { .. } => {
+                    buffered_events.push_back(server_event);
+                }
+            }
+        }
+    })
+    .await;
+
+    match wait_result {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "timed out waiting for session configured event after {}s",
+            SESSION_CONFIGURED_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+enum BootstrapEventAction {
+    Continue,
+    HandleServerRequest(ServerRequest),
+    SessionConfigured(SessionConfiguredEvent),
+}
+
+fn classify_bootstrap_event(
+    server_event: InProcessServerEvent,
+    thread_id: &str,
+    buffered_events: &mut VecDeque<InProcessServerEvent>,
+) -> Result<BootstrapEventAction, String> {
+    match &server_event {
+        InProcessServerEvent::ServerRequest(_) => {
+            if let InProcessServerEvent::ServerRequest(request) = server_event {
+                Ok(BootstrapEventAction::HandleServerRequest(request))
+            } else {
+                unreachable!("matched server request variant")
+            }
+        }
+        InProcessServerEvent::ServerNotification(_) | InProcessServerEvent::Lagged { .. } => {
+            buffered_events.push_back(server_event);
+            Ok(BootstrapEventAction::Continue)
+        }
+        InProcessServerEvent::LegacyNotification(notification) => {
+            let event = legacy_notification_to_event(notification.clone());
+            match event {
+                Ok(event) => {
+                    if let EventMsg::SessionConfigured(session_configured) = event.msg
+                        && session_configured.session_id.to_string() == thread_id
+                    {
+                        return Ok(BootstrapEventAction::SessionConfigured(session_configured));
+                    }
+                    buffered_events.push_back(server_event);
+                    Ok(BootstrapEventAction::Continue)
+                }
+                Err(err) => {
+                    buffered_events.push_back(server_event);
+                    Err(err)
+                }
+            }
+        }
+    }
+}
 fn session_configured_from_thread_start_response(
     response: &ThreadStartResponse,
 ) -> Result<SessionConfiguredEvent, String> {
@@ -1573,12 +1673,14 @@ fn build_review_request(args: &ReviewArgs) -> anyhow::Result<ReviewRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_app_server_protocol::JSONRPCNotification;
     use codex_otel::set_parent_from_w3c_trace_context;
     use opentelemetry::trace::TraceContextExt;
     use opentelemetry::trace::TraceId;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::SdkTracerProvider;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
 
     fn test_tracing_subscriber() -> impl tracing::Subscriber + Send + Sync {
@@ -1794,5 +1896,72 @@ mod tests {
                 meta: None,
             }
         );
+    }
+
+    #[test]
+    fn classify_bootstrap_event_buffers_lagged_markers() {
+        let mut buffered_events = VecDeque::new();
+
+        let action = classify_bootstrap_event(
+            InProcessServerEvent::Lagged { skipped: 3 },
+            "thread-1",
+            &mut buffered_events,
+        )
+        .expect("lagged events should be buffered");
+
+        assert!(matches!(action, BootstrapEventAction::Continue));
+        assert_eq!(buffered_events.len(), 1);
+        assert!(matches!(
+            buffered_events.front(),
+            Some(InProcessServerEvent::Lagged { skipped: 3 })
+        ));
+    }
+
+    #[test]
+    fn classify_bootstrap_event_extracts_matching_session_configured() {
+        let mut buffered_events = VecDeque::new();
+        let thread_id = "019cbf93-9ff5-7ac0-ac93-c8a36f0c98d3";
+        let session_configured = session_configured_from_thread_response(
+            thread_id,
+            Some("thread".to_string()),
+            None,
+            "gpt-5".to_string(),
+            "openai".to_string(),
+            None,
+            AskForApproval::Never,
+            codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            std::env::temp_dir(),
+            None,
+        )
+        .expect("session configured payload should build");
+        let notification = JSONRPCNotification {
+            method: "codex/event/session_configured".to_string(),
+            params: Some(json!({
+                "msg": serde_json::to_value(&session_configured)
+                    .expect("session configured should serialize"),
+            })),
+        };
+
+        let action = classify_bootstrap_event(
+            InProcessServerEvent::LegacyNotification(notification),
+            thread_id,
+            &mut buffered_events,
+        )
+        .expect("matching session configured should decode");
+
+        match action {
+            BootstrapEventAction::SessionConfigured(payload) => {
+                assert_eq!(
+                    payload.session_id.to_string(),
+                    session_configured.session_id.to_string()
+                );
+                assert_eq!(payload.thread_name, session_configured.thread_name);
+                assert_eq!(payload.model, session_configured.model);
+            }
+            BootstrapEventAction::Continue | BootstrapEventAction::HandleServerRequest(_) => {
+                panic!("expected matching session configured event")
+            }
+        }
+        assert!(buffered_events.is_empty());
     }
 }

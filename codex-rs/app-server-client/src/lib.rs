@@ -768,7 +768,6 @@ mod tests {
 
         client.shutdown().await.expect("shutdown should complete");
     }
-
     #[test]
     fn event_requires_delivery_marks_terminal_events() {
         assert!(event_requires_delivery(
