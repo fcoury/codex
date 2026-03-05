@@ -123,6 +123,34 @@ impl Error for TypedRequestError {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientSurface {
+    /// Non-interactive execution surface.
+    Exec,
+    /// Interactive terminal UI surface.
+    Tui,
+}
+
+/// Maps facade surface identity to app-server `SessionSource`.
+///
+/// `ClientSurface::Tui` intentionally maps to `SessionSource::Cli` because the
+/// TUI is the interactive CLI surface from the server's perspective.
+pub fn session_source_for_surface(surface: ClientSurface) -> SessionSource {
+    match surface {
+        ClientSurface::Exec => SessionSource::Exec,
+        ClientSurface::Tui => SessionSource::Cli,
+    }
+}
+
+impl ClientSurface {
+    fn default_client_name(self) -> &'static str {
+        match self {
+            ClientSurface::Exec => "codex-exec",
+            ClientSurface::Tui => "codex-tui",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct InProcessClientStartArgs {
     /// Resolved argv0 dispatch paths used by command execution internals.
