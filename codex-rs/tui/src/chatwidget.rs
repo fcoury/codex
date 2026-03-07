@@ -39,6 +39,7 @@ use std::time::Instant;
 
 use self::realtime::PendingSteerCompareKey;
 use crate::app_event::RealtimeAudioDeviceKind;
+use crate::app_server_bridge::SkillsListBridgeHandle;
 #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
 use crate::audio_device::list_realtime_audio_device_names;
 use crate::bottom_pane::StatusLineItem;
@@ -479,6 +480,7 @@ pub(crate) struct ChatWidgetInit {
     // Shared latch so we only warn once about invalid status-line item IDs.
     pub(crate) status_line_invalid_items_warned: Arc<AtomicBool>,
     pub(crate) otel_manager: OtelManager,
+    pub(crate) skills_list_bridge: Option<SkillsListBridgeHandle>,
 }
 
 #[derive(Default)]
@@ -561,6 +563,7 @@ pub(crate) struct ChatWidget {
     auth_manager: Arc<AuthManager>,
     models_manager: Arc<ModelsManager>,
     otel_manager: OtelManager,
+    skills_list_bridge: Option<SkillsListBridgeHandle>,
     session_header: SessionHeader,
     initial_user_message: Option<UserMessage>,
     token_info: Option<TokenUsageInfo>,
@@ -3044,6 +3047,7 @@ impl ChatWidget {
             startup_tooltip_override,
             status_line_invalid_items_warned,
             otel_manager,
+            skills_list_bridge,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
@@ -3103,6 +3107,7 @@ impl ChatWidget {
             auth_manager,
             models_manager,
             otel_manager,
+            skills_list_bridge,
             session_header: SessionHeader::new(header_model),
             initial_user_message,
             token_info: None,
@@ -3227,6 +3232,7 @@ impl ChatWidget {
             startup_tooltip_override,
             status_line_invalid_items_warned,
             otel_manager,
+            skills_list_bridge,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
@@ -3285,6 +3291,7 @@ impl ChatWidget {
             auth_manager,
             models_manager,
             otel_manager,
+            skills_list_bridge,
             session_header: SessionHeader::new(header_model),
             initial_user_message,
             token_info: None,
@@ -3401,6 +3408,7 @@ impl ChatWidget {
             startup_tooltip_override: _,
             status_line_invalid_items_warned,
             otel_manager,
+            skills_list_bridge,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
@@ -3459,6 +3467,7 @@ impl ChatWidget {
             auth_manager,
             models_manager,
             otel_manager,
+            skills_list_bridge,
             session_header: SessionHeader::new(header_model),
             initial_user_message,
             token_info: None,
@@ -8048,6 +8057,15 @@ impl ChatWidget {
     pub(crate) fn submit_op(&mut self, op: Op) -> bool {
         // Record outbound operation for session replay fidelity.
         crate::session_log::log_outbound_op(&op);
+        if let Op::ListSkills { cwds, force_reload } = &op
+            && let Some(skills_list_bridge) = &self.skills_list_bridge
+        {
+            if !skills_list_bridge.list_skills(cwds.clone(), *force_reload) {
+                tracing::error!("failed to submit ListSkills to app-server bridge");
+                return false;
+            }
+            return true;
+        }
         if matches!(&op, Op::Review { .. }) && !self.bottom_pane.is_task_running() {
             self.bottom_pane.set_task_running(true);
         }

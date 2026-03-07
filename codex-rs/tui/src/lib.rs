@@ -62,6 +62,7 @@ mod app;
 mod app_backtrack;
 mod app_event;
 mod app_event_sender;
+mod app_server_bridge;
 mod ascii_animation;
 #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
 mod audio_device;
@@ -522,6 +523,7 @@ pub async fn run_main(mut cli: Cli, arg0_paths: Arg0DispatchPaths) -> std::io::R
         config,
         overrides,
         cli_kv_overrides,
+        arg0_paths,
         cloud_requirements,
         feedback,
     )
@@ -534,6 +536,7 @@ async fn run_ratatui_app(
     initial_config: Config,
     overrides: ConfigOverrides,
     cli_kv_overrides: Vec<(String, toml::Value)>,
+    arg0_paths: Arg0DispatchPaths,
     mut cloud_requirements: CloudRequirementsLoader,
     feedback: codex_feedback::CodexFeedback,
 ) -> color_eyre::Result<AppExitInfo> {
@@ -924,7 +927,9 @@ async fn run_ratatui_app(
         &mut tui,
         auth_manager,
         config,
+        arg0_paths,
         cli_kv_overrides.clone(),
+        cloud_requirements.clone(),
         overrides.clone(),
         active_profile,
         prompt,

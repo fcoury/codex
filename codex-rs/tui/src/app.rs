@@ -5,6 +5,8 @@ use crate::app_event::RealtimeAudioDeviceKind;
 #[cfg(target_os = "windows")]
 use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_event_sender::AppEventSender;
+use crate::app_server_bridge::SkillsListBridgeHandle;
+use crate::app_server_bridge::start_skills_list_bridge;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::McpServerElicitationFormRequest;
@@ -40,6 +42,7 @@ use crate::update_action::UpdateAction;
 use crate::version::CODEX_CLI_VERSION;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_protocol::ConfigLayerSource;
+use codex_arg0::Arg0DispatchPaths;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ThreadManager;
@@ -49,6 +52,7 @@ use codex_core::config::ConfigOverrides;
 use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::types::ModelAvailabilityNuxConfig;
+use codex_core::config_loader::CloudRequirementsLoader;
 use codex_core::config_loader::ConfigLayerStackOrdering;
 use codex_core::features::Feature;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
@@ -703,6 +707,7 @@ pub(crate) struct App {
     primary_thread_id: Option<ThreadId>,
     primary_session_configured: Option<SessionConfiguredEvent>,
     pending_primary_events: VecDeque<Event>,
+    skills_list_bridge: Option<SkillsListBridgeHandle>,
 }
 
 #[derive(Default)]
@@ -751,6 +756,7 @@ impl App {
             startup_tooltip_override: None,
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             otel_manager: self.otel_manager.clone(),
+            skills_list_bridge: self.skills_list_bridge.clone(),
         }
     }
 
@@ -1438,6 +1444,7 @@ impl App {
             startup_tooltip_override: None,
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             otel_manager: self.otel_manager.clone(),
+            skills_list_bridge: self.skills_list_bridge.clone(),
         };
         self.chat_widget = ChatWidget::new(init, self.server.clone());
         self.reset_thread_event_state();
@@ -1557,7 +1564,9 @@ impl App {
         tui: &mut tui::Tui,
         auth_manager: Arc<AuthManager>,
         mut config: Config,
+        arg0_paths: Arg0DispatchPaths,
         cli_kv_overrides: Vec<(String, TomlValue)>,
+        cloud_requirements: CloudRequirementsLoader,
         harness_overrides: ConfigOverrides,
         active_profile: Option<String>,
         initial_prompt: Option<String>,
@@ -1645,6 +1654,14 @@ impl App {
         }
 
         let status_line_invalid_items_warned = Arc::new(AtomicBool::new(false));
+        let skills_list_bridge = start_skills_list_bridge(
+            config.clone(),
+            arg0_paths,
+            cli_kv_overrides.clone(),
+            cloud_requirements.clone(),
+            app_event_tx.clone(),
+        )
+        .await;
 
         let enhanced_keys_supported = tui.enhanced_keys_supported();
         let wait_for_initial_session_configured =
@@ -1674,6 +1691,7 @@ impl App {
                     startup_tooltip_override,
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     otel_manager: otel_manager.clone(),
+                    skills_list_bridge: skills_list_bridge.clone(),
                 };
                 ChatWidget::new(init, thread_manager.clone())
             }
@@ -1709,6 +1727,7 @@ impl App {
                     startup_tooltip_override: None,
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     otel_manager: otel_manager.clone(),
+                    skills_list_bridge: skills_list_bridge.clone(),
                 };
                 ChatWidget::new_from_existing(init, resumed.thread, resumed.session_configured)
             }
@@ -1746,6 +1765,7 @@ impl App {
                     startup_tooltip_override: None,
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     otel_manager: otel_manager.clone(),
+                    skills_list_bridge: skills_list_bridge.clone(),
                 };
                 ChatWidget::new_from_existing(init, forked.thread, forked.session_configured)
             }
@@ -1794,6 +1814,7 @@ impl App {
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
+            skills_list_bridge,
         };
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
@@ -5314,6 +5335,7 @@ mod tests {
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
+            skills_list_bridge: None,
         }
     }
 
@@ -5374,6 +5396,7 @@ mod tests {
                 primary_thread_id: None,
                 primary_session_configured: None,
                 pending_primary_events: VecDeque::new(),
+                skills_list_bridge: None,
             },
             rx,
             op_rx,
