@@ -148,6 +148,9 @@ pub enum InProcessServerEvent {
 /// Requests carry a oneshot sender for the response; notifications and server-request
 /// replies are fire-and-forget from the caller's perspective (transport errors are
 /// caught by `try_send` on the outer channel).
+///
+/// All variants are consumed by the runtime loop in [`start_uninitialized`]. Adding
+/// a variant here without a corresponding match arm is a compile error.
 enum InProcessClientMessage {
     Request {
         request: Box<ClientRequest>,
@@ -311,6 +314,17 @@ pub async fn start(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> 
     Ok(client)
 }
 
+/// Starts the runtime task and channel wiring without performing initialize.
+///
+/// This is the core of the in-process host. It wires up:
+/// - A `MessageProcessor` that handles typed requests and notifications.
+/// - An outbound routing task that fans `OutgoingEnvelope` messages to the
+///   single in-process connection writer.
+/// - A main select loop that multiplexes client commands, outgoing messages,
+///   and thread-creation broadcasts.
+///
+/// The caller is responsible for sending `Initialize` and `Initialized`
+/// through the returned handle before issuing other requests.
 fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
     let channel_capacity = args.channel_capacity.max(1);
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);

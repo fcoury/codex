@@ -169,6 +169,9 @@ fn initialize_client_info_from_typed_request(request: &ClientRequest) -> Option<
 ///
 /// This duplicates the `ClientRequest` variant match locally so the protocol
 /// crate does not need an in-process-specific helper just for tracing.
+/// The exhaustive match is intentional: adding a `ClientRequest` variant
+/// without listing it here is a compile error, which prevents silent
+/// telemetry gaps.
 pub(crate) fn client_request_id(request: &ClientRequest) -> &RequestId {
     match request {
         ClientRequest::Initialize { request_id, .. }

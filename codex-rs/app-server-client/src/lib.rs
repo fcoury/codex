@@ -116,8 +116,11 @@ pub enum ClientSurface {
 
 /// Maps facade surface identity to app-server `SessionSource`.
 ///
-/// `ClientSurface::Tui` intentionally maps to `SessionSource::Cli` because the
-/// TUI is the interactive CLI surface from the server's perspective.
+/// `ClientSurface::Tui` intentionally maps to `SessionSource::Cli` (not a
+/// hypothetical `SessionSource::Tui`) because the TUI is the interactive CLI
+/// surface from the server's perspective. This mapping determines thread
+/// metadata, so changing it would alter how threads are attributed in
+/// `thread/list` and `thread/read` responses.
 pub fn session_source_for_surface(surface: ClientSurface) -> SessionSource {
     match surface {
         ClientSurface::Exec => SessionSource::Exec,
@@ -557,6 +560,10 @@ impl InProcessAppServerClient {
 
 /// Extracts the JSON-RPC method name for diagnostics without extending the
 /// protocol crate with in-process-only helpers.
+///
+/// This serializes the full request to JSON, so it should only be called in
+/// error-construction paths where the cost is negligible relative to the
+/// error being reported.
 fn request_method_name(request: &ClientRequest) -> String {
     serde_json::to_value(request)
         .ok()
