@@ -179,7 +179,6 @@ impl MessageProcessor {
             session_source,
             enable_codex_api_key_env,
         } = args;
-        let enable_codex_api_key_env = matches!(session_source, SessionSource::Exec);
         let auth_manager = AuthManager::shared(
             config.codex_home.clone(),
             enable_codex_api_key_env,
