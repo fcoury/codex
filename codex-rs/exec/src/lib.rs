@@ -1279,21 +1279,36 @@ async fn handle_server_request(
 ) {
     let method = server_request_method_name(&request);
     let handle_result = match request {
-        ServerRequest::McpServerElicitationRequest { request_id, .. } => {
-            // Exec auto-cancels elicitation instead of surfacing it
-            // interactively. Preserve that behavior for attached subagent
-            // threads too so we do not turn a cancel into a decline/error.
-            match canceled_mcp_server_elicitation_response() {
-                Ok(value) => {
-                    resolve_server_request(
-                        client,
-                        request_id,
-                        value,
-                        "mcpServer/elicitation/request",
-                    )
-                    .await
+        ServerRequest::McpServerElicitationRequest { request_id, params } => {
+            if params.thread_id != thread_id {
+                reject_server_request(
+                    client,
+                    request_id,
+                    &method,
+                    format!(
+                        "request targets thread `{}`, but active thread is `{thread_id}`",
+                        params.thread_id
+                    ),
+                )
+                .await
+            } else {
+                let response = McpServerElicitationRequestResponse {
+                    action: McpServerElicitationAction::Cancel,
+                    content: None,
+                    meta: None,
+                };
+                match serde_json::to_value(response) {
+                    Ok(value) => {
+                        resolve_server_request(
+                            client,
+                            request_id,
+                            value,
+                            "mcpServer/elicitation/request",
+                        )
+                        .await
+                    }
+                    Err(err) => Err(format!("failed to encode mcp elicitation response: {err}")),
                 }
-                Err(err) => Err(err),
             }
         }
         ServerRequest::ChatgptAuthTokensRefresh { request_id, params } => {
