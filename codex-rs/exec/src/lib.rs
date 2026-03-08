@@ -1198,6 +1198,10 @@ fn decode_legacy_notification(
     })
 }
 
+fn legacy_notification_to_event(notification: JSONRPCNotification) -> Result<Event, String> {
+    decode_legacy_notification(notification).map(|decoded| decoded.event)
+}
+
 fn canceled_mcp_server_elicitation_response() -> Result<Value, String> {
     serde_json::to_value(McpServerElicitationRequestResponse {
         action: McpServerElicitationAction::Cancel,
@@ -1963,5 +1967,13 @@ mod tests {
             }
         }
         assert!(buffered_events.is_empty());
+    }
+
+    #[test]
+    fn lagged_event_warning_message_is_explicit() {
+        assert_eq!(
+            lagged_event_warning_message(7),
+            "in-process app-server event stream lagged; dropped 7 events".to_string()
+        );
     }
 }
