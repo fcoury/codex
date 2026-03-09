@@ -211,10 +211,6 @@ impl AgentControl {
         };
         reservation.commit(new_thread.thread_id);
 
-        // Notify a new thread has been created. This notification will be processed by clients
-        // to subscribe or drain this newly created thread.
-        // TODO(jif) add helper for drain
-        state.notify_thread_created(new_thread.thread_id);
         if let Some(inherited_turn_permissions) = inherited_turn_permissions {
             new_thread
                 .thread
@@ -223,6 +219,11 @@ impl AgentControl {
                 .seed_inherited_next_turn_permissions(inherited_turn_permissions)
                 .await;
         }
+
+        // Notify a new thread has been created. This notification will be processed by clients
+        // to subscribe or drain this newly created thread.
+        // TODO(jif) add helper for drain
+        state.notify_thread_created(new_thread.thread_id);
 
         self.send_input(new_thread.thread_id, items).await?;
         self.maybe_start_completion_watcher(new_thread.thread_id, notification_source);
@@ -1187,6 +1188,72 @@ mod tests {
         })
         .await
         .expect("child should inherit parent turn permissions before first turn starts");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_seeds_permissions_before_thread_created_notification() {
+        let harness = AgentControlHarness::new().await;
+        let (parent_thread_id, parent_thread) = harness.start_thread().await;
+        let child_write_root =
+            AbsolutePathBuf::from_absolute_path(harness._home.path().join("testing3"))
+                .expect("temp child write root should be absolute");
+        let expected_permissions = PermissionProfile {
+            file_system: Some(FileSystemPermissions {
+                read: Some(vec![child_write_root.clone()]),
+                write: Some(vec![child_write_root]),
+            }),
+            ..PermissionProfile::default()
+        };
+        let active_turn = ActiveTurn::default();
+        {
+            let mut turn_state = active_turn.turn_state.lock().await;
+            turn_state.record_granted_permissions(expected_permissions.clone());
+        }
+        *parent_thread.codex.session.active_turn.lock().await = Some(active_turn);
+
+        let mut thread_created_rx = harness.manager.subscribe_thread_created();
+        let control = harness.control.clone();
+        let config = harness.config.clone();
+        let spawn = tokio::spawn(async move {
+            control
+                .spawn_agent(
+                    config,
+                    Vec::new(),
+                    Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                        parent_thread_id,
+                        depth: 1,
+                        agent_nickname: None,
+                        agent_role: None,
+                    })),
+                )
+                .await
+                .expect("child spawn should succeed")
+        });
+
+        let child_thread_id = timeout(Duration::from_secs(2), thread_created_rx.recv())
+            .await
+            .expect("thread-created notification should arrive")
+            .expect("thread-created channel should stay open");
+        let child_thread = harness
+            .manager
+            .get_thread(child_thread_id)
+            .await
+            .expect("child thread should be registered");
+
+        let inherited = child_thread
+            .codex
+            .session
+            .take_inherited_next_turn_permissions()
+            .await;
+        assert_eq!(inherited, Some(expected_permissions.clone()));
+        child_thread
+            .codex
+            .session
+            .seed_inherited_next_turn_permissions(expected_permissions)
+            .await;
+
+        let spawned_thread_id = spawn.await.expect("spawn task should complete");
+        assert_eq!(spawned_thread_id, child_thread_id);
     }
 
     #[tokio::test]
