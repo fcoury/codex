@@ -14,6 +14,7 @@ use crate::state_db;
 use crate::thread_manager::ThreadManagerState;
 use codex_protocol::ThreadId;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
@@ -105,6 +106,9 @@ impl AgentControl {
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
         let inherited_shell_snapshot = self
             .inherited_shell_snapshot_for_source(&state, session_source.as_ref())
+            .await;
+        let inherited_turn_permissions = self
+            .inherited_turn_permissions_for_source(&state, session_source.as_ref())
             .await;
         let session_source = match session_source {
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -211,6 +215,14 @@ impl AgentControl {
         // to subscribe or drain this newly created thread.
         // TODO(jif) add helper for drain
         state.notify_thread_created(new_thread.thread_id);
+        if let Some(inherited_turn_permissions) = inherited_turn_permissions {
+            new_thread
+                .thread
+                .codex
+                .session
+                .seed_inherited_next_turn_permissions(inherited_turn_permissions)
+                .await;
+        }
 
         self.send_input(new_thread.thread_id, items).await?;
         self.maybe_start_completion_watcher(new_thread.thread_id, notification_source);
@@ -485,6 +497,22 @@ impl AgentControl {
         let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
         parent_thread.codex.session.user_shell().shell_snapshot()
     }
+
+    async fn inherited_turn_permissions_for_source(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        session_source: Option<&SessionSource>,
+    ) -> Option<PermissionProfile> {
+        let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        })) = session_source
+        else {
+            return None;
+        };
+
+        let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
+        parent_thread.codex.session.granted_turn_permissions().await
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -499,9 +527,12 @@ mod tests {
     use crate::config_loader::LoaderOverrides;
     use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
     use crate::features::Feature;
+    use crate::state::ActiveTurn;
     use assert_matches::assert_matches;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FileSystemPermissions;
+    use codex_protocol::models::PermissionProfile;
     use codex_protocol::models::ResponseItem;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::EventMsg;
@@ -511,6 +542,7 @@ mod tests {
     use codex_protocol::protocol::TurnAbortedEvent;
     use codex_protocol::protocol::TurnCompleteEvent;
     use codex_protocol::protocol::TurnStartedEvent;
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
     use tokio::time::Duration;
@@ -1100,6 +1132,61 @@ mod tests {
             .submit(Op::Shutdown {})
             .await
             .expect("parent shutdown should submit");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_inherits_parent_turn_permissions_for_first_child_turn() {
+        let harness = AgentControlHarness::new().await;
+        let (parent_thread_id, parent_thread) = harness.start_thread().await;
+        let child_write_root =
+            AbsolutePathBuf::from_absolute_path(harness._home.path().join("testing2"))
+                .expect("temp child write root should be absolute");
+        let expected_permissions = PermissionProfile {
+            file_system: Some(FileSystemPermissions {
+                read: Some(vec![child_write_root.clone()]),
+                write: Some(vec![child_write_root]),
+            }),
+            ..PermissionProfile::default()
+        };
+        let active_turn = ActiveTurn::default();
+        {
+            let mut turn_state = active_turn.turn_state.lock().await;
+            turn_state.record_granted_permissions(expected_permissions.clone());
+        }
+        *parent_thread.codex.session.active_turn.lock().await = Some(active_turn);
+
+        let child_thread_id = harness
+            .control
+            .spawn_agent(
+                harness.config.clone(),
+                text_input("hello child"),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth: 1,
+                    agent_nickname: None,
+                    agent_role: None,
+                })),
+            )
+            .await
+            .expect("child spawn should succeed");
+        let child_thread = harness
+            .manager
+            .get_thread(child_thread_id)
+            .await
+            .expect("child thread should be registered");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if child_thread.codex.session.granted_turn_permissions().await
+                    == Some(expected_permissions.clone())
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("child should inherit parent turn permissions before first turn starts");
     }
 
     #[tokio::test]
