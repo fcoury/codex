@@ -215,6 +215,7 @@ async fn initialize_app_server_client_name(thread: &CodexThread) {
 
 fn in_process_start_args(
     config: &Config,
+    thread_manager: Arc<ThreadManager>,
     arg0_paths: codex_arg0::Arg0DispatchPaths,
     cli_overrides: Vec<(String, TomlValue)>,
     cloud_requirements: CloudRequirementsLoader,
@@ -233,6 +234,7 @@ fn in_process_start_args(
     InProcessClientStartArgs {
         arg0_paths,
         config: Arc::new(config.clone()),
+        thread_manager: Some(thread_manager),
         cli_overrides,
         loader_overrides: LoaderOverrides::default(),
         cloud_requirements,
@@ -1275,21 +1277,37 @@ fn normalize_legacy_notification_method(method: &str) -> &str {
     method.strip_prefix("codex/event/").unwrap_or(method)
 }
 
-fn legacy_notification_to_event(notification: JSONRPCNotification) -> Result<Event, String> {
+struct DecodedLegacyNotification {
+    conversation_id: Option<ThreadId>,
+    event: Event,
+}
+
+fn decode_legacy_notification(
+    notification: JSONRPCNotification,
+) -> Result<DecodedLegacyNotification, String> {
     let value = notification
         .params
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     let method = notification.method;
     let normalized_method = normalize_legacy_notification_method(&method).to_string();
-    let serde_json::Value::Object(object) = value else {
+    let serde_json::Value::Object(mut object) = value else {
         return Err(format!(
             "legacy notification `{method}` params were not an object"
         ));
     };
+    let conversation_id = object
+        .get("conversationId")
+        .and_then(serde_json::Value::as_str)
+        .map(ThreadId::from_string)
+        .transpose()
+        .map_err(|err| {
+            format!("legacy notification `{method}` has invalid conversationId: {err}")
+        })?;
     let mut event_payload = if let Some(serde_json::Value::Object(msg_payload)) = object.get("msg")
     {
         serde_json::Value::Object(msg_payload.clone())
     } else {
+        object.remove("conversationId");
         serde_json::Value::Object(object)
     };
     let serde_json::Value::Object(ref mut object) = event_payload else {
@@ -1304,10 +1322,18 @@ fn legacy_notification_to_event(notification: JSONRPCNotification) -> Result<Eve
 
     let msg: EventMsg = serde_json::from_value(event_payload)
         .map_err(|err| format!("failed to decode event: {err}"))?;
-    Ok(Event {
-        id: String::new(),
-        msg,
+    Ok(DecodedLegacyNotification {
+        conversation_id,
+        event: Event {
+            id: String::new(),
+            msg,
+        },
     })
+}
+
+#[cfg(test)]
+fn legacy_notification_to_event(notification: JSONRPCNotification) -> Result<Event, String> {
+    decode_legacy_notification(notification).map(|decoded| decoded.event)
 }
 
 #[expect(
@@ -2471,13 +2497,14 @@ async fn run_in_process_agent_loop(
                         }
                     }
                     InProcessServerEvent::LegacyNotification(notification) => {
-                        let event = match legacy_notification_to_event(notification) {
-                            Ok(event) => event,
+                        let decoded = match decode_legacy_notification(notification) {
+                            Ok(decoded) => decoded,
                             Err(err) => {
                                 send_warning_event(&app_event_tx, err);
                                 continue;
                             }
                         };
+                        let event = decoded.event;
                         if let EventMsg::SessionConfigured(update) = event.msg {
                             if let Some(merged) =
                                 merge_session_configured_update(&session_configured, update)
@@ -2507,7 +2534,14 @@ async fn run_in_process_agent_loop(
                             pending_shutdown_complete = true;
                             break;
                         }
-                        app_event_tx.send(AppEvent::CodexEvent(event));
+                        match decoded.conversation_id {
+                            Some(thread_id) if thread_id != session_id => {
+                                app_event_tx.send(AppEvent::ThreadEvent { thread_id, event });
+                            }
+                            _ => {
+                                app_event_tx.send(AppEvent::CodexEvent(event));
+                            }
+                        }
                     }
                     InProcessServerEvent::Lagged { skipped } => {
                         send_warning_event(&app_event_tx, lagged_event_warning_message(skipped));
@@ -2541,7 +2575,7 @@ async fn run_in_process_agent_loop(
 pub(crate) fn spawn_agent(
     config: Config,
     app_event_tx: AppEventSender,
-    _server: Arc<ThreadManager>,
+    server: Arc<ThreadManager>,
     in_process_context: InProcessAgentContext,
 ) -> UnboundedSender<Op> {
     let (codex_op_tx, codex_op_rx) = unbounded_channel::<Op>();
@@ -2551,6 +2585,7 @@ pub(crate) fn spawn_agent(
         let mut request_ids = RequestIdSequencer::new();
         let client = match InProcessAppServerClient::start(in_process_start_args(
             &config,
+            server,
             in_process_context.arg0_paths,
             in_process_context.cli_kv_overrides,
             in_process_context.cloud_requirements,
@@ -2659,11 +2694,22 @@ mod tests {
             .expect("config")
     }
 
+    fn test_thread_manager(config: &Config) -> Arc<ThreadManager> {
+        Arc::new(
+            codex_core::test_support::thread_manager_with_models_provider_and_home(
+                codex_core::CodexAuth::from_api_key("test"),
+                config.model_provider.clone(),
+                config.codex_home.clone(),
+            ),
+        )
+    }
+
     async fn assert_realtime_op_reports_expected_method(op: Op, expected_method: &str) {
         let config = test_config().await;
         let session_id = ThreadId::new();
         let client = InProcessAppServerClient::start(in_process_start_args(
             &config,
+            test_thread_manager(&config),
             codex_arg0::Arg0DispatchPaths::default(),
             Vec::new(),
             CloudRequirementsLoader::default(),
@@ -2722,6 +2768,7 @@ mod tests {
         let thread_id = session_id.to_string();
         let client = InProcessAppServerClient::start(in_process_start_args(
             config,
+            test_thread_manager(config),
             codex_arg0::Arg0DispatchPaths::default(),
             Vec::new(),
             CloudRequirementsLoader::default(),
@@ -3009,10 +3056,11 @@ mod tests {
 
     #[test]
     fn legacy_notification_decodes_prefixed_warning_with_event_wrapper_payload() {
+        let thread_id = ThreadId::new();
         let notification = JSONRPCNotification {
             method: "codex/event/warning".to_string(),
             params: Some(serde_json::json!({
-                "conversationId": "thread-1",
+                "conversationId": thread_id.to_string(),
                 "id": "submission-1",
                 "msg": {
                     "message": "wrapped warning",
@@ -3023,6 +3071,28 @@ mod tests {
 
         let event = legacy_notification_to_event(notification).expect("decode wrapped warning");
         let EventMsg::Warning(warning) = event.msg else {
+            panic!("expected warning event");
+        };
+        assert_eq!(warning.message, "wrapped warning".to_string());
+    }
+
+    #[test]
+    fn decode_legacy_notification_preserves_conversation_id() {
+        let thread_id = ThreadId::new();
+        let decoded = decode_legacy_notification(JSONRPCNotification {
+            method: "codex/event/warning".to_string(),
+            params: Some(serde_json::json!({
+                "conversationId": thread_id.to_string(),
+                "msg": {
+                    "message": "wrapped warning",
+                    "type": "warning",
+                },
+            })),
+        })
+        .expect("decode wrapped warning");
+
+        assert_eq!(decoded.conversation_id, Some(thread_id));
+        let EventMsg::Warning(warning) = decoded.event.msg else {
             panic!("expected warning event");
         };
         assert_eq!(warning.message, "wrapped warning".to_string());
@@ -3054,6 +3124,7 @@ mod tests {
         let config = test_config().await;
         let args = in_process_start_args(
             &config,
+            test_thread_manager(&config),
             codex_arg0::Arg0DispatchPaths::default(),
             Vec::new(),
             CloudRequirementsLoader::default(),
@@ -3259,6 +3330,7 @@ mod tests {
         let thread_id = session_id.to_string();
         let client = InProcessAppServerClient::start(in_process_start_args(
             &config,
+            test_thread_manager(&config),
             codex_arg0::Arg0DispatchPaths::default(),
             Vec::new(),
             CloudRequirementsLoader::default(),
@@ -3347,6 +3419,7 @@ mod tests {
         let config = test_config().await;
         let client = InProcessAppServerClient::start(in_process_start_args(
             &config,
+            test_thread_manager(&config),
             codex_arg0::Arg0DispatchPaths::default(),
             Vec::new(),
             CloudRequirementsLoader::default(),

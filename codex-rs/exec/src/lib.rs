@@ -430,6 +430,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let in_process_start_args = InProcessClientStartArgs {
         arg0_paths,
         config: std::sync::Arc::new(config.clone()),
+        thread_manager: None,
         cli_overrides: run_cli_overrides,
         loader_overrides: run_loader_overrides,
         cloud_requirements: run_cloud_requirements,
@@ -769,14 +770,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
         match server_event {
             InProcessServerEvent::ServerRequest(request) => {
-                handle_server_request(
-                    &client,
-                    request,
-                    &config,
-                    &primary_thread_id_for_requests,
-                    &mut error_seen,
-                )
-                .await;
+                handle_server_request(&client, request, &config, &mut error_seen).await;
             }
             InProcessServerEvent::ServerNotification(notification) => {
                 if let ServerNotification::Error(payload) = &notification
@@ -1161,41 +1155,27 @@ async fn handle_server_request(
     client: &InProcessAppServerClient,
     request: ServerRequest,
     config: &Config,
-    thread_id: &str,
     error_seen: &mut bool,
 ) {
     let method = server_request_method_name(&request);
     let handle_result = match request {
-        ServerRequest::McpServerElicitationRequest { request_id, params } => {
-            if params.thread_id != thread_id {
-                reject_server_request(
-                    client,
-                    request_id,
-                    &method,
-                    format!(
-                        "request targets thread `{}`, but active thread is `{thread_id}`",
-                        params.thread_id
-                    ),
-                )
-                .await
-            } else {
-                let response = McpServerElicitationRequestResponse {
-                    action: McpServerElicitationAction::Cancel,
-                    content: None,
-                    meta: None,
-                };
-                match serde_json::to_value(response) {
-                    Ok(value) => {
-                        resolve_server_request(
-                            client,
-                            request_id,
-                            value,
-                            "mcpServer/elicitation/request",
-                        )
-                        .await
-                    }
-                    Err(err) => Err(format!("failed to encode mcp elicitation response: {err}")),
+        ServerRequest::McpServerElicitationRequest { request_id, .. } => {
+            let response = McpServerElicitationRequestResponse {
+                action: McpServerElicitationAction::Cancel,
+                content: None,
+                meta: None,
+            };
+            match serde_json::to_value(response) {
+                Ok(value) => {
+                    resolve_server_request(
+                        client,
+                        request_id,
+                        value,
+                        "mcpServer/elicitation/request",
+                    )
+                    .await
                 }
+                Err(err) => Err(format!("failed to encode mcp elicitation response: {err}")),
             }
         }
         ServerRequest::ChatgptAuthTokensRefresh { request_id, params } => {
