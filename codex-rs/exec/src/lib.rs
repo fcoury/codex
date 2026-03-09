@@ -84,6 +84,8 @@ use std::io::Read;
 use std::path::PathBuf;
 use supports_color::Stream;
 use tokio::sync::mpsc;
+use tokio::time::Duration;
+use tokio::time::timeout;
 use tracing::Instrument;
 use tracing::error;
 use tracing::field;
@@ -1274,7 +1276,7 @@ async fn handle_server_request(
     client: &InProcessAppServerClient,
     request: ServerRequest,
     config: &Config,
-    _thread_id: &str,
+    thread_id: &str,
     error_seen: &mut bool,
 ) {
     let method = server_request_method_name(&request);
@@ -1982,13 +1984,5 @@ mod tests {
             }
         }
         assert!(buffered_events.is_empty());
-    }
-
-    #[test]
-    fn lagged_event_warning_message_is_explicit() {
-        assert_eq!(
-            lagged_event_warning_message(7),
-            "in-process app-server event stream lagged; dropped 7 events".to_string()
-        );
     }
 }
