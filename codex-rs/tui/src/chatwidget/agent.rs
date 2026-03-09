@@ -54,8 +54,6 @@ use codex_app_server_protocol::ThreadRealtimeAppendAudioResponse;
 use codex_app_server_protocol::ThreadRealtimeAppendTextResponse;
 use codex_app_server_protocol::ThreadRealtimeStartResponse;
 use codex_app_server_protocol::ThreadRealtimeStopResponse;
-use codex_app_server_protocol::ThreadResumeParams;
-use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -102,6 +100,7 @@ use codex_protocol::protocol::ReviewTarget as CoreReviewTarget;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::request_user_input::RequestUserInputEvent;
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::unbounded_channel;
 use toml::Value as TomlValue;
@@ -1100,11 +1099,43 @@ where
     })
 }
 
-fn session_configured_from_thread_start_response(
+async fn local_history_metadata(config: &Config) -> (u64, usize) {
+    if config.history.persistence == HistoryPersistence::None {
+        return (0, 0);
+    }
+
+    let path = history_file_path(config);
+    let log_id = match tokio::fs::metadata(&path).await {
+        Ok(metadata) => history_log_id(&metadata),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (0, 0),
+        Err(_) => return (0, 0),
+    };
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(_) => return (log_id, 0),
+    };
+    let mut buf = [0u8; 8192];
+    let mut count = 0usize;
+    loop {
+        match file.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                count += buf[..n].iter().filter(|&&b| b == b'\n').count();
+            }
+            Err(_) => return (log_id, 0),
+        }
+    }
+
+    (log_id, count)
+}
+
+async fn session_configured_from_thread_start_response(
+    config: &Config,
     response: ThreadStartResponse,
 ) -> Result<SessionConfiguredEvent, String> {
     let session_id = ThreadId::from_string(&response.thread.id)
         .map_err(|err| format!("thread/start returned invalid thread id: {err}"))?;
+    let (history_log_id, history_entry_count) = local_history_metadata(config).await;
 
     Ok(SessionConfiguredEvent {
         session_id,
@@ -1117,12 +1148,50 @@ fn session_configured_from_thread_start_response(
         sandbox_policy: response.sandbox.to_core(),
         cwd: response.cwd,
         reasoning_effort: response.reasoning_effort,
-        history_log_id: 0,
-        history_entry_count: 0,
+        history_log_id,
+        history_entry_count,
         initial_messages: None,
         network_proxy: None,
         rollout_path: response.thread.path,
     })
+}
+
+fn thread_sandbox_mode(
+    sandbox_policy: &codex_protocol::protocol::SandboxPolicy,
+) -> codex_app_server_protocol::SandboxMode {
+    match sandbox_policy {
+        codex_protocol::protocol::SandboxPolicy::DangerFullAccess
+        | codex_protocol::protocol::SandboxPolicy::ExternalSandbox { .. } => {
+            codex_app_server_protocol::SandboxMode::DangerFullAccess
+        }
+        codex_protocol::protocol::SandboxPolicy::ReadOnly { .. } => {
+            codex_app_server_protocol::SandboxMode::ReadOnly
+        }
+        codex_protocol::protocol::SandboxPolicy::WorkspaceWrite { .. } => {
+            codex_app_server_protocol::SandboxMode::WorkspaceWrite
+        }
+    }
+}
+
+fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
+    ThreadStartParams {
+        model: config.model.clone(),
+        model_provider: Some(config.model_provider_id.clone()),
+        service_tier: Some(config.service_tier),
+        cwd: Some(config.cwd.to_string_lossy().into_owned()),
+        approval_policy: Some(config.permissions.approval_policy.value().into()),
+        sandbox: Some(thread_sandbox_mode(config.permissions.sandbox_policy.get())),
+        config: None,
+        service_name: None,
+        base_instructions: config.base_instructions.clone(),
+        developer_instructions: config.developer_instructions.clone(),
+        personality: config.personality,
+        ephemeral: None,
+        dynamic_tools: None,
+        mock_experimental_field: None,
+        experimental_raw_events: false,
+        persist_extended_history: false,
+    }
 }
 
 /// Enriches an early synthetic `SessionConfigured` with later authoritative
@@ -2502,7 +2571,7 @@ pub(crate) fn spawn_agent(
             &client,
             ClientRequest::ThreadStart {
                 request_id: request_ids.next(),
-                params: ThreadStartParams::default(),
+                params: thread_start_params_from_config(&config),
             },
             "thread/start",
         )
@@ -2517,15 +2586,16 @@ pub(crate) fn spawn_agent(
             }
         };
 
-        let session_configured = match session_configured_from_thread_start_response(thread_start) {
-            Ok(event) => event,
-            Err(message) => {
-                send_error_event(&app_event_tx_clone, message.clone());
-                app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
-                let _ = client.shutdown().await;
-                return;
-            }
-        };
+        let session_configured =
+            match session_configured_from_thread_start_response(&config, thread_start).await {
+                Ok(event) => event,
+                Err(message) => {
+                    send_error_event(&app_event_tx_clone, message.clone());
+                    app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
+                    let _ = client.shutdown().await;
+                    return;
+                }
+            };
 
         let thread_id = session_configured.session_id.to_string();
         send_codex_event(
@@ -2542,117 +2612,6 @@ pub(crate) fn spawn_agent(
             app_event_tx_clone,
             request_ids,
             None,
-        )
-        .await;
-    });
-
-    codex_op_tx
-}
-
-/// Spawn agent loops for an existing thread (e.g., a forked thread).
-/// Sends the provided `SessionConfiguredEvent` immediately, then forwards subsequent
-/// events and accepts Ops for submission.
-pub(crate) fn spawn_agent_from_existing(
-    config: Config,
-    mut session_configured: codex_protocol::protocol::SessionConfiguredEvent,
-    app_event_tx: AppEventSender,
-    in_process_context: InProcessAgentContext,
-) -> UnboundedSender<Op> {
-    let (codex_op_tx, codex_op_rx) = unbounded_channel::<Op>();
-
-    let app_event_tx_clone = app_event_tx;
-    tokio::spawn(async move {
-        let mut request_ids = RequestIdSequencer::new();
-        let client = match InProcessAppServerClient::start(in_process_start_args(
-            &config,
-            in_process_context.arg0_paths,
-            in_process_context.cli_kv_overrides,
-            in_process_context.cloud_requirements,
-        ))
-        .await
-        {
-            Ok(client) => client,
-            Err(err) => {
-                let message = format!("failed to initialize in-process app-server client: {err}");
-                send_error_event(&app_event_tx_clone, message.clone());
-                app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
-                return;
-            }
-        };
-
-        let expected_thread_id = session_configured.session_id.to_string();
-        let thread_resume = match send_request_with_response::<ThreadResumeResponse>(
-            &client,
-            ClientRequest::ThreadResume {
-                request_id: request_ids.next(),
-                params: ThreadResumeParams {
-                    thread_id: expected_thread_id.clone(),
-                    path: session_configured.rollout_path.clone(),
-                    ..ThreadResumeParams::default()
-                },
-            },
-            "thread/resume",
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                let message = format!("in-process thread resume failed: {err}");
-                send_error_event(&app_event_tx_clone, message.clone());
-                app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
-                let _ = client.shutdown().await;
-                return;
-            }
-        };
-
-        if thread_resume.thread.id != expected_thread_id {
-            match ThreadId::from_string(&thread_resume.thread.id) {
-                Ok(parsed) => {
-                    send_warning_event(
-                        &app_event_tx_clone,
-                        format!(
-                            "in-process thread/resume returned `{}` instead of `{expected_thread_id}`; using resumed id",
-                            thread_resume.thread.id
-                        ),
-                    );
-                    session_configured.session_id = parsed;
-                }
-                Err(err) => {
-                    let message = format!(
-                        "in-process thread/resume returned invalid thread id `{}` ({err})",
-                        thread_resume.thread.id
-                    );
-                    send_error_event(&app_event_tx_clone, message.clone());
-                    app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
-                    let _ = client.shutdown().await;
-                    return;
-                }
-            }
-        }
-
-        if session_configured.thread_name.is_none() {
-            session_configured.thread_name = thread_resume.thread.name;
-        }
-        if session_configured.rollout_path.is_none() {
-            session_configured.rollout_path = thread_resume.thread.path;
-        }
-
-        let thread_id = session_configured.session_id.to_string();
-        let current_turn_id = active_turn_id_from_turns(&thread_resume.thread.turns);
-        send_codex_event(
-            &app_event_tx_clone,
-            EventMsg::SessionConfigured(session_configured.clone()),
-        );
-
-        run_in_process_agent_loop(
-            codex_op_rx,
-            client,
-            config,
-            thread_id,
-            session_configured,
-            app_event_tx_clone,
-            request_ids,
-            current_turn_id,
         )
         .await;
     });
@@ -2933,6 +2892,103 @@ mod tests {
         let merged = merge_session_configured_update(&current, session_configured_event());
 
         assert_eq!(merged.is_none(), true);
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_bootstrap_preserves_local_history_metadata() {
+        let codex_home = TempDir::new().expect("create temp dir");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("config");
+        append_history_entry_local(&config, &ThreadId::new(), "first".to_string())
+            .await
+            .expect("append first history entry");
+        append_history_entry_local(&config, &ThreadId::new(), "second".to_string())
+            .await
+            .expect("append second history entry");
+
+        let (tx, mut rx) = unbounded_channel();
+        let app_event_tx = AppEventSender::new(tx);
+        let thread_manager = Arc::new(
+            codex_core::test_support::thread_manager_with_models_provider_and_home(
+                codex_core::CodexAuth::from_api_key("test"),
+                config.model_provider.clone(),
+                config.codex_home.clone(),
+            ),
+        );
+
+        let codex_op_tx = spawn_agent(
+            config.clone(),
+            app_event_tx,
+            thread_manager,
+            InProcessAgentContext {
+                arg0_paths: codex_arg0::Arg0DispatchPaths::default(),
+                cli_kv_overrides: Vec::new(),
+                cloud_requirements: CloudRequirementsLoader::default(),
+            },
+        );
+
+        let maybe_event = timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timed out waiting for bootstrap app event");
+        let event = maybe_event.expect("expected bootstrap app event");
+        let AppEvent::CodexEvent(event) = event else {
+            panic!("expected bootstrap codex event");
+        };
+        let EventMsg::SessionConfigured(session) = event.msg else {
+            panic!("expected SessionConfigured");
+        };
+        assert_ne!(session.history_log_id, 0);
+        assert_eq!(session.history_entry_count, 2);
+
+        drop(codex_op_tx);
+    }
+
+    #[tokio::test]
+    async fn thread_start_params_from_config_preserves_effective_overrides() {
+        let mut config = test_config().await;
+        config.model = Some("gpt-5-mini".to_string());
+        config.model_provider_id = "test-provider".to_string();
+        config.service_tier = Some(codex_protocol::config_types::ServiceTier::Flex);
+        config.base_instructions = Some("base instructions".to_string());
+        config.developer_instructions = Some("developer instructions".to_string());
+        config.personality = Some(codex_protocol::config_types::Personality::Friendly);
+        config
+            .permissions
+            .approval_policy
+            .set(codex_protocol::protocol::AskForApproval::OnRequest)
+            .expect("set approval policy");
+        config
+            .permissions
+            .sandbox_policy
+            .set(codex_protocol::protocol::SandboxPolicy::new_workspace_write_policy())
+            .expect("set sandbox policy");
+
+        let params = thread_start_params_from_config(&config);
+
+        assert_eq!(
+            params,
+            ThreadStartParams {
+                model: Some("gpt-5-mini".to_string()),
+                model_provider: Some("test-provider".to_string()),
+                service_tier: Some(Some(codex_protocol::config_types::ServiceTier::Flex)),
+                cwd: Some(config.cwd.to_string_lossy().into_owned()),
+                approval_policy: Some(codex_app_server_protocol::AskForApproval::OnRequest),
+                sandbox: Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite),
+                config: None,
+                service_name: None,
+                base_instructions: Some("base instructions".to_string()),
+                developer_instructions: Some("developer instructions".to_string()),
+                personality: Some(codex_protocol::config_types::Personality::Friendly),
+                ephemeral: None,
+                dynamic_tools: None,
+                mock_experimental_field: None,
+                experimental_raw_events: false,
+                persist_extended_history: false,
+            }
+        );
     }
 
     #[test]

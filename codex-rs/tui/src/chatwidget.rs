@@ -271,7 +271,6 @@ mod interrupts;
 use self::interrupts::InterruptManager;
 mod agent;
 use self::agent::spawn_agent;
-use self::agent::spawn_agent_from_existing;
 pub(crate) use self::agent::spawn_op_forwarder;
 mod session_header;
 use self::session_header::SessionHeader;
@@ -3428,7 +3427,7 @@ impl ChatWidget {
     /// Create a ChatWidget attached to an existing conversation (e.g., a fork).
     pub(crate) fn new_from_existing(
         common: ChatWidgetInit,
-        _conversation: std::sync::Arc<codex_core::CodexThread>,
+        conversation: std::sync::Arc<codex_core::CodexThread>,
         session_configured: codex_protocol::protocol::SessionConfiguredEvent,
     ) -> Self {
         let ChatWidgetInit {
@@ -3446,7 +3445,7 @@ impl ChatWidget {
             startup_tooltip_override: _,
             status_line_invalid_items_warned,
             session_telemetry,
-            in_process_context,
+            in_process_context: _,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
@@ -3465,12 +3464,7 @@ impl ChatWidget {
             .unwrap_or(header_model);
 
         let current_cwd = Some(session_configured.cwd.clone());
-        let codex_op_tx = spawn_agent_from_existing(
-            config.clone(),
-            session_configured,
-            app_event_tx.clone(),
-            in_process_context,
-        );
+        let codex_op_tx = spawn_op_forwarder(conversation);
 
         let fallback_default = Settings {
             model: header_model.clone(),

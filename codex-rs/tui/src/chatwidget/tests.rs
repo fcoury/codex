@@ -1753,6 +1753,81 @@ async fn helpers_are_available_and_do_not_panic() {
     let _ = &mut w;
 }
 
+#[tokio::test]
+async fn new_from_existing_submits_ops_to_the_provided_thread() {
+    let codex_home = tempdir().expect("tempdir");
+    let cfg = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("config");
+    let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
+    let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
+    let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
+        CodexAuth::from_api_key("test"),
+        cfg.codex_home.clone(),
+    );
+    let thread_manager = Arc::new(
+        codex_core::test_support::thread_manager_with_models_provider_and_home(
+            CodexAuth::from_api_key("test"),
+            cfg.model_provider.clone(),
+            cfg.codex_home.clone(),
+        ),
+    );
+    let existing = thread_manager
+        .start_thread(cfg.clone())
+        .await
+        .expect("start thread");
+    let init = ChatWidgetInit {
+        config: cfg,
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(unbounded_channel::<AppEvent>().0),
+        initial_user_message: None,
+        enhanced_keys_supported: false,
+        auth_manager,
+        models_manager: thread_manager.get_models_manager(),
+        feedback: codex_feedback::CodexFeedback::new(),
+        is_first_run: false,
+        feedback_audience: FeedbackAudience::External,
+        model: Some(resolved_model),
+        startup_tooltip_override: None,
+        status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+        session_telemetry,
+        in_process_context: InProcessAgentContext {
+            arg0_paths: Arg0DispatchPaths::default(),
+            cli_kv_overrides: Vec::new(),
+            cloud_requirements: CloudRequirementsLoader::default(),
+        },
+    };
+
+    let mut chat =
+        ChatWidget::new_from_existing(init, existing.thread.clone(), existing.session_configured);
+    assert!(chat.submit_op(Op::Shutdown));
+
+    let shutdown_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = existing.thread.next_event().await.expect("thread event");
+            if matches!(event.msg, EventMsg::ShutdownComplete) {
+                break;
+            }
+        }
+    })
+    .await;
+
+    if shutdown_result.is_err() {
+        existing
+            .thread
+            .submit(Op::Shutdown)
+            .await
+            .expect("cleanup shutdown");
+    }
+
+    assert!(
+        shutdown_result.is_ok(),
+        "expected reopened widget to forward shutdown to the provided thread"
+    );
+}
+
 fn test_session_telemetry(config: &Config, model: &str) -> SessionTelemetry {
     let model_info = codex_core::test_support::construct_model_info_offline(model, config);
     SessionTelemetry::new(

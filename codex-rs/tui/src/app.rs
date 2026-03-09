@@ -1774,6 +1774,10 @@ impl App {
         let enhanced_keys_supported = tui.enhanced_keys_supported();
         let wait_for_initial_session_configured =
             Self::should_wait_for_initial_session(&session_selection);
+        let mut existing_primary_thread: Option<(
+            Arc<codex_core::CodexThread>,
+            SessionConfiguredEvent,
+        )> = None;
         let mut chat_widget = match session_selection {
             SessionSelection::StartFresh | SessionSelection::Exit => {
                 let startup_tooltip_override =
@@ -1845,6 +1849,8 @@ impl App {
                         cloud_requirements: cloud_requirements.clone(),
                     },
                 };
+                existing_primary_thread =
+                    Some((resumed.thread.clone(), resumed.session_configured.clone()));
                 ChatWidget::new_from_existing(init, resumed.thread, resumed.session_configured)
             }
             SessionSelection::Fork(target_session) => {
@@ -1887,6 +1893,8 @@ impl App {
                         cloud_requirements: cloud_requirements.clone(),
                     },
                 };
+                existing_primary_thread =
+                    Some((forked.thread.clone(), forked.session_configured.clone()));
                 ChatWidget::new_from_existing(init, forked.thread, forked.session_configured)
             }
         };
@@ -1937,6 +1945,10 @@ impl App {
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
         };
+        if let Some((thread, session_configured)) = existing_primary_thread.take() {
+            app.attach_existing_primary_thread(thread, session_configured)
+                .await;
+        }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
         #[cfg(target_os = "windows")]
@@ -2178,6 +2190,8 @@ impl App {
                         {
                             Ok(resumed) => {
                                 self.shutdown_current_thread().await;
+                                let resumed_thread = resumed.thread.clone();
+                                let resumed_session_configured = resumed.session_configured.clone();
                                 self.config = resume_config;
                                 tui.set_notification_method(self.config.tui_notification_method);
                                 self.file_search.update_search_dir(self.config.cwd.clone());
@@ -2191,6 +2205,11 @@ impl App {
                                     resumed.session_configured,
                                 );
                                 self.reset_thread_event_state();
+                                self.attach_existing_primary_thread(
+                                    resumed_thread,
+                                    resumed_session_configured,
+                                )
+                                .await;
                                 if let Some(summary) = summary {
                                     let mut lines: Vec<Line<'static>> =
                                         vec![summary.usage_line.clone().into()];
@@ -2246,6 +2265,8 @@ impl App {
                         {
                             Ok(forked) => {
                                 self.shutdown_current_thread().await;
+                                let forked_thread = forked.thread.clone();
+                                let forked_session_configured = forked.session_configured.clone();
                                 let init = self.chatwidget_init_for_forked_or_resumed_thread(
                                     tui,
                                     self.config.clone(),
@@ -2256,6 +2277,11 @@ impl App {
                                     forked.session_configured,
                                 );
                                 self.reset_thread_event_state();
+                                self.attach_existing_primary_thread(
+                                    forked_thread,
+                                    forked_session_configured,
+                                )
+                                .await;
                                 if let Some(summary) = summary {
                                     let mut lines: Vec<Line<'static>> =
                                         vec![summary.usage_line.clone().into()];
@@ -3477,6 +3503,39 @@ impl App {
             }
         };
         let config_snapshot = thread.config_snapshot().await;
+        let session_configured = SessionConfiguredEvent {
+            session_id: thread_id,
+            forked_from_id: None,
+            thread_name: None,
+            model: config_snapshot.model,
+            model_provider_id: config_snapshot.model_provider_id,
+            service_tier: config_snapshot.service_tier,
+            approval_policy: config_snapshot.approval_policy,
+            sandbox_policy: config_snapshot.sandbox_policy,
+            cwd: config_snapshot.cwd,
+            reasoning_effort: config_snapshot.reasoning_effort,
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: thread.rollout_path(),
+        };
+        self.register_live_thread(thread, session_configured, false)
+            .await;
+        Ok(())
+    }
+
+    async fn register_live_thread(
+        &mut self,
+        thread: Arc<codex_core::CodexThread>,
+        session_configured: SessionConfiguredEvent,
+        primary: bool,
+    ) {
+        let thread_id = session_configured.session_id;
+        if self.thread_event_channels.contains_key(&thread_id) {
+            return;
+        }
+        let config_snapshot = thread.config_snapshot().await;
         self.upsert_agent_picker_thread(
             thread_id,
             config_snapshot.session_source.get_nickname(),
@@ -3485,23 +3544,7 @@ impl App {
         );
         let event = Event {
             id: String::new(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id: thread_id,
-                forked_from_id: None,
-                thread_name: None,
-                model: config_snapshot.model,
-                model_provider_id: config_snapshot.model_provider_id,
-                service_tier: config_snapshot.service_tier,
-                approval_policy: config_snapshot.approval_policy,
-                sandbox_policy: config_snapshot.sandbox_policy,
-                cwd: config_snapshot.cwd,
-                reasoning_effort: config_snapshot.reasoning_effort,
-                history_log_id: 0,
-                history_entry_count: 0,
-                initial_messages: None,
-                network_proxy: None,
-                rollout_path: thread.rollout_path(),
-            }),
+            msg: EventMsg::SessionConfigured(session_configured.clone()),
         };
         let channel =
             ThreadEventChannel::new_with_session_configured(THREAD_EVENT_CHANNEL_CAPACITY, event);
@@ -3521,7 +3564,25 @@ impl App {
         });
         self.thread_event_listener_tasks
             .insert(thread_id, listener_handle);
-        Ok(())
+        if primary {
+            self.primary_thread_id = Some(thread_id);
+            self.primary_session_configured = Some(session_configured);
+            self.activate_thread_channel(thread_id).await;
+        }
+    }
+
+    async fn attach_existing_primary_thread(
+        &mut self,
+        thread: Arc<codex_core::CodexThread>,
+        session_configured: SessionConfiguredEvent,
+    ) {
+        let event = Event {
+            id: String::new(),
+            msg: EventMsg::SessionConfigured(session_configured.clone()),
+        };
+        self.register_live_thread(thread, session_configured, true)
+            .await;
+        self.handle_codex_event_now(event);
     }
 
     fn reasoning_label(reasoning_effort: Option<ReasoningEffortConfig>) -> &'static str {
