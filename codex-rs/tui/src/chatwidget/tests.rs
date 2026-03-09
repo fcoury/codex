@@ -4561,6 +4561,49 @@ async fn manual_interrupt_restores_pending_steer_mention_bindings_to_composer() 
 }
 
 #[tokio::test]
+async fn manual_interrupt_keeps_pending_mcp_elicitation_overlay_visible() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.on_task_started();
+    chat.bottom_pane.push_mcp_server_elicitation_request(
+        crate::bottom_pane::McpServerElicitationFormRequest::from_event(
+            thread_id,
+            codex_protocol::approvals::ElicitationRequestEvent {
+                turn_id: Some("turn-1".to_string()),
+                server_name: "test-server".to_string(),
+                id: codex_protocol::mcp::RequestId::String("elicitation-1".to_string()),
+                request: codex_protocol::approvals::ElicitationRequest::Form {
+                    meta: None,
+                    message: "Need input".to_string(),
+                    requested_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "answer": { "type": "string", "title": "Answer" }
+                        },
+                        "required": ["answer"]
+                    }),
+                },
+            },
+        )
+        .expect("supported MCP elicitation request"),
+    );
+
+    assert!(
+        chat.has_active_view(),
+        "expected MCP elicitation modal to be visible"
+    );
+
+    chat.on_interrupted_turn(TurnAbortReason::Interrupted);
+
+    assert!(
+        chat.has_active_view(),
+        "interrupting should preserve MCP elicitation overlays that can outlive the turn"
+    );
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
 async fn manual_interrupt_restores_pending_steers_before_queued_messages() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
     chat.thread_id = Some(ThreadId::new());

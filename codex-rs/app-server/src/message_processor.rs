@@ -181,11 +181,16 @@ impl MessageProcessor {
             session_source,
             enable_codex_api_key_env,
         } = args;
-        let auth_manager = AuthManager::shared(
-            config.codex_home.clone(),
-            enable_codex_api_key_env,
-            config.cli_auth_credentials_store_mode,
-        );
+        let auth_manager = thread_manager
+            .as_ref()
+            .map(|thread_manager| thread_manager.auth_manager())
+            .unwrap_or_else(|| {
+                AuthManager::shared(
+                    config.codex_home.clone(),
+                    enable_codex_api_key_env,
+                    config.cli_auth_credentials_store_mode,
+                )
+            });
         auth_manager.set_forced_chatgpt_workspace_id(config.forced_chatgpt_workspace_id.clone());
         auth_manager.set_external_auth_refresher(Arc::new(ExternalAuthRefreshBridge {
             outgoing: outgoing.clone(),
@@ -647,5 +652,53 @@ impl MessageProcessor {
             Ok(response) => self.outgoing.send_response(request_id, response).await,
             Err(error) => self.outgoing.send_error(request_id, error).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::outgoing_message::OutgoingMessageSender;
+    use codex_arg0::Arg0DispatchPaths;
+    use codex_core::test_support::thread_manager_with_models_provider_and_home;
+    use codex_feedback::CodexFeedback;
+    use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn provided_thread_manager_reuses_auth_manager() {
+        let config = codex_core::config::ConfigBuilder::default()
+            .build()
+            .await
+            .expect("config");
+        let thread_manager = Arc::new(thread_manager_with_models_provider_and_home(
+            codex_core::CodexAuth::from_api_key("test"),
+            config.model_provider.clone(),
+            config.codex_home.clone(),
+        ));
+        let expected_auth_manager = thread_manager.auth_manager();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
+        let processor = MessageProcessor::new(MessageProcessorArgs {
+            outgoing,
+            arg0_paths: Arg0DispatchPaths::default(),
+            config: Arc::new(config),
+            thread_manager: Some(thread_manager),
+            cli_overrides: Vec::new(),
+            loader_overrides: LoaderOverrides::default(),
+            cloud_requirements: CloudRequirementsLoader::default(),
+            feedback: CodexFeedback::new(),
+            log_db: None,
+            config_warnings: Vec::new(),
+            session_source: SessionSource::Cli,
+            enable_codex_api_key_env: false,
+        });
+
+        assert_eq!(
+            Arc::ptr_eq(
+                &processor.codex_message_processor.auth_manager_for_tests(),
+                &expected_auth_manager
+            ),
+            true
+        );
     }
 }

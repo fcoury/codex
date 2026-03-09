@@ -820,13 +820,16 @@ impl BottomPane {
         }
     }
 
-    pub(crate) fn dismiss_all_views(&mut self) {
+    pub(crate) fn dismiss_turn_scoped_views(&mut self) {
         if self.view_stack.is_empty() {
             return;
         }
 
-        self.view_stack.clear();
-        self.on_active_view_complete();
+        self.view_stack
+            .retain(|view| view.preserve_on_turn_interrupt());
+        if self.view_stack.is_empty() {
+            self.on_active_view_complete();
+        }
         self.request_redraw();
     }
 

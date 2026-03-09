@@ -1234,6 +1234,10 @@ impl Renderable for McpServerElicitationOverlay {
 }
 
 impl BottomPaneView for McpServerElicitationOverlay {
+    fn preserve_on_turn_interrupt(&self) -> bool {
+        true
+    }
+
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
     }

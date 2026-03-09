@@ -498,6 +498,11 @@ impl CodexMessageProcessor {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn auth_manager_for_tests(&self) -> Arc<AuthManager> {
+        self.auth_manager.clone()
+    }
+
     async fn load_latest_config(
         &self,
         fallback_cwd: Option<PathBuf>,

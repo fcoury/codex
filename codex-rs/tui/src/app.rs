@@ -702,6 +702,7 @@ pub(crate) struct App {
 
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
+    active_session_events_via_app_server: bool,
     agent_picker_threads: HashMap<ThreadId, AgentPickerThreadEntry>,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<Event>>,
@@ -1563,6 +1564,7 @@ impl App {
             },
         };
         self.chat_widget = ChatWidget::new(init, self.server.clone());
+        self.active_session_events_via_app_server = true;
         self.reset_thread_event_state();
         if let Some(summary) = summary {
             let mut lines: Vec<Line<'static>> = vec![summary.usage_line.clone().into()];
@@ -1938,6 +1940,7 @@ impl App {
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
+            active_session_events_via_app_server: true,
             agent_picker_threads: HashMap::new(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -3520,8 +3523,13 @@ impl App {
             network_proxy: None,
             rollout_path: thread.rollout_path(),
         };
-        self.register_live_thread(thread, session_configured, false)
-            .await;
+        self.register_live_thread(
+            thread,
+            session_configured,
+            false,
+            !self.active_session_events_via_app_server,
+        )
+        .await;
         Ok(())
     }
 
@@ -3530,6 +3538,7 @@ impl App {
         thread: Arc<codex_core::CodexThread>,
         session_configured: SessionConfiguredEvent,
         primary: bool,
+        spawn_listener: bool,
     ) {
         let thread_id = session_configured.session_id;
         if self.thread_event_channels.contains_key(&thread_id) {
@@ -3548,22 +3557,24 @@ impl App {
         };
         let channel =
             ThreadEventChannel::new_with_session_configured(THREAD_EVENT_CHANNEL_CAPACITY, event);
-        let app_event_tx = self.app_event_tx.clone();
         self.thread_event_channels.insert(thread_id, channel);
-        let listener_handle = tokio::spawn(async move {
-            loop {
-                let event = match thread.next_event().await {
-                    Ok(event) => event,
-                    Err(err) => {
-                        tracing::debug!("external thread {thread_id} listener stopped: {err}");
-                        break;
-                    }
-                };
-                app_event_tx.send(AppEvent::ThreadEvent { thread_id, event });
-            }
-        });
-        self.thread_event_listener_tasks
-            .insert(thread_id, listener_handle);
+        if spawn_listener {
+            let app_event_tx = self.app_event_tx.clone();
+            let listener_handle = tokio::spawn(async move {
+                loop {
+                    let event = match thread.next_event().await {
+                        Ok(event) => event,
+                        Err(err) => {
+                            tracing::debug!("external thread {thread_id} listener stopped: {err}");
+                            break;
+                        }
+                    };
+                    app_event_tx.send(AppEvent::ThreadEvent { thread_id, event });
+                }
+            });
+            self.thread_event_listener_tasks
+                .insert(thread_id, listener_handle);
+        }
         if primary {
             self.primary_thread_id = Some(thread_id);
             self.primary_session_configured = Some(session_configured);
@@ -3576,11 +3587,12 @@ impl App {
         thread: Arc<codex_core::CodexThread>,
         session_configured: SessionConfiguredEvent,
     ) {
+        self.active_session_events_via_app_server = false;
         let event = Event {
             id: String::new(),
             msg: EventMsg::SessionConfigured(session_configured.clone()),
         };
-        self.register_live_thread(thread, session_configured, true)
+        self.register_live_thread(thread, session_configured, true, true)
             .await;
         self.handle_codex_event_now(event);
     }
@@ -4136,6 +4148,30 @@ mod tests {
             .await
             .expect("timed out waiting for listener task abort")
             .expect("listener task drop notification should succeed");
+    }
+
+    #[tokio::test]
+    async fn app_server_managed_thread_creation_does_not_spawn_direct_listener() -> Result<()> {
+        let mut app = make_test_app().await;
+        let created = app
+            .server
+            .start_thread(app.config.clone())
+            .await
+            .expect("start thread");
+        app.active_session_events_via_app_server = true;
+
+        app.handle_thread_created(created.thread_id).await?;
+
+        assert!(
+            app.thread_event_channels.contains_key(&created.thread_id),
+            "new thread should still get a replay channel"
+        );
+        assert!(
+            !app.thread_event_listener_tasks
+                .contains_key(&created.thread_id),
+            "app-server-managed threads should not start a competing next_event listener"
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -5566,6 +5602,7 @@ mod tests {
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
+            active_session_events_via_app_server: false,
             agent_picker_threads: HashMap::new(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -5628,6 +5665,7 @@ mod tests {
                 windows_sandbox: WindowsSandboxState::default(),
                 thread_event_channels: HashMap::new(),
                 thread_event_listener_tasks: HashMap::new(),
+                active_session_events_via_app_server: false,
                 agent_picker_threads: HashMap::new(),
                 active_thread_id: None,
                 active_thread_rx: None,
