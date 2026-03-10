@@ -442,7 +442,6 @@ impl MessageProcessor {
     pub(crate) async fn shutdown_threads(&self) {
         self.codex_message_processor.shutdown_threads().await;
     }
-
     pub(crate) async fn connection_closed(&mut self, connection_id: ConnectionId) {
         self.outgoing.connection_closed(connection_id).await;
         self.codex_message_processor
