@@ -1082,14 +1082,18 @@ impl AuthManager {
         self.inner.read().ok().and_then(|c| c.auth.clone())
     }
 
-    fn current_external_auth_override(
-        &self,
-    ) -> Option<(Arc<dyn ExternalAuthRefresher>, Option<String>)> {
-        self.external_auth_overrides.read().ok().and_then(|guard| {
-            guard
-                .last()
-                .map(|entry| (entry.refresher.clone(), entry.forced_workspace_id.clone()))
-        })
+    fn current_external_auth_override(&self) -> Option<Arc<dyn ExternalAuthRefresher>> {
+        self.external_auth_overrides
+            .read()
+            .ok()
+            .and_then(|guard| guard.last().map(|entry| entry.refresher.clone()))
+    }
+
+    fn base_forced_chatgpt_workspace_id(&self) -> Option<String> {
+        self.forced_chatgpt_workspace_id
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     fn remove_external_auth_override(&self, id: u64) {
@@ -1246,13 +1250,15 @@ impl AuthManager {
     }
 
     pub fn forced_chatgpt_workspace_id(&self) -> Option<String> {
-        if let Some((_, forced_workspace_id)) = self.current_external_auth_override() {
-            return forced_workspace_id;
+        if let Ok(guard) = self.external_auth_overrides.read()
+            && let Some(workspace_id) = guard
+                .iter()
+                .rev()
+                .find_map(|entry| entry.forced_workspace_id.clone())
+        {
+            return Some(workspace_id);
         }
-        self.forced_chatgpt_workspace_id
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone())
+        self.base_forced_chatgpt_workspace_id()
     }
 
     pub fn has_external_auth_refresher(&self) -> bool {
@@ -1395,8 +1401,8 @@ impl AuthManager {
         reason: ExternalAuthRefreshReason,
     ) -> Result<(), RefreshTokenError> {
         let (refresher, forced_chatgpt_workspace_id) =
-            if let Some((refresher, forced_workspace_id)) = self.current_external_auth_override() {
-                (Some(refresher), forced_workspace_id)
+            if let Some(refresher) = self.current_external_auth_override() {
+                (Some(refresher), self.forced_chatgpt_workspace_id())
             } else {
                 let refresher = match self.inner.read() {
                     Ok(guard) => guard.external_refresher.clone(),
@@ -1487,6 +1493,18 @@ mod tests {
     use serde::Serialize;
     use serde_json::json;
     use tempfile::tempdir;
+
+    struct NoopExternalAuthRefresher;
+
+    #[async_trait]
+    impl ExternalAuthRefresher for NoopExternalAuthRefresher {
+        async fn refresh(
+            &self,
+            _context: ExternalAuthRefreshContext,
+        ) -> std::io::Result<ExternalAuthTokens> {
+            unreachable!("test refresher should never be called")
+        }
+    }
 
     #[tokio::test]
     async fn refresh_without_id_token() {
@@ -1902,5 +1920,40 @@ mod tests {
             .expect("auth available");
 
         pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::Unknown));
+    }
+
+    #[test]
+    fn nested_external_auth_override_inherits_lower_workspace_when_unset() {
+        let codex_home = tempdir().unwrap();
+        let auth_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            false,
+            AuthCredentialsStoreMode::File,
+        );
+        auth_manager.set_forced_chatgpt_workspace_id(Some("workspace-base".to_string()));
+
+        let outer_guard = auth_manager.push_external_auth_override(
+            Arc::new(NoopExternalAuthRefresher),
+            Some("workspace-outer".to_string()),
+        );
+        let inner_guard =
+            auth_manager.push_external_auth_override(Arc::new(NoopExternalAuthRefresher), None);
+
+        assert_eq!(
+            auth_manager.forced_chatgpt_workspace_id(),
+            Some("workspace-outer".to_string())
+        );
+
+        drop(inner_guard);
+        assert_eq!(
+            auth_manager.forced_chatgpt_workspace_id(),
+            Some("workspace-outer".to_string())
+        );
+
+        drop(outer_guard);
+        assert_eq!(
+            auth_manager.forced_chatgpt_workspace_id(),
+            Some("workspace-base".to_string())
+        );
     }
 }
