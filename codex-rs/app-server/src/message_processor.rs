@@ -389,6 +389,10 @@ impl MessageProcessor {
             .await;
     }
 
+    pub(crate) fn thread_manager(&self) -> &Arc<ThreadManager> {
+        self.codex_message_processor.thread_manager()
+    }
+
     pub(crate) async fn connection_closed(&mut self, connection_id: ConnectionId) {
         self.codex_message_processor
             .connection_closed(connection_id)
