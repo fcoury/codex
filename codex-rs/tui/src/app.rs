@@ -177,9 +177,23 @@ pub enum ExitReason {
     Fatal(String),
 }
 
+/// Selects which transport the TUI uses to communicate with the agent backend.
+///
+/// `Direct` drives the `CodexThread` event loop in-process without an
+/// intermediate app-server layer; this is the production default. `AppServer`
+/// interposes an in-process app-server client so that the TUI communicates
+/// through the full `ClientRequest`/`ServerResponse` protocol, which is needed
+/// for features that rely on thread-scoped operations (resume, fork,
+/// background terminals, etc.) being managed server-side.
+///
+/// The mode is selected once at startup via the `--app-server` CLI flag and
+/// remains constant for the lifetime of the process; every `ChatWidget`
+/// created during the session inherits the same mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TuiRuntimeMode {
+    /// Communicate directly with `CodexThread` — no app-server intermediary.
     Direct,
+    /// Route all operations through the in-process app-server client.
     AppServer,
 }
 
@@ -1766,6 +1780,15 @@ impl App {
         self.sync_active_agent_label();
     }
 
+    /// Derive the primary event-routing flags from the current `ChatWidget`.
+    ///
+    /// In `AppServer` mode the widget owns a `thread_scoped_op_tx` channel,
+    /// so `active_session_events_via_app_server` becomes `true` and events
+    /// are routed through the app-server protocol.  In `Direct` mode the
+    /// sender is `None` and events flow through the `CodexThread` directly.
+    ///
+    /// Call this after constructing or replacing `self.chat_widget` so the
+    /// two flags stay consistent.
     fn sync_primary_runtime_transport_state(&mut self) {
         self.primary_app_server_op_tx = self.chat_widget.thread_scoped_op_sender();
         self.active_session_events_via_app_server = self.primary_app_server_op_tx.is_some();
