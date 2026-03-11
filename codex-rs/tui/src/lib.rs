@@ -220,6 +220,7 @@ pub mod test_backend;
 use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
 use crate::onboarding::onboarding_screen::run_onboarding_app;
 use crate::tui::Tui;
+use app::TuiRuntimeMode;
 pub use cli::Cli;
 use codex_arg0::Arg0DispatchPaths;
 pub use markdown_render::render_markdown_text;
@@ -540,6 +541,12 @@ async fn run_ratatui_app(
     feedback: codex_feedback::CodexFeedback,
 ) -> color_eyre::Result<AppExitInfo> {
     color_eyre::install()?;
+
+    let runtime_mode = if cli.app_server {
+        TuiRuntimeMode::AppServer
+    } else {
+        TuiRuntimeMode::Direct
+    };
 
     tooltips::announcement::prewarm();
 
@@ -916,6 +923,7 @@ async fn run_ratatui_app(
         prompt,
         images,
         no_alt_screen,
+        app_server: _,
         ..
     } = cli;
 
@@ -924,6 +932,7 @@ async fn run_ratatui_app(
 
     let app_result = App::run(
         &mut tui,
+        runtime_mode,
         auth_manager,
         config,
         arg0_paths,
