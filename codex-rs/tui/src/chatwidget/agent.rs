@@ -71,11 +71,15 @@ use codex_app_server_protocol::SkillsRemoteReadResponse;
 use codex_app_server_protocol::SkillsRemoteWriteResponse;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanResponse;
 use codex_app_server_protocol::ThreadCompactStartResponse;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadRealtimeAppendAudioResponse;
 use codex_app_server_protocol::ThreadRealtimeAppendTextResponse;
 use codex_app_server_protocol::ThreadRealtimeStartResponse;
 use codex_app_server_protocol::ThreadRealtimeStopResponse;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -90,6 +94,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_core::CodexThread;
+use codex_core::NewThread;
 use codex_core::ThreadManager;
 use codex_core::auth::AuthManager;
 use codex_core::config::Config;
@@ -387,6 +392,13 @@ pub(crate) struct ThreadScopedOp {
     /// The active turn ID at the time the op was created, used for interrupt
     /// requests that need to identify which turn to cancel.
     pub(crate) interrupt_turn_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum AppServerBootstrap {
+    StartFresh,
+    Resume { thread_id: ThreadId, path: PathBuf },
+    Fork { thread_id: ThreadId, path: PathBuf },
 }
 
 impl PendingServerRequests {
@@ -1528,17 +1540,74 @@ async fn local_history_metadata(config: &Config) -> (u64, usize) {
     (log_id, count)
 }
 
-async fn session_configured_from_thread_start_response(
+struct ThreadBootstrapState {
+    thread: codex_app_server_protocol::Thread,
+    model: String,
+    model_provider: String,
+    service_tier: Option<codex_protocol::config_types::ServiceTier>,
+    cwd: PathBuf,
+    approval_policy: codex_app_server_protocol::AskForApproval,
+    sandbox: codex_app_server_protocol::SandboxPolicy,
+    reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+}
+
+impl From<ThreadStartResponse> for ThreadBootstrapState {
+    fn from(value: ThreadStartResponse) -> Self {
+        Self {
+            thread: value.thread,
+            model: value.model,
+            model_provider: value.model_provider,
+            service_tier: value.service_tier,
+            cwd: value.cwd,
+            approval_policy: value.approval_policy,
+            sandbox: value.sandbox,
+            reasoning_effort: value.reasoning_effort,
+        }
+    }
+}
+
+impl From<ThreadResumeResponse> for ThreadBootstrapState {
+    fn from(value: ThreadResumeResponse) -> Self {
+        Self {
+            thread: value.thread,
+            model: value.model,
+            model_provider: value.model_provider,
+            service_tier: value.service_tier,
+            cwd: value.cwd,
+            approval_policy: value.approval_policy,
+            sandbox: value.sandbox,
+            reasoning_effort: value.reasoning_effort,
+        }
+    }
+}
+
+impl From<ThreadForkResponse> for ThreadBootstrapState {
+    fn from(value: ThreadForkResponse) -> Self {
+        Self {
+            thread: value.thread,
+            model: value.model,
+            model_provider: value.model_provider,
+            service_tier: value.service_tier,
+            cwd: value.cwd,
+            approval_policy: value.approval_policy,
+            sandbox: value.sandbox,
+            reasoning_effort: value.reasoning_effort,
+        }
+    }
+}
+
+async fn session_configured_from_thread_bootstrap(
     config: &Config,
-    response: ThreadStartResponse,
+    response: ThreadBootstrapState,
+    forked_from_id: Option<ThreadId>,
 ) -> Result<SessionConfiguredEvent, String> {
     let session_id = ThreadId::from_string(&response.thread.id)
-        .map_err(|err| format!("thread/start returned invalid thread id: {err}"))?;
+        .map_err(|err| format!("thread bootstrap returned invalid thread id: {err}"))?;
     let (history_log_id, history_entry_count) = local_history_metadata(config).await;
 
     Ok(SessionConfiguredEvent {
         session_id,
-        forked_from_id: None,
+        forked_from_id,
         thread_name: response.thread.name,
         model: response.model,
         model_provider_id: response.model_provider,
@@ -1589,6 +1658,51 @@ fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
         dynamic_tools: None,
         mock_experimental_field: None,
         experimental_raw_events: false,
+        persist_extended_history: false,
+    }
+}
+
+fn thread_resume_params_from_config(
+    config: &Config,
+    thread_id: ThreadId,
+    path: PathBuf,
+) -> ThreadResumeParams {
+    ThreadResumeParams {
+        thread_id: thread_id.to_string(),
+        history: None,
+        path: Some(path),
+        model: config.model.clone(),
+        model_provider: Some(config.model_provider_id.clone()),
+        service_tier: Some(config.service_tier),
+        cwd: Some(config.cwd.to_string_lossy().into_owned()),
+        approval_policy: Some(config.permissions.approval_policy.value().into()),
+        sandbox: Some(thread_sandbox_mode(config.permissions.sandbox_policy.get())),
+        config: None,
+        base_instructions: config.base_instructions.clone(),
+        developer_instructions: config.developer_instructions.clone(),
+        personality: config.personality,
+        persist_extended_history: false,
+    }
+}
+
+fn thread_fork_params_from_config(
+    config: &Config,
+    thread_id: ThreadId,
+    path: PathBuf,
+) -> ThreadForkParams {
+    ThreadForkParams {
+        thread_id: thread_id.to_string(),
+        path: Some(path),
+        model: config.model.clone(),
+        model_provider: Some(config.model_provider_id.clone()),
+        service_tier: Some(config.service_tier),
+        cwd: Some(config.cwd.to_string_lossy().into_owned()),
+        approval_policy: Some(config.permissions.approval_policy.value().into()),
+        sandbox: Some(thread_sandbox_mode(config.permissions.sandbox_policy.get())),
+        config: None,
+        base_instructions: config.base_instructions.clone(),
+        developer_instructions: config.developer_instructions.clone(),
+        ephemeral: false,
         persist_extended_history: false,
     }
 }
@@ -3124,7 +3238,64 @@ pub(crate) fn spawn_agent(
     config: Config,
     app_event_tx: AppEventSender,
     server: Arc<ThreadManager>,
+) -> UnboundedSender<Op> {
+    let (codex_op_tx, mut codex_op_rx) = unbounded_channel::<Op>();
+
+    let app_event_tx_clone = app_event_tx;
+    tokio::spawn(async move {
+        let NewThread {
+            thread,
+            session_configured,
+            ..
+        } = match server.start_thread(config).await {
+            Ok(v) => v,
+            Err(err) => {
+                let message = format!("Failed to initialize codex: {err}");
+                tracing::error!("{message}");
+                app_event_tx_clone.send(AppEvent::CodexEvent(Event {
+                    id: String::new(),
+                    msg: EventMsg::Error(err.to_error_event(None)),
+                }));
+                app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
+                return;
+            }
+        };
+        initialize_app_server_client_name(thread.as_ref()).await;
+
+        app_event_tx_clone.send(AppEvent::CodexEvent(Event {
+            id: String::new(),
+            msg: EventMsg::SessionConfigured(session_configured),
+        }));
+
+        let thread_clone = thread.clone();
+        tokio::spawn(async move {
+            while let Some(op) = codex_op_rx.recv().await {
+                if let Err(err) = thread_clone.submit(op).await {
+                    tracing::error!("failed to submit op: {err}");
+                }
+            }
+        });
+
+        while let Ok(event) = thread.next_event().await {
+            let is_shutdown_complete = matches!(event.msg, EventMsg::ShutdownComplete);
+            app_event_tx_clone.send(AppEvent::CodexEvent(event));
+            if is_shutdown_complete {
+                break;
+            }
+        }
+    });
+
+    codex_op_tx
+}
+
+/// Spawn the agent bootstrapper and app-server forwarding loop, returning the
+/// `UnboundedSender<Op>` used by the UI to submit operations.
+pub(crate) fn spawn_app_server_agent(
+    config: Config,
+    app_event_tx: AppEventSender,
+    server: Arc<ThreadManager>,
     in_process_context: InProcessAgentContext,
+    bootstrap: AppServerBootstrap,
 ) -> (UnboundedSender<Op>, UnboundedSender<ThreadScopedOp>) {
     let (codex_op_tx, codex_op_rx) = unbounded_channel::<Op>();
     let (thread_scoped_op_tx, thread_scoped_op_rx) = unbounded_channel::<ThreadScopedOp>();
@@ -3152,37 +3323,123 @@ pub(crate) fn spawn_agent(
             }
         };
 
-        let thread_start = match send_request_with_response::<ThreadStartResponse>(
-            &client,
-            ClientRequest::ThreadStart {
-                request_id: request_ids.next(),
-                params: thread_start_params_from_config(&config),
-            },
-            "thread/start",
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                send_error_event(&app_event_tx_clone, err.clone());
-                app_event_tx_clone.send(AppEvent::FatalExitRequest(err));
-                let _ = client.shutdown().await;
-                return;
+        let (thread_id, session_configured) = match bootstrap {
+            AppServerBootstrap::StartFresh => {
+                let thread_start = match send_request_with_response::<ThreadStartResponse>(
+                    &client,
+                    ClientRequest::ThreadStart {
+                        request_id: request_ids.next(),
+                        params: thread_start_params_from_config(&config),
+                    },
+                    "thread/start",
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        send_error_event(&app_event_tx_clone, err.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(err));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                };
+                let thread_id = thread_start.thread.id.clone();
+                let session_configured = match session_configured_from_thread_bootstrap(
+                    &config,
+                    thread_start.into(),
+                    None,
+                )
+                .await
+                {
+                    Ok(event) => event,
+                    Err(message) => {
+                        send_error_event(&app_event_tx_clone, message.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                };
+                (thread_id, session_configured)
+            }
+            AppServerBootstrap::Resume { thread_id, path } => {
+                let thread_resume = match send_request_with_response::<ThreadResumeResponse>(
+                    &client,
+                    ClientRequest::ThreadResume {
+                        request_id: request_ids.next(),
+                        params: thread_resume_params_from_config(&config, thread_id, path),
+                    },
+                    "thread/resume",
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        send_error_event(&app_event_tx_clone, err.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(err));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                };
+                let thread_id = thread_resume.thread.id.clone();
+                let session_configured = match session_configured_from_thread_bootstrap(
+                    &config,
+                    thread_resume.into(),
+                    None,
+                )
+                .await
+                {
+                    Ok(event) => event,
+                    Err(message) => {
+                        send_error_event(&app_event_tx_clone, message.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                };
+                (thread_id, session_configured)
+            }
+            AppServerBootstrap::Fork {
+                thread_id: source_thread_id,
+                path,
+            } => {
+                let thread_fork = match send_request_with_response::<ThreadForkResponse>(
+                    &client,
+                    ClientRequest::ThreadFork {
+                        request_id: request_ids.next(),
+                        params: thread_fork_params_from_config(&config, source_thread_id, path),
+                    },
+                    "thread/fork",
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        send_error_event(&app_event_tx_clone, err.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(err));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                };
+                let thread_id = thread_fork.thread.id.clone();
+                let session_configured = match session_configured_from_thread_bootstrap(
+                    &config,
+                    thread_fork.into(),
+                    Some(source_thread_id),
+                )
+                .await
+                {
+                    Ok(event) => event,
+                    Err(message) => {
+                        send_error_event(&app_event_tx_clone, message.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                };
+                (thread_id, session_configured)
             }
         };
 
-        let session_configured =
-            match session_configured_from_thread_start_response(&config, thread_start).await {
-                Ok(event) => event,
-                Err(message) => {
-                    send_error_event(&app_event_tx_clone, message.clone());
-                    app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
-                    let _ = client.shutdown().await;
-                    return;
-                }
-            };
-
-        let thread_id = session_configured.session_id.to_string();
         send_codex_event(
             &app_event_tx_clone,
             EventMsg::SessionConfigured(session_configured.clone()),
@@ -4180,7 +4437,7 @@ mod tests {
             ),
         );
 
-        let (codex_op_tx, _thread_scoped_op_tx) = spawn_agent(
+        let (codex_op_tx, _thread_scoped_op_tx) = spawn_app_server_agent(
             config.clone(),
             app_event_tx,
             thread_manager,
@@ -4189,6 +4446,7 @@ mod tests {
                 cli_kv_overrides: Vec::new(),
                 cloud_requirements: CloudRequirementsLoader::default(),
             },
+            AppServerBootstrap::StartFresh,
         );
 
         let maybe_event = timeout(Duration::from_secs(10), rx.recv())
@@ -4849,7 +5107,7 @@ mod tests {
         .await
         .expect("thread/start");
         let session_configured =
-            session_configured_from_thread_start_response(&config, thread_start)
+            session_configured_from_thread_bootstrap(&config, thread_start.into(), None)
                 .await
                 .expect("session configured");
         let thread_id = session_configured.session_id.to_string();

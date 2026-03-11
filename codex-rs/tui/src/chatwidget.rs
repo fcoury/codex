@@ -273,9 +273,11 @@ use crate::tui::FrameRequester;
 mod interrupts;
 use self::interrupts::InterruptManager;
 mod agent;
+use self::agent::AppServerBootstrap;
 pub(crate) use self::agent::ThreadScopedOp;
 use self::agent::spawn_agent;
 pub(crate) use self::agent::spawn_op_forwarder;
+use self::agent::spawn_app_server_agent;
 mod session_header;
 use self::session_header::SessionHeader;
 mod skills;
@@ -3258,195 +3260,61 @@ impl ChatWidget {
     }
 
     pub(crate) fn new(common: ChatWidgetInit, thread_manager: Arc<ThreadManager>) -> Self {
-        let ChatWidgetInit {
+        let config = common.config.clone();
+        let app_event_tx = common.app_event_tx.clone();
+        let codex_op_tx = spawn_agent(config, app_event_tx, thread_manager);
+        Self::new_with_op_sender(common, codex_op_tx, None, None)
+    }
+
+    pub(crate) fn new_app_server(
+        common: ChatWidgetInit,
+        thread_manager: Arc<ThreadManager>,
+    ) -> Self {
+        Self::new_app_server_with_bootstrap(common, thread_manager, AppServerBootstrap::StartFresh)
+    }
+
+    pub(crate) fn new_app_server_from_resume(
+        common: ChatWidgetInit,
+        thread_manager: Arc<ThreadManager>,
+        thread_id: ThreadId,
+        path: PathBuf,
+    ) -> Self {
+        Self::new_app_server_with_bootstrap(
+            common,
+            thread_manager,
+            AppServerBootstrap::Resume { thread_id, path },
+        )
+    }
+
+    pub(crate) fn new_app_server_from_fork(
+        common: ChatWidgetInit,
+        thread_manager: Arc<ThreadManager>,
+        thread_id: ThreadId,
+        path: PathBuf,
+    ) -> Self {
+        Self::new_app_server_with_bootstrap(
+            common,
+            thread_manager,
+            AppServerBootstrap::Fork { thread_id, path },
+        )
+    }
+
+    fn new_app_server_with_bootstrap(
+        common: ChatWidgetInit,
+        thread_manager: Arc<ThreadManager>,
+        bootstrap: AppServerBootstrap,
+    ) -> Self {
+        let in_process_context = common.in_process_context.clone();
+        let config = common.config.clone();
+        let app_event_tx = common.app_event_tx.clone();
+        let (codex_op_tx, thread_scoped_op_tx) = spawn_app_server_agent(
             config,
-            frame_requester,
             app_event_tx,
-            initial_user_message,
-            enhanced_keys_supported,
-            auth_manager,
-            models_manager,
-            feedback,
-            is_first_run,
-            feedback_audience,
-            model,
-            startup_tooltip_override,
-            status_line_invalid_items_warned,
-            session_telemetry,
-            in_process_context,
-        } = common;
-        let model = model.filter(|m| !m.trim().is_empty());
-        let mut config = config;
-        config.model = model.clone();
-        let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
-        let mut rng = rand::rng();
-        let placeholder = PLACEHOLDERS[rng.random_range(0..PLACEHOLDERS.len())].to_string();
-        let (codex_op_tx, thread_scoped_op_tx) = spawn_agent(
-            config.clone(),
-            app_event_tx.clone(),
             thread_manager,
             in_process_context,
+            bootstrap,
         );
-
-        let model_override = model.as_deref();
-        let model_for_header = model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL_DISPLAY_NAME.to_string());
-        let active_collaboration_mask =
-            Self::initial_collaboration_mask(&config, models_manager.as_ref(), model_override);
-        let header_model = active_collaboration_mask
-            .as_ref()
-            .and_then(|mask| mask.model.clone())
-            .unwrap_or_else(|| model_for_header.clone());
-        let fallback_default = Settings {
-            model: header_model.clone(),
-            reasoning_effort: None,
-            developer_instructions: None,
-        };
-        // Collaboration modes start in Default mode.
-        let current_collaboration_mode = CollaborationMode {
-            mode: ModeKind::Default,
-            settings: fallback_default,
-        };
-
-        let active_cell = Some(Self::placeholder_session_header_cell(&config));
-
-        let current_cwd = Some(config.cwd.clone());
-        let queued_message_edit_binding =
-            queued_message_edit_binding_for_terminal(terminal_info().name);
-        let mut widget = Self {
-            app_event_tx: app_event_tx.clone(),
-            frame_requester: frame_requester.clone(),
-            codex_op_tx,
-            thread_scoped_op_tx: Some(thread_scoped_op_tx),
-            app_server_thread_id: None,
-            bottom_pane: BottomPane::new(BottomPaneParams {
-                frame_requester,
-                app_event_tx,
-                has_input_focus: true,
-                enhanced_keys_supported,
-                placeholder_text: placeholder,
-                disable_paste_burst: config.disable_paste_burst,
-                animations_enabled: config.animations,
-                skills: None,
-            }),
-            active_cell,
-            active_cell_revision: 0,
-            config,
-            skills_all: Vec::new(),
-            skills_initial_state: None,
-            current_collaboration_mode,
-            active_collaboration_mask,
-            auth_manager,
-            models_manager,
-            session_telemetry,
-            session_header: SessionHeader::new(header_model),
-            initial_user_message,
-            token_info: None,
-            rate_limit_snapshots_by_limit_id: BTreeMap::new(),
-            plan_type: None,
-            rate_limit_warnings: RateLimitWarningState::default(),
-            rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
-            rate_limit_poller: None,
-            adaptive_chunking: AdaptiveChunkingPolicy::default(),
-            stream_controller: None,
-            plan_stream_controller: None,
-            last_copyable_output: None,
-            running_commands: HashMap::new(),
-            pending_collab_spawn_requests: HashMap::new(),
-            suppressed_exec_calls: HashSet::new(),
-            last_unified_wait: None,
-            unified_exec_wait_streak: None,
-            turn_sleep_inhibitor: SleepInhibitor::new(prevent_idle_sleep),
-            task_complete_pending: false,
-            unified_exec_processes: Vec::new(),
-            agent_turn_running: false,
-            mcp_startup_status: None,
-            connectors_cache: ConnectorsCacheState::default(),
-            connectors_partial_snapshot: None,
-            connectors_prefetch_in_flight: false,
-            connectors_force_refetch_pending: false,
-            interrupts: InterruptManager::new(),
-            reasoning_buffer: String::new(),
-            full_reasoning_buffer: String::new(),
-            current_status_header: String::from("Working"),
-            retry_status_header: None,
-            pending_status_indicator_restore: false,
-            suppress_queue_autosend: false,
-            thread_id: None,
-            current_turn_id: None,
-            thread_name: None,
-            forked_from: None,
-            queued_user_messages: VecDeque::new(),
-            pending_steers: VecDeque::new(),
-            submit_pending_steers_after_interrupt: false,
-            queued_message_edit_binding,
-            show_welcome_banner: is_first_run,
-            startup_tooltip_override,
-            suppress_session_configured_redraw: false,
-            pending_notification: None,
-            quit_shortcut_expires_at: None,
-            quit_shortcut_key: None,
-            is_review_mode: false,
-            pre_review_token_info: None,
-            needs_final_message_separator: false,
-            had_work_activity: false,
-            saw_plan_update_this_turn: false,
-            saw_plan_item_this_turn: false,
-            plan_delta_buffer: String::new(),
-            plan_item_active: false,
-            last_separator_elapsed_secs: None,
-            turn_runtime_metrics: RuntimeMetricsSummary::default(),
-            last_rendered_width: std::cell::Cell::new(None),
-            feedback,
-            feedback_audience,
-            current_rollout_path: None,
-            current_cwd,
-            session_network_proxy: None,
-            status_line_invalid_items_warned,
-            status_line_branch: None,
-            status_line_branch_cwd: None,
-            status_line_branch_pending: false,
-            status_line_branch_lookup_complete: false,
-            external_editor_state: ExternalEditorState::Closed,
-            realtime_conversation: RealtimeConversationUiState::default(),
-            last_rendered_user_message_event: None,
-        };
-
-        widget.prefetch_rate_limits();
-        widget.bottom_pane.set_voice_transcription_enabled(
-            widget.config.features.enabled(Feature::VoiceTranscription),
-        );
-        widget
-            .bottom_pane
-            .set_realtime_conversation_enabled(widget.realtime_conversation_enabled());
-        widget
-            .bottom_pane
-            .set_audio_device_selection_enabled(widget.realtime_audio_device_selection_enabled());
-        widget
-            .bottom_pane
-            .set_status_line_enabled(!widget.configured_status_line_items().is_empty());
-        widget.bottom_pane.set_collaboration_modes_enabled(true);
-        widget.sync_fast_command_enabled();
-        widget.sync_personality_command_enabled();
-        widget
-            .bottom_pane
-            .set_queued_message_edit_binding(widget.queued_message_edit_binding);
-        #[cfg(target_os = "windows")]
-        widget.bottom_pane.set_windows_degraded_sandbox_active(
-            codex_core::windows_sandbox::ELEVATED_SANDBOX_NUX_ENABLED
-                && matches!(
-                    WindowsSandboxLevel::from_config(&widget.config),
-                    WindowsSandboxLevel::RestrictedToken
-                ),
-        );
-        widget.update_collaboration_mode_indicator();
-
-        widget
-            .bottom_pane
-            .set_connectors_enabled(widget.connectors_enabled());
-
-        widget
+        Self::new_with_op_sender(common, codex_op_tx, Some(thread_scoped_op_tx), None)
     }
 
     pub(crate) fn new_with_op_sender(

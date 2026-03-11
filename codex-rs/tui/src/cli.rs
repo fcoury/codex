@@ -110,6 +110,10 @@ pub struct Cli {
     #[arg(long = "no-alt-screen", default_value_t = false)]
     pub no_alt_screen: bool,
 
+    /// Use the experimental in-process app-server architecture.
+    #[arg(long = "app-server", default_value_t = false)]
+    pub app_server: bool,
+
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 }
