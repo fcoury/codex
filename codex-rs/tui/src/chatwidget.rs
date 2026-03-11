@@ -562,7 +562,6 @@ pub(crate) struct ChatWidget {
     app_event_tx: AppEventSender,
     codex_op_tx: UnboundedSender<Op>,
     thread_scoped_op_tx: Option<UnboundedSender<ThreadScopedOp>>,
-    app_server_thread_id: Option<ThreadId>,
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
     /// Monotonic-ish counter used to invalidate transcript overlay caching.
@@ -3264,10 +3263,14 @@ impl ChatWidget {
     /// has no `thread_scoped_op_tx`, so `thread_scoped_op_sender()` returns
     /// `None`.
     pub(crate) fn new(common: ChatWidgetInit, thread_manager: Arc<ThreadManager>) -> Self {
-        let config = common.config.clone();
+        let mut config = common.config.clone();
+        config.model = common
+            .model
+            .clone()
+            .filter(|model| !model.trim().is_empty());
         let app_event_tx = common.app_event_tx.clone();
         let codex_op_tx = spawn_agent(config, app_event_tx, thread_manager);
-        Self::new_with_op_sender(common, codex_op_tx, None, None)
+        Self::new_with_op_sender(common, codex_op_tx, None)
     }
 
     /// Create a `ChatWidget` in app-server mode with a fresh thread.
@@ -3322,7 +3325,11 @@ impl ChatWidget {
         bootstrap: AppServerBootstrap,
     ) -> Self {
         let in_process_context = common.in_process_context.clone();
-        let config = common.config.clone();
+        let mut config = common.config.clone();
+        config.model = common
+            .model
+            .clone()
+            .filter(|model| !model.trim().is_empty());
         let app_event_tx = common.app_event_tx.clone();
         let (codex_op_tx, thread_scoped_op_tx) = spawn_app_server_agent(
             config,
@@ -3331,14 +3338,13 @@ impl ChatWidget {
             in_process_context,
             bootstrap,
         );
-        Self::new_with_op_sender(common, codex_op_tx, Some(thread_scoped_op_tx), None)
+        Self::new_with_op_sender(common, codex_op_tx, Some(thread_scoped_op_tx))
     }
 
     pub(crate) fn new_with_op_sender(
         common: ChatWidgetInit,
         codex_op_tx: UnboundedSender<Op>,
         thread_scoped_op_tx: Option<UnboundedSender<ThreadScopedOp>>,
-        app_server_thread_id: Option<ThreadId>,
     ) -> Self {
         let ChatWidgetInit {
             config,
@@ -3395,7 +3401,6 @@ impl ChatWidget {
             frame_requester: frame_requester.clone(),
             codex_op_tx,
             thread_scoped_op_tx,
-            app_server_thread_id,
             bottom_pane: BottomPane::new(BottomPaneParams {
                 frame_requester,
                 app_event_tx,
@@ -3575,7 +3580,6 @@ impl ChatWidget {
             frame_requester: frame_requester.clone(),
             codex_op_tx,
             thread_scoped_op_tx: None,
-            app_server_thread_id: None,
             bottom_pane: BottomPane::new(BottomPaneParams {
                 frame_requester,
                 app_event_tx,
@@ -8353,22 +8357,6 @@ impl ChatWidget {
         crate::session_log::log_outbound_op(&op);
         if matches!(&op, Op::Review { .. }) && !self.bottom_pane.is_task_running() {
             self.bottom_pane.set_task_running(true);
-        }
-        if let (Some(thread_id), Some(thread_scoped_op_tx)) =
-            (self.app_server_thread_id, self.thread_scoped_op_tx.as_ref())
-        {
-            let interrupt_turn_id = matches!(&op, Op::Interrupt)
-                .then(|| self.current_turn_id.clone())
-                .flatten();
-            if let Err(e) = thread_scoped_op_tx.send(ThreadScopedOp {
-                thread_id,
-                op,
-                interrupt_turn_id,
-            }) {
-                tracing::error!("failed to submit thread-scoped op: {e}");
-                return false;
-            }
-            return true;
         }
         if let Err(e) = self.codex_op_tx.send(op) {
             tracing::error!("failed to submit op: {e}");
