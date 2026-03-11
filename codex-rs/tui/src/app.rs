@@ -4661,7 +4661,7 @@ mod tests {
         .await?;
 
         assert_eq!(
-            app.agent_picker_threads
+            app.agent_navigation
                 .get(&child_thread_id)
                 .map(|entry| entry.is_closed),
             Some(true)
@@ -5889,13 +5889,11 @@ mod tests {
                 },
             ),
         );
-        app.agent_picker_threads.insert(
+        app.agent_navigation.upsert(
             agent_thread_id,
-            AgentPickerThreadEntry {
-                agent_nickname: Some("Patcher".to_string()),
-                agent_role: Some("worker".to_string()),
-                is_closed: false,
-            },
+            Some("Patcher".to_string()),
+            Some("worker".to_string()),
+            false,
         );
 
         let mut changes = HashMap::new();
@@ -5969,13 +5967,11 @@ mod tests {
                 },
             ),
         );
-        app.agent_picker_threads.insert(
+        app.agent_navigation.upsert(
             agent_thread_id,
-            AgentPickerThreadEntry {
-                agent_nickname: Some("Perms".to_string()),
-                agent_role: Some("worker".to_string()),
-                is_closed: false,
-            },
+            Some("Perms".to_string()),
+            Some("worker".to_string()),
+            false,
         );
 
         app.enqueue_thread_event(
@@ -6041,13 +6037,11 @@ mod tests {
                 },
             ),
         );
-        app.agent_picker_threads.insert(
+        app.agent_navigation.upsert(
             agent_thread_id,
-            AgentPickerThreadEntry {
-                agent_nickname: Some("Input".to_string()),
-                agent_role: Some("worker".to_string()),
-                is_closed: false,
-            },
+            Some("Input".to_string()),
+            Some("worker".to_string()),
+            false,
         );
 
         app.enqueue_thread_event(
@@ -6197,13 +6191,11 @@ mod tests {
                 },
             ),
         );
-        app.agent_picker_threads.insert(
+        app.agent_navigation.upsert(
             agent_thread_id,
-            AgentPickerThreadEntry {
-                agent_nickname: Some("MCP".to_string()),
-                agent_role: Some("worker".to_string()),
-                is_closed: false,
-            },
+            Some("MCP".to_string()),
+            Some("worker".to_string()),
+            false,
         );
 
         app.enqueue_thread_event(
