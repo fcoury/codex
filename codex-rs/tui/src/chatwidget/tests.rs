@@ -1758,6 +1758,25 @@ async fn helpers_are_available_and_do_not_panic() {
     let _ = &mut w;
 }
 
+async fn next_session_configured(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> codex_protocol::protocol::SessionConfiguredEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Some(AppEvent::CodexEvent(Event {
+                    msg: EventMsg::SessionConfigured(event),
+                    ..
+                })) => return event,
+                Some(_) => continue,
+                None => panic!("expected session configured event but channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for session configured")
+}
+
 #[tokio::test]
 async fn new_from_existing_submits_ops_to_the_provided_thread() {
     let codex_home = tempdir().expect("tempdir");
@@ -1904,7 +1923,7 @@ async fn make_chatwidget_manual(
         app_event_tx,
         codex_op_tx: op_tx,
         thread_scoped_op_tx: None,
-        app_server_thread_id: None,
+        thread_scoped_route_thread_id: None,
         bottom_pane: bottom,
         active_cell: None,
         active_cell_revision: 0,
@@ -1994,14 +2013,14 @@ async fn make_chatwidget_manual(
 }
 
 #[tokio::test]
-async fn submit_op_routes_selected_app_server_thread_via_thread_scoped_sender() {
+async fn submit_op_routes_switched_primary_app_server_thread_via_thread_scoped_sender() {
     let (mut chat, _app_event_tx, _app_event_rx, mut op_rx) =
         make_chatwidget_manual_with_sender().await;
     let (thread_scoped_op_tx, mut thread_scoped_op_rx) = tokio::sync::mpsc::unbounded_channel();
     let thread_id = ThreadId::new();
 
     chat.thread_scoped_op_tx = Some(thread_scoped_op_tx);
-    chat.app_server_thread_id = Some(thread_id);
+    chat.thread_scoped_route_thread_id = Some(thread_id);
     chat.thread_id = Some(thread_id);
     chat.current_turn_id = Some("turn-1".to_string());
 
@@ -2021,14 +2040,14 @@ async fn submit_op_routes_selected_app_server_thread_via_thread_scoped_sender() 
 }
 
 #[tokio::test]
-async fn interrupt_routes_selected_app_server_thread_with_current_turn_id() {
+async fn interrupt_routes_switched_primary_app_server_thread_with_current_turn_id() {
     let (mut chat, _app_event_tx, _app_event_rx, mut op_rx) =
         make_chatwidget_manual_with_sender().await;
     let (thread_scoped_op_tx, mut thread_scoped_op_rx) = tokio::sync::mpsc::unbounded_channel();
     let thread_id = ThreadId::new();
 
     chat.thread_scoped_op_tx = Some(thread_scoped_op_tx);
-    chat.app_server_thread_id = Some(thread_id);
+    chat.thread_scoped_route_thread_id = Some(thread_id);
     chat.thread_id = Some(thread_id);
     chat.current_turn_id = Some("turn-1".to_string());
 
@@ -6081,6 +6100,113 @@ async fn experimental_mode_plan_is_ignored_on_startup() {
     let chat = ChatWidget::new(init, thread_manager);
     assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
     assert_eq!(chat.current_model(), resolved_model);
+}
+
+#[tokio::test]
+async fn new_uses_direct_runtime_transport() {
+    let codex_home = tempdir().expect("tempdir");
+    let cfg = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("config");
+    let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
+    let selected_model = if resolved_model == "gpt-5.4" {
+        "gpt-5.1"
+    } else {
+        "gpt-5.4"
+    };
+    let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
+    let thread_manager = Arc::new(
+        codex_core::test_support::thread_manager_with_models_provider(
+            CodexAuth::from_api_key("test"),
+            cfg.model_provider.clone(),
+        ),
+    );
+    let auth_manager =
+        codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("test"));
+    let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+    let init = ChatWidgetInit {
+        config: cfg,
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(tx_raw),
+        initial_user_message: None,
+        enhanced_keys_supported: false,
+        auth_manager,
+        models_manager: thread_manager.get_models_manager(),
+        feedback: codex_feedback::CodexFeedback::new(),
+        is_first_run: true,
+        feedback_audience: FeedbackAudience::External,
+        model: Some(selected_model.to_string()),
+        startup_tooltip_override: None,
+        status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+        session_telemetry,
+        in_process_context: InProcessAgentContext {
+            arg0_paths: Arg0DispatchPaths::default(),
+            cli_kv_overrides: Vec::new(),
+            cloud_requirements: CloudRequirementsLoader::default(),
+        },
+    };
+    let chat = ChatWidget::new(init, thread_manager);
+    let session_configured = next_session_configured(&mut rx).await;
+
+    assert_eq!(chat.thread_scoped_op_sender().is_some(), false);
+    assert_eq!(chat.current_model(), selected_model);
+    assert_eq!(session_configured.model, selected_model);
+}
+
+#[tokio::test]
+async fn new_app_server_uses_app_server_transport() {
+    let codex_home = tempdir().expect("tempdir");
+    let cfg = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("config");
+    let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
+    let selected_model = if resolved_model == "gpt-5.4" {
+        "gpt-5.1"
+    } else {
+        "gpt-5.4"
+    };
+    let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
+    let thread_manager = Arc::new(
+        codex_core::test_support::thread_manager_with_models_provider(
+            CodexAuth::from_api_key("test"),
+            cfg.model_provider.clone(),
+        ),
+    );
+    let auth_manager =
+        codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("test"));
+    let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+    let init = ChatWidgetInit {
+        config: cfg,
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(tx_raw),
+        initial_user_message: None,
+        enhanced_keys_supported: false,
+        auth_manager,
+        models_manager: thread_manager.get_models_manager(),
+        feedback: codex_feedback::CodexFeedback::new(),
+        is_first_run: true,
+        feedback_audience: FeedbackAudience::External,
+        model: Some(selected_model.to_string()),
+        startup_tooltip_override: None,
+        status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+        session_telemetry,
+        in_process_context: InProcessAgentContext {
+            arg0_paths: Arg0DispatchPaths::default(),
+            cli_kv_overrides: Vec::new(),
+            cloud_requirements: CloudRequirementsLoader::default(),
+        },
+    };
+
+    let chat = ChatWidget::new_app_server(init, thread_manager);
+    let session_configured = next_session_configured(&mut rx).await;
+
+    assert_eq!(chat.thread_scoped_op_sender().is_some(), true);
+    assert_eq!(chat.current_model(), selected_model);
+    assert_eq!(session_configured.model, selected_model);
 }
 
 #[tokio::test]

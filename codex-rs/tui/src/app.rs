@@ -177,6 +177,26 @@ pub enum ExitReason {
     Fatal(String),
 }
 
+/// Selects which transport the TUI uses to communicate with the agent backend.
+///
+/// `Direct` drives the `CodexThread` event loop in-process without an
+/// intermediate app-server layer; this is the production default. `AppServer`
+/// interposes an in-process app-server client so that the TUI communicates
+/// through the full `ClientRequest`/`ServerResponse` protocol, which is needed
+/// for features that rely on thread-scoped operations (resume, fork,
+/// background terminals, etc.) being managed server-side.
+///
+/// The mode is selected once at startup via the `--app-server` CLI flag and
+/// remains constant for the lifetime of the process; every `ChatWidget`
+/// created during the session inherits the same mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TuiRuntimeMode {
+    /// Communicate directly with `CodexThread` — no app-server intermediary.
+    Direct,
+    /// Route all operations through the in-process app-server client.
+    AppServer,
+}
+
 fn session_summary(
     token_usage: TokenUsage,
     thread_id: Option<ThreadId>,
@@ -715,6 +735,7 @@ async fn handle_model_migration_prompt_if_needed(
 
 pub(crate) struct App {
     pub(crate) server: Arc<ThreadManager>,
+    runtime_mode: TuiRuntimeMode,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) chat_widget: ChatWidget,
@@ -1696,7 +1717,7 @@ impl App {
         self.active_thread_rx = Some(receiver);
 
         let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
-        let (codex_op_tx, thread_scoped_op_tx, app_server_thread_id) =
+        let (codex_op_tx, thread_scoped_op_tx, thread_scoped_route_thread_id) =
             if let Some(thread) = live_thread {
                 if self.active_session_events_via_app_server
                     && self.primary_thread_id == Some(thread_id)
@@ -1715,7 +1736,7 @@ impl App {
             init,
             codex_op_tx,
             thread_scoped_op_tx,
-            app_server_thread_id,
+            thread_scoped_route_thread_id,
         );
         self.sync_active_agent_label();
 
@@ -1753,9 +1774,24 @@ impl App {
         self.active_thread_rx = None;
         self.primary_thread_id = None;
         self.pending_primary_events.clear();
+        self.active_session_events_via_app_server = false;
         self.primary_app_server_op_tx = None;
         self.chat_widget.set_pending_thread_approvals(Vec::new());
         self.sync_active_agent_label();
+    }
+
+    /// Derive the primary event-routing flags from the current `ChatWidget`.
+    ///
+    /// In `AppServer` mode the widget owns a `thread_scoped_op_tx` channel,
+    /// so `active_session_events_via_app_server` becomes `true` and events
+    /// are routed through the app-server protocol.  In `Direct` mode the
+    /// sender is `None` and events flow through the `CodexThread` directly.
+    ///
+    /// Call this after constructing or replacing `self.chat_widget` so the
+    /// two flags stay consistent.
+    fn sync_primary_runtime_transport_state(&mut self) {
+        self.primary_app_server_op_tx = self.chat_widget.thread_scoped_op_sender();
+        self.active_session_events_via_app_server = self.primary_app_server_op_tx.is_some();
     }
 
     async fn start_fresh_session_with_summary_hint(&mut self, tui: &mut tui::Tui) {
@@ -1796,10 +1832,12 @@ impl App {
                 cloud_requirements: self.cloud_requirements.clone(),
             },
         };
-        self.chat_widget = ChatWidget::new(init, self.server.clone());
-        self.active_session_events_via_app_server = true;
+        self.chat_widget = match self.runtime_mode {
+            TuiRuntimeMode::Direct => ChatWidget::new(init, self.server.clone()),
+            TuiRuntimeMode::AppServer => ChatWidget::new_app_server(init, self.server.clone()),
+        };
         self.reset_thread_event_state();
-        self.primary_app_server_op_tx = self.chat_widget.thread_scoped_op_sender();
+        self.sync_primary_runtime_transport_state();
         if let Some(summary) = summary {
             let mut lines: Vec<Line<'static>> = vec![summary.usage_line.clone().into()];
             if let Some(command) = summary.resume_command {
@@ -1958,6 +1996,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         tui: &mut tui::Tui,
+        runtime_mode: TuiRuntimeMode,
         auth_manager: Arc<AuthManager>,
         mut config: Config,
         arg0_paths: Arg0DispatchPaths,
@@ -2092,20 +2131,14 @@ impl App {
                         cloud_requirements: cloud_requirements.clone(),
                     },
                 };
-                ChatWidget::new(init, thread_manager.clone())
+                match runtime_mode {
+                    TuiRuntimeMode::Direct => ChatWidget::new(init, thread_manager.clone()),
+                    TuiRuntimeMode::AppServer => {
+                        ChatWidget::new_app_server(init, thread_manager.clone())
+                    }
+                }
             }
             SessionSelection::Resume(target_session) => {
-                let resumed = thread_manager
-                    .resume_thread_from_rollout(
-                        config.clone(),
-                        target_session.path.clone(),
-                        auth_manager.clone(),
-                    )
-                    .await
-                    .wrap_err_with(|| {
-                        let path_display = target_session.path.display();
-                        format!("Failed to resume session from {path_display}")
-                    })?;
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
@@ -2132,24 +2165,37 @@ impl App {
                         cloud_requirements: cloud_requirements.clone(),
                     },
                 };
-                existing_primary_thread =
-                    Some((resumed.thread.clone(), resumed.session_configured.clone()));
-                ChatWidget::new_from_existing(init, resumed.thread, resumed.session_configured)
+                match runtime_mode {
+                    TuiRuntimeMode::Direct => {
+                        let resumed = thread_manager
+                            .resume_thread_from_rollout(
+                                config.clone(),
+                                target_session.path.clone(),
+                                auth_manager.clone(),
+                            )
+                            .await
+                            .wrap_err_with(|| {
+                                let path_display = target_session.path.display();
+                                format!("Failed to resume session from {path_display}")
+                            })?;
+                        existing_primary_thread =
+                            Some((resumed.thread.clone(), resumed.session_configured.clone()));
+                        ChatWidget::new_from_existing(
+                            init,
+                            resumed.thread,
+                            resumed.session_configured,
+                        )
+                    }
+                    TuiRuntimeMode::AppServer => ChatWidget::new_app_server_from_resume(
+                        init,
+                        thread_manager.clone(),
+                        target_session.thread_id,
+                        target_session.path,
+                    ),
+                }
             }
             SessionSelection::Fork(target_session) => {
                 session_telemetry.counter("codex.thread.fork", 1, &[("source", "cli_subcommand")]);
-                let forked = thread_manager
-                    .fork_thread(
-                        usize::MAX,
-                        config.clone(),
-                        target_session.path.clone(),
-                        false,
-                    )
-                    .await
-                    .wrap_err_with(|| {
-                        let path_display = target_session.path.display();
-                        format!("Failed to fork session from {path_display}")
-                    })?;
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
@@ -2176,9 +2222,35 @@ impl App {
                         cloud_requirements: cloud_requirements.clone(),
                     },
                 };
-                existing_primary_thread =
-                    Some((forked.thread.clone(), forked.session_configured.clone()));
-                ChatWidget::new_from_existing(init, forked.thread, forked.session_configured)
+                match runtime_mode {
+                    TuiRuntimeMode::Direct => {
+                        let forked = thread_manager
+                            .fork_thread(
+                                usize::MAX,
+                                config.clone(),
+                                target_session.path.clone(),
+                                false,
+                            )
+                            .await
+                            .wrap_err_with(|| {
+                                let path_display = target_session.path.display();
+                                format!("Failed to fork session from {path_display}")
+                            })?;
+                        existing_primary_thread =
+                            Some((forked.thread.clone(), forked.session_configured.clone()));
+                        ChatWidget::new_from_existing(
+                            init,
+                            forked.thread,
+                            forked.session_configured,
+                        )
+                    }
+                    TuiRuntimeMode::AppServer => ChatWidget::new_app_server_from_fork(
+                        init,
+                        thread_manager.clone(),
+                        target_session.thread_id,
+                        target_session.path,
+                    ),
+                }
             }
         };
 
@@ -2191,6 +2263,7 @@ impl App {
 
         let mut app = Self {
             server: thread_manager.clone(),
+            runtime_mode,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
             chat_widget,
@@ -2222,7 +2295,7 @@ impl App {
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
-            active_session_events_via_app_server: true,
+            active_session_events_via_app_server: false,
             primary_app_server_op_tx: None,
             agent_navigation: AgentNavigationState::default(),
             active_thread_id: None,
@@ -2231,7 +2304,7 @@ impl App {
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
         };
-        app.primary_app_server_op_tx = app.chat_widget.thread_scoped_op_sender();
+        app.sync_primary_runtime_transport_state();
         if let Some((thread, session_configured)) = existing_primary_thread.take() {
             app.attach_existing_primary_thread(thread, session_configured)
                 .await;
@@ -6636,6 +6709,7 @@ mod tests {
 
         App {
             server,
+            runtime_mode: TuiRuntimeMode::Direct,
             session_telemetry,
             app_event_tx,
             chat_widget,
@@ -6701,6 +6775,7 @@ mod tests {
         (
             App {
                 server,
+                runtime_mode: TuiRuntimeMode::Direct,
                 session_telemetry,
                 app_event_tx,
                 chat_widget,
@@ -7850,7 +7925,7 @@ mod tests {
             },
             codex_op_tx,
             Some(thread_scoped_op_tx),
-            Some(thread_id),
+            None,
         );
         app.active_session_events_via_app_server = true;
         app.active_thread_id = Some(thread_id);
