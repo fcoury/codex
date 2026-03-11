@@ -1239,7 +1239,7 @@ mod tests {
         view.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
 
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
-        assert_eq!(view.list.search_query_for_test(), "");
+        assert_eq!(view.list.search_query_for_test(), "o".to_string());
     }
 
     #[test]
