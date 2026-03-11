@@ -3259,6 +3259,10 @@ impl ChatWidget {
         self.had_work_activity = true;
     }
 
+    /// Create a `ChatWidget` in direct mode — the `CodexThread` event loop
+    /// runs in-process with no app-server intermediary.  The resulting widget
+    /// has no `thread_scoped_op_tx`, so `thread_scoped_op_sender()` returns
+    /// `None`.
     pub(crate) fn new(common: ChatWidgetInit, thread_manager: Arc<ThreadManager>) -> Self {
         let config = common.config.clone();
         let app_event_tx = common.app_event_tx.clone();
@@ -3266,6 +3270,10 @@ impl ChatWidget {
         Self::new_with_op_sender(common, codex_op_tx, None, None)
     }
 
+    /// Create a `ChatWidget` in app-server mode with a fresh thread.
+    ///
+    /// Boots an in-process app-server client and issues `thread/start`. The
+    /// widget owns a `thread_scoped_op_tx` channel for thread-scoped RPCs.
     pub(crate) fn new_app_server(
         common: ChatWidgetInit,
         thread_manager: Arc<ThreadManager>,
@@ -3273,6 +3281,8 @@ impl ChatWidget {
         Self::new_app_server_with_bootstrap(common, thread_manager, AppServerBootstrap::StartFresh)
     }
 
+    /// Create an app-server-mode `ChatWidget` that resumes an existing thread
+    /// from a persisted rollout at `path`.
     pub(crate) fn new_app_server_from_resume(
         common: ChatWidgetInit,
         thread_manager: Arc<ThreadManager>,
@@ -3286,6 +3296,8 @@ impl ChatWidget {
         )
     }
 
+    /// Create an app-server-mode `ChatWidget` that forks a new thread from the
+    /// rollout at `path`.
     pub(crate) fn new_app_server_from_fork(
         common: ChatWidgetInit,
         thread_manager: Arc<ThreadManager>,
@@ -3299,6 +3311,11 @@ impl ChatWidget {
         )
     }
 
+    /// Internal constructor shared by all app-server-mode entry points.
+    ///
+    /// Spawns the app-server agent task (which issues the bootstrap RPC and
+    /// enters the event-forwarding loop) and wires the resulting channels
+    /// into `new_with_op_sender`.
     fn new_app_server_with_bootstrap(
         common: ChatWidgetInit,
         thread_manager: Arc<ThreadManager>,

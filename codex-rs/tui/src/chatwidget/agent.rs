@@ -394,10 +394,20 @@ pub(crate) struct ThreadScopedOp {
     pub(crate) interrupt_turn_id: Option<String>,
 }
 
+/// How an app-server-mode agent session should be bootstrapped on the app-server.
+///
+/// Each variant maps to a different app-server RPC (`thread/start`,
+/// `thread/resume`, `thread/fork`).  The variant is determined once during
+/// `App::run` based on the user's `SessionSelection` and is forwarded into
+/// `spawn_app_server_agent` where the corresponding RPC is issued before the
+/// event-forwarding loop begins.
 #[derive(Clone, Debug)]
 pub(crate) enum AppServerBootstrap {
+    /// Create a brand-new thread via `thread/start`.
     StartFresh,
+    /// Resume an existing thread from a persisted rollout via `thread/resume`.
     Resume { thread_id: ThreadId, path: PathBuf },
+    /// Fork a new thread from an existing rollout via `thread/fork`.
     Fork { thread_id: ThreadId, path: PathBuf },
 }
 
@@ -1540,6 +1550,10 @@ async fn local_history_metadata(config: &Config) -> (u64, usize) {
     (log_id, count)
 }
 
+/// Common fields extracted from `ThreadStartResponse`, `ThreadResumeResponse`,
+/// or `ThreadForkResponse` so that `session_configured_from_thread_bootstrap`
+/// can build a `SessionConfiguredEvent` without knowing which RPC produced the
+/// data.
 struct ThreadBootstrapState {
     thread: codex_app_server_protocol::Thread,
     model: String,
@@ -1596,6 +1610,10 @@ impl From<ThreadForkResponse> for ThreadBootstrapState {
     }
 }
 
+/// Build a `SessionConfiguredEvent` from the normalized bootstrap state.
+///
+/// `forked_from_id` should be `Some` only when the session was created via
+/// `thread/fork`; for fresh starts and resumes it is `None`.
 async fn session_configured_from_thread_bootstrap(
     config: &Config,
     response: ThreadBootstrapState,
@@ -1662,6 +1680,9 @@ fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
     }
 }
 
+/// Build `ThreadResumeParams` from the current `Config` and the target
+/// thread's identity.  Mirrors `thread_start_params_from_config` but adds the
+/// `thread_id` and rollout `path` needed by the `thread/resume` RPC.
 fn thread_resume_params_from_config(
     config: &Config,
     thread_id: ThreadId,
@@ -1685,6 +1706,9 @@ fn thread_resume_params_from_config(
     }
 }
 
+/// Build `ThreadForkParams` from the current `Config` and the source thread.
+/// Analogous to `thread_resume_params_from_config` but for the `thread/fork`
+/// RPC.
 fn thread_fork_params_from_config(
     config: &Config,
     thread_id: ThreadId,
@@ -3232,8 +3256,14 @@ async fn run_in_process_agent_loop(
     finalize_in_process_shutdown(client.shutdown(), app_event_tx, pending_shutdown_complete).await;
 }
 
-/// Spawn the agent bootstrapper and op forwarding loop, returning the
-/// `UnboundedSender<Op>` used by the UI to submit operations.
+/// Spawn the agent in *direct* mode — no app-server intermediary.
+///
+/// Creates a `CodexThread` via `ThreadManager::start_thread`, emits a
+/// `SessionConfigured` event, then enters two loops: one forwarding `Op`s
+/// from the UI into the thread, and one forwarding `Event`s back to the UI.
+///
+/// Returns only the op sender; there is no `ThreadScopedOp` channel because
+/// direct mode does not support thread-scoped server operations.
 pub(crate) fn spawn_agent(
     config: Config,
     app_event_tx: AppEventSender,
