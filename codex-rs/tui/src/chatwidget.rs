@@ -276,8 +276,8 @@ mod agent;
 use self::agent::AppServerBootstrap;
 pub(crate) use self::agent::ThreadScopedOp;
 use self::agent::spawn_agent;
-pub(crate) use self::agent::spawn_op_forwarder;
 use self::agent::spawn_app_server_agent;
+pub(crate) use self::agent::spawn_op_forwarder;
 mod session_header;
 use self::session_header::SessionHeader;
 mod skills;
@@ -562,6 +562,7 @@ pub(crate) struct ChatWidget {
     app_event_tx: AppEventSender,
     codex_op_tx: UnboundedSender<Op>,
     thread_scoped_op_tx: Option<UnboundedSender<ThreadScopedOp>>,
+    thread_scoped_route_thread_id: Option<ThreadId>,
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
     /// Monotonic-ish counter used to invalidate transcript overlay caching.
@@ -3270,7 +3271,7 @@ impl ChatWidget {
             .filter(|model| !model.trim().is_empty());
         let app_event_tx = common.app_event_tx.clone();
         let codex_op_tx = spawn_agent(config, app_event_tx, thread_manager);
-        Self::new_with_op_sender(common, codex_op_tx, None)
+        Self::new_with_op_sender(common, codex_op_tx, None, None)
     }
 
     /// Create a `ChatWidget` in app-server mode with a fresh thread.
@@ -3338,13 +3339,14 @@ impl ChatWidget {
             in_process_context,
             bootstrap,
         );
-        Self::new_with_op_sender(common, codex_op_tx, Some(thread_scoped_op_tx))
+        Self::new_with_op_sender(common, codex_op_tx, Some(thread_scoped_op_tx), None)
     }
 
     pub(crate) fn new_with_op_sender(
         common: ChatWidgetInit,
         codex_op_tx: UnboundedSender<Op>,
         thread_scoped_op_tx: Option<UnboundedSender<ThreadScopedOp>>,
+        thread_scoped_route_thread_id: Option<ThreadId>,
     ) -> Self {
         let ChatWidgetInit {
             config,
@@ -3401,6 +3403,7 @@ impl ChatWidget {
             frame_requester: frame_requester.clone(),
             codex_op_tx,
             thread_scoped_op_tx,
+            thread_scoped_route_thread_id,
             bottom_pane: BottomPane::new(BottomPaneParams {
                 frame_requester,
                 app_event_tx,
@@ -3580,6 +3583,7 @@ impl ChatWidget {
             frame_requester: frame_requester.clone(),
             codex_op_tx,
             thread_scoped_op_tx: None,
+            thread_scoped_route_thread_id: None,
             bottom_pane: BottomPane::new(BottomPaneParams {
                 frame_requester,
                 app_event_tx,
@@ -8357,6 +8361,23 @@ impl ChatWidget {
         crate::session_log::log_outbound_op(&op);
         if matches!(&op, Op::Review { .. }) && !self.bottom_pane.is_task_running() {
             self.bottom_pane.set_task_running(true);
+        }
+        if let (Some(thread_id), Some(thread_scoped_op_tx)) = (
+            self.thread_scoped_route_thread_id,
+            self.thread_scoped_op_tx.as_ref(),
+        ) {
+            let interrupt_turn_id = matches!(&op, Op::Interrupt)
+                .then(|| self.current_turn_id.clone())
+                .flatten();
+            if let Err(e) = thread_scoped_op_tx.send(ThreadScopedOp {
+                thread_id,
+                op,
+                interrupt_turn_id,
+            }) {
+                tracing::error!("failed to submit thread-scoped op: {e}");
+                return false;
+            }
+            return true;
         }
         if let Err(e) = self.codex_op_tx.send(op) {
             tracing::error!("failed to submit op: {e}");

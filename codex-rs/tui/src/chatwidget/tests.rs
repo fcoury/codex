@@ -1923,6 +1923,7 @@ async fn make_chatwidget_manual(
         app_event_tx,
         codex_op_tx: op_tx,
         thread_scoped_op_tx: None,
+        thread_scoped_route_thread_id: None,
         bottom_pane: bottom,
         active_cell: None,
         active_cell_revision: 0,
@@ -2009,6 +2010,60 @@ async fn make_chatwidget_manual(
     };
     widget.set_model(&resolved_model);
     (widget, rx, op_rx)
+}
+
+#[tokio::test]
+async fn submit_op_routes_switched_primary_app_server_thread_via_thread_scoped_sender() {
+    let (mut chat, _app_event_tx, _app_event_rx, mut op_rx) =
+        make_chatwidget_manual_with_sender().await;
+    let (thread_scoped_op_tx, mut thread_scoped_op_rx) = tokio::sync::mpsc::unbounded_channel();
+    let thread_id = ThreadId::new();
+
+    chat.thread_scoped_op_tx = Some(thread_scoped_op_tx);
+    chat.thread_scoped_route_thread_id = Some(thread_id);
+    chat.thread_id = Some(thread_id);
+    chat.current_turn_id = Some("turn-1".to_string());
+
+    assert_eq!(chat.submit_op(Op::ListMcpTools), true);
+    assert_eq!(
+        thread_scoped_op_rx.try_recv(),
+        Ok(ThreadScopedOp {
+            thread_id,
+            op: Op::ListMcpTools,
+            interrupt_turn_id: None,
+        })
+    );
+
+    while let Ok(op) = op_rx.try_recv() {
+        assert_ne!(op, Op::ListMcpTools);
+    }
+}
+
+#[tokio::test]
+async fn interrupt_routes_switched_primary_app_server_thread_with_current_turn_id() {
+    let (mut chat, _app_event_tx, _app_event_rx, mut op_rx) =
+        make_chatwidget_manual_with_sender().await;
+    let (thread_scoped_op_tx, mut thread_scoped_op_rx) = tokio::sync::mpsc::unbounded_channel();
+    let thread_id = ThreadId::new();
+
+    chat.thread_scoped_op_tx = Some(thread_scoped_op_tx);
+    chat.thread_scoped_route_thread_id = Some(thread_id);
+    chat.thread_id = Some(thread_id);
+    chat.current_turn_id = Some("turn-1".to_string());
+
+    assert_eq!(chat.submit_op(Op::Interrupt), true);
+    assert_eq!(
+        thread_scoped_op_rx.try_recv(),
+        Ok(ThreadScopedOp {
+            thread_id,
+            op: Op::Interrupt,
+            interrupt_turn_id: Some("turn-1".to_string()),
+        })
+    );
+
+    while let Ok(op) = op_rx.try_recv() {
+        assert_ne!(op, Op::Interrupt);
+    }
 }
 
 // ChatWidget may emit other `Op`s (e.g. history/logging updates) on the same channel; this helper
