@@ -256,7 +256,7 @@ async fn initialize_app_server_client_name(thread: &CodexThread) {
 /// Build the initialization payload for an in-process app-server client from
 /// the TUI's runtime state. The resulting client embeds its own app-server
 /// instance and communicates over in-memory channels.
-fn in_process_start_args(
+pub(crate) fn in_process_start_args(
     config: &Config,
     arg0_paths: codex_arg0::Arg0DispatchPaths,
     cli_overrides: Vec<(String, TomlValue)>,
@@ -3125,6 +3125,7 @@ pub(crate) fn spawn_agent(
     app_event_tx: AppEventSender,
     _server: Arc<ThreadManager>,
     in_process_context: InProcessAgentContext,
+    prestarted_in_process_client: Option<InProcessAppServerClient>,
 ) -> (UnboundedSender<Op>, UnboundedSender<ThreadScopedOp>) {
     let (codex_op_tx, codex_op_rx) = unbounded_channel::<Op>();
     let (thread_scoped_op_tx, thread_scoped_op_rx) = unbounded_channel::<ThreadScopedOp>();
@@ -3132,22 +3133,26 @@ pub(crate) fn spawn_agent(
     let app_event_tx_clone = app_event_tx;
     tokio::spawn(async move {
         let mut request_ids = RequestIdSequencer::new();
-        let client = match InProcessAppServerClient::start(in_process_start_args(
-            &config,
-            in_process_context.arg0_paths,
-            in_process_context.cli_kv_overrides,
-            in_process_context.cloud_requirements,
-        ))
-        .await
-        {
-            Ok(client) => client,
-            Err(err) => {
-                let message = format!("Failed to initialize in-process app-server client: {err}");
-                tracing::error!("{message}");
-                send_error_event(&app_event_tx_clone, message.clone());
-                app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
-                return;
-            }
+        let client = match prestarted_in_process_client {
+            Some(client) => client,
+            None => match InProcessAppServerClient::start(in_process_start_args(
+                &config,
+                in_process_context.arg0_paths,
+                in_process_context.cli_kv_overrides,
+                in_process_context.cloud_requirements,
+            ))
+            .await
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    let message =
+                        format!("Failed to initialize in-process app-server client: {err}");
+                    tracing::error!("{message}");
+                    send_error_event(&app_event_tx_clone, message.clone());
+                    app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
+                    return;
+                }
+            },
         };
         let thread_manager = client.thread_manager();
         let auth_manager = client.auth_manager();
@@ -4164,6 +4169,7 @@ mod tests {
                 cli_kv_overrides: Vec::new(),
                 cloud_requirements: CloudRequirementsLoader::default(),
             },
+            None,
         );
 
         let maybe_event = timeout(Duration::from_secs(10), rx.recv())

@@ -16,6 +16,7 @@ use crate::chatwidget::ExternalEditorState;
 use crate::chatwidget::InProcessAgentContext;
 use crate::chatwidget::ThreadInputState;
 use crate::chatwidget::ThreadScopedOp;
+use crate::chatwidget::in_process_start_args;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
@@ -41,6 +42,7 @@ use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
 use crate::version::CODEX_CLI_VERSION;
 use codex_ansi_escape::ansi_escape_line;
+use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_arg0::Arg0DispatchPaths;
 use codex_core::AuthManager;
@@ -846,6 +848,7 @@ impl App {
                 cli_kv_overrides: self.cli_kv_overrides.clone(),
                 cloud_requirements: self.cloud_requirements.clone(),
             },
+            prestarted_in_process_client: None,
         }
     }
 
@@ -1803,6 +1806,7 @@ impl App {
                 cli_kv_overrides: self.cli_kv_overrides.clone(),
                 cloud_requirements: self.cloud_requirements.clone(),
             },
+            prestarted_in_process_client: None,
         };
         self.chat_widget = ChatWidget::new(init, self.server.clone());
         self.active_session_events_via_app_server = true;
@@ -1988,16 +1992,32 @@ impl App {
 
         let harness_overrides =
             normalize_harness_overrides_for_cwd(harness_overrides, &config.cwd)?;
-        let thread_manager = Arc::new(ThreadManager::new(
-            &config,
-            auth_manager.clone(),
-            SessionSource::Cli,
-            CollaborationModesConfig {
-                default_mode_request_user_input: config
-                    .features
-                    .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
-            },
-        ));
+        let (thread_manager, auth_manager, mut prestarted_in_process_client) = if matches!(
+            &session_selection,
+            SessionSelection::StartFresh | SessionSelection::Exit
+        ) {
+            let client = InProcessAppServerClient::start(in_process_start_args(
+                &config,
+                arg0_paths.clone(),
+                cli_kv_overrides.clone(),
+                cloud_requirements.clone(),
+            ))
+            .await
+            .wrap_err("Failed to initialize in-process app-server client")?;
+            (client.thread_manager(), client.auth_manager(), Some(client))
+        } else {
+            let thread_manager = Arc::new(ThreadManager::new(
+                &config,
+                auth_manager.clone(),
+                SessionSource::Cli,
+                CollaborationModesConfig {
+                    default_mode_request_user_input: config
+                        .features
+                        .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
+                },
+            ));
+            (thread_manager, auth_manager, None)
+        };
         // TODO(xl): Move into PluginManager once this no longer depends on config feature gating.
         thread_manager
             .plugins_manager()
@@ -2019,6 +2039,9 @@ impl App {
         )
         .await;
         if let Some(exit_info) = exit_info {
+            if let Some(client) = prestarted_in_process_client {
+                let _ = client.shutdown().await;
+            }
             return Ok(exit_info);
         }
         if let Some(updated_model) = config.model.clone() {
@@ -2099,6 +2122,7 @@ impl App {
                         cli_kv_overrides: cli_kv_overrides.clone(),
                         cloud_requirements: cloud_requirements.clone(),
                     },
+                    prestarted_in_process_client: prestarted_in_process_client.take(),
                 };
                 ChatWidget::new(init, thread_manager.clone())
             }
@@ -2140,6 +2164,7 @@ impl App {
                         cli_kv_overrides: cli_kv_overrides.clone(),
                         cloud_requirements: cloud_requirements.clone(),
                     },
+                    prestarted_in_process_client: None,
                 };
                 existing_primary_thread =
                     Some((resumed.thread.clone(), resumed.session_configured.clone()));
@@ -2185,6 +2210,7 @@ impl App {
                         cli_kv_overrides: cli_kv_overrides.clone(),
                         cloud_requirements: cloud_requirements.clone(),
                     },
+                    prestarted_in_process_client: None,
                 };
                 existing_primary_thread =
                     Some((forked.thread.clone(), forked.session_configured.clone()));
@@ -7872,6 +7898,7 @@ mod tests {
                     cli_kv_overrides: Vec::new(),
                     cloud_requirements: CloudRequirementsLoader::default(),
                 },
+                prestarted_in_process_client: None,
             },
             codex_op_tx,
             Some(thread_scoped_op_tx),

@@ -274,6 +274,7 @@ mod interrupts;
 use self::interrupts::InterruptManager;
 mod agent;
 pub(crate) use self::agent::ThreadScopedOp;
+pub(crate) use self::agent::in_process_start_args;
 use self::agent::spawn_agent;
 pub(crate) use self::agent::spawn_op_forwarder;
 mod session_header;
@@ -294,6 +295,7 @@ use crate::streaming::controller::PlanStreamController;
 use crate::streaming::controller::StreamController;
 
 use chrono::Local;
+use codex_app_server_client::InProcessAppServerClient;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ThreadManager;
@@ -499,6 +501,10 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) status_line_invalid_items_warned: Arc<AtomicBool>,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) in_process_context: InProcessAgentContext,
+    /// Present only for the initial fresh-session bootstrap when `App::run`
+    /// has already started the in-process app-server and wants the first
+    /// agent to reuse that client instead of starting a second runtime.
+    pub(crate) prestarted_in_process_client: Option<InProcessAppServerClient>,
 }
 
 #[derive(Default)]
@@ -3274,6 +3280,7 @@ impl ChatWidget {
             status_line_invalid_items_warned,
             session_telemetry,
             in_process_context,
+            prestarted_in_process_client,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
@@ -3286,6 +3293,7 @@ impl ChatWidget {
             app_event_tx.clone(),
             thread_manager,
             in_process_context,
+            prestarted_in_process_client,
         );
 
         let model_override = model.as_deref();
@@ -3471,6 +3479,7 @@ impl ChatWidget {
             status_line_invalid_items_warned,
             session_telemetry,
             in_process_context: _,
+            prestarted_in_process_client: _,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
@@ -3652,6 +3661,7 @@ impl ChatWidget {
             status_line_invalid_items_warned,
             session_telemetry,
             in_process_context: _,
+            prestarted_in_process_client: _,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
