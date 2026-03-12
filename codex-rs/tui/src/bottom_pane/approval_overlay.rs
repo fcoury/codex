@@ -627,9 +627,7 @@ fn approval_footer_hint(request: &ApprovalRequest) -> Line<'static> {
         key_hint::plain(KeyCode::Esc).into(),
         " to cancel".into(),
     ];
-    if request.thread_label().is_some()
-        && !matches!(request, ApprovalRequest::Permissions { .. })
-    {
+    if request.thread_label().is_some() && !matches!(request, ApprovalRequest::Permissions { .. }) {
         spans.extend([
             " or ".into(),
             key_hint::plain(KeyCode::Char('o')).into(),
