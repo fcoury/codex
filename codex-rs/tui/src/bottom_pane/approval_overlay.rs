@@ -627,7 +627,9 @@ fn approval_footer_hint(request: &ApprovalRequest) -> Line<'static> {
         key_hint::plain(KeyCode::Esc).into(),
         " to cancel".into(),
     ];
-    if request.thread_label().is_some() {
+    if request.thread_label().is_some()
+        && !matches!(request, ApprovalRequest::Permissions { .. })
+    {
         spans.extend([
             " or ".into(),
             key_hint::plain(KeyCode::Char('o')).into(),
@@ -1239,7 +1241,7 @@ mod tests {
         view.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
 
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
-        assert_eq!(view.list.search_query_for_test(), "o".to_string());
+        assert_eq!(view.list.search_query_for_test(), "");
     }
 
     #[test]
