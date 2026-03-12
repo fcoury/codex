@@ -1584,6 +1584,14 @@ impl BottomPaneView for McpServerElicitationOverlay {
         self.queue.push_back(request);
         None
     }
+
+    fn preserve_on_turn_interrupt(&self) -> bool {
+        true
+    }
+
+    fn thread_id(&self) -> Option<ThreadId> {
+        Some(self.request.thread_id())
+    }
 }
 
 fn wrap_footer_tips(width: u16, tips: Vec<FooterTip>) -> Vec<Vec<FooterTip>> {
