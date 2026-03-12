@@ -4282,6 +4282,12 @@ impl ChatComposer {
                     can_show_left_with_context(hint_rect, left_width, right_width);
                 let has_override =
                     self.footer_flash_visible() || self.footer_hint_override.is_some();
+                // Bypass the single-line collapse algorithm when a flash, hint
+                // override, or status line is active.  The collapse path can resolve
+                // to `SummaryLeft::None` (render nothing) when no mode indicator is
+                // present, which would hide the status line.  Falling through to the
+                // priority chain (flash > hint override > status line > default)
+                // ensures the status line is always rendered.
                 let single_line_layout = if has_override || status_line_active {
                     None
                 } else {
@@ -4322,20 +4328,12 @@ impl ChatComposer {
                 if let Some((summary_left, _)) = single_line_layout {
                     match summary_left {
                         SummaryLeft::Default => {
-                            if status_line_active {
-                                if let Some(line) = truncated_status_line.clone() {
-                                    render_footer_line(hint_rect, buf, line);
-                                } else {
-                                    render_footer_from_props(
-                                        hint_rect,
-                                        buf,
-                                        &footer_props,
-                                        left_mode_indicator,
-                                        show_cycle_hint,
-                                        show_shortcuts_hint,
-                                        show_queue_hint,
-                                    );
-                                }
+                            // Defensive fallback: `single_line_layout` should be `None` when the
+                            // status line is active, but if future refactors violate that
+                            // invariant, render the status line instead of dropping footer output.
+                            if status_line_active && let Some(line) = truncated_status_line.clone()
+                            {
+                                render_footer_line(hint_rect, buf, line);
                             } else {
                                 render_footer_from_props(
                                     hint_rect,
@@ -4644,6 +4642,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn footer_priority_snapshots() {
+        snapshot_composer_state(
+            "footer_priority_status_line_vs_hint_override",
+            false,
+            |composer| {
+                composer.set_status_line_enabled(true);
+                composer.set_status_line(Some(Line::from("status line content")));
+                composer.set_footer_hint_override(Some(vec![
+                    ("K".to_string(), "override".to_string()),
+                    ("J".to_string(), "other".to_string()),
+                ]));
+            },
+        );
+
+        snapshot_composer_state(
+            "footer_priority_flash_vs_hint_override_and_status_line",
+            false,
+            |composer| {
+                composer.set_status_line_enabled(true);
+                composer.set_status_line(Some(Line::from("status line content")));
+                composer.set_footer_hint_override(Some(vec![
+                    ("K".to_string(), "override".to_string()),
+                    ("J".to_string(), "other".to_string()),
+                ]));
+                composer.show_footer_flash(Line::from("FLASH"), Duration::from_secs(10));
+            },
+        );
+
+        // When a task is running and the user has draft text, the queue hint
+        // ("tab to add to queue") should be shown instead of the status line.
+        snapshot_composer_state_with_width(
+            "footer_priority_queue_hint_vs_status_line",
+            120,
+            true,
+            |composer| {
+                composer.set_status_line_enabled(true);
+                composer.set_status_line(Some(Line::from("model: gpt-5 · cwd: codex-rs")));
+                composer.set_task_running(true);
+                composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
+            },
+        );
+    }
+
     fn snapshot_composer_state_with_width<F>(
         name: &str,
         width: u16,
@@ -4905,6 +4947,22 @@ mod tests {
             |composer| {
                 setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
                 composer.set_task_running(true);
+                composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
+            },
+        );
+
+        // Regression: draft text with a configured status line but no
+        // collaboration mode indicator previously fell through the collapse
+        // algorithm to `SummaryLeft::None`, hiding the status line.  This
+        // snapshot locks the corrected behavior where the status line stays
+        // visible on the bottom row.
+        snapshot_composer_state_with_width(
+            "footer_collapse_status_line_draft_no_mode",
+            120,
+            true,
+            |composer| {
+                composer.set_status_line_enabled(true);
+                composer.set_status_line(Some(Line::from("model: gpt-5 · cwd: codex-rs")));
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
         );
