@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use codex_app_server::in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
+pub use codex_app_server::in_process::InProcessRuntimeHandles;
 pub use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server_protocol::ClientInfo;
@@ -36,6 +37,8 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result as JsonRpcResult;
 use codex_arg0::Arg0DispatchPaths;
+use codex_core::AuthManager;
+use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::config_loader::CloudRequirementsLoader;
 use codex_core::config_loader::LoaderOverrides;
@@ -238,6 +241,7 @@ pub struct InProcessAppServerClient {
     command_tx: mpsc::Sender<ClientCommand>,
     event_rx: mpsc::Receiver<InProcessServerEvent>,
     worker_handle: tokio::task::JoinHandle<()>,
+    runtime_handles: InProcessRuntimeHandles,
 }
 
 impl InProcessAppServerClient {
@@ -250,6 +254,7 @@ impl InProcessAppServerClient {
         let channel_capacity = args.channel_capacity.max(1);
         let mut handle =
             codex_app_server::in_process::start(args.into_runtime_start_args()).await?;
+        let runtime_handles = handle.runtime_handles();
         let request_sender = handle.sender();
         let (command_tx, mut command_rx) = mpsc::channel::<ClientCommand>(channel_capacity);
         let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
@@ -400,7 +405,16 @@ impl InProcessAppServerClient {
             command_tx,
             event_rx,
             worker_handle,
+            runtime_handles,
         })
+    }
+
+    pub fn thread_manager(&self) -> Arc<ThreadManager> {
+        self.runtime_handles.thread_manager()
+    }
+
+    pub fn auth_manager(&self) -> Arc<AuthManager> {
+        self.runtime_handles.auth_manager()
     }
 
     /// Sends a typed client request and returns raw JSON-RPC result.
@@ -555,6 +569,7 @@ impl InProcessAppServerClient {
             command_tx,
             event_rx,
             worker_handle,
+            ..
         } = self;
         let mut worker_handle = worker_handle;
         // Drop the caller-facing receiver before asking the worker to shut
@@ -746,6 +761,20 @@ mod tests {
         let (command_tx, _command_rx) = mpsc::channel(1);
         let (event_tx, event_rx) = mpsc::channel(1);
         let worker_handle = tokio::spawn(async {});
+        let config = build_test_config().await;
+        let auth_manager = AuthManager::shared(
+            config.codex_home.clone(),
+            false,
+            config.cli_auth_credentials_store_mode,
+        );
+        let thread_manager = Arc::new(ThreadManager::new(
+            &config,
+            auth_manager.clone(),
+            SessionSource::Cli,
+            codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig {
+                default_mode_request_user_input: false,
+            },
+        ));
         event_tx
             .send(InProcessServerEvent::Lagged { skipped: 3 })
             .await
@@ -756,6 +785,7 @@ mod tests {
             command_tx,
             event_rx,
             worker_handle,
+            runtime_handles: InProcessRuntimeHandles::new(thread_manager, auth_manager),
         };
 
         let event = timeout(Duration::from_secs(2), client.next_event())

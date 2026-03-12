@@ -437,6 +437,14 @@ impl MessageProcessor {
             .subscribe_running_assistant_turn_count()
     }
 
+    pub(crate) fn thread_manager(&self) -> Arc<ThreadManager> {
+        self.codex_message_processor.thread_manager()
+    }
+
+    pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
+        self.codex_message_processor.auth_manager()
+    }
+
     /// Handle a standalone JSON-RPC response originating from the peer.
     pub(crate) async fn process_response(&mut self, response: JSONRPCResponse) {
         tracing::info!("<- response: {:?}", response);

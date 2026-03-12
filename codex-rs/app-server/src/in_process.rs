@@ -74,6 +74,8 @@ use codex_app_server_protocol::Result;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_arg0::Arg0DispatchPaths;
+use codex_core::AuthManager;
+use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::config_loader::CloudRequirementsLoader;
 use codex_core::config_loader::LoaderOverrides;
@@ -155,6 +157,29 @@ pub enum InProcessServerEvent {
     LegacyNotification(JSONRPCNotification),
     /// Indicates one or more events were dropped due to backpressure.
     Lagged { skipped: usize },
+}
+
+#[derive(Clone)]
+pub struct InProcessRuntimeHandles {
+    thread_manager: Arc<ThreadManager>,
+    auth_manager: Arc<AuthManager>,
+}
+
+impl InProcessRuntimeHandles {
+    pub fn new(thread_manager: Arc<ThreadManager>, auth_manager: Arc<AuthManager>) -> Self {
+        Self {
+            thread_manager,
+            auth_manager,
+        }
+    }
+
+    pub fn thread_manager(&self) -> Arc<ThreadManager> {
+        Arc::clone(&self.thread_manager)
+    }
+
+    pub fn auth_manager(&self) -> Arc<AuthManager> {
+        Arc::clone(&self.auth_manager)
+    }
 }
 
 /// Internal message sent from [`InProcessClientHandle`] methods to the runtime task.
@@ -254,6 +279,7 @@ pub struct InProcessClientHandle {
     client: InProcessClientSender,
     event_rx: mpsc::Receiver<InProcessServerEvent>,
     runtime_handle: tokio::task::JoinHandle<()>,
+    runtime_handles: InProcessRuntimeHandles,
 }
 
 impl InProcessClientHandle {
@@ -333,6 +359,10 @@ impl InProcessClientHandle {
     pub fn sender(&self) -> InProcessClientSender {
         self.client.clone()
     }
+
+    pub fn runtime_handles(&self) -> InProcessRuntimeHandles {
+        self.runtime_handles.clone()
+    }
 }
 
 /// Starts an in-process app-server runtime and performs initialize handshake.
@@ -366,11 +396,29 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
     let channel_capacity = args.channel_capacity.max(1);
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
+    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
+    let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(outgoing_tx));
+    let processor_outgoing = Arc::clone(&outgoing_message_sender);
+    let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
+    let mut processor = MessageProcessor::new(MessageProcessorArgs {
+        outgoing: Arc::clone(&processor_outgoing),
+        arg0_paths: args.arg0_paths,
+        config: args.config,
+        cli_overrides: args.cli_overrides,
+        loader_overrides: args.loader_overrides,
+        cloud_requirements: args.cloud_requirements,
+        feedback: args.feedback,
+        log_db: None,
+        config_warnings: args.config_warnings,
+        session_source: args.session_source,
+        enable_codex_api_key_env: args.enable_codex_api_key_env,
+    });
+    let runtime_handles = InProcessRuntimeHandles {
+        thread_manager: processor.thread_manager(),
+        auth_manager: processor.auth_manager(),
+    };
 
     let runtime_handle = tokio::spawn(async move {
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
-        let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(outgoing_tx));
-
         let (writer_tx, mut writer_rx) = mpsc::channel::<OutgoingMessage>(channel_capacity);
         let outbound_initialized = Arc::new(AtomicBool::new(false));
         let outbound_experimental_api_enabled = Arc::new(AtomicBool::new(false));
@@ -393,23 +441,7 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
                 route_outgoing_envelope(&mut outbound_connections, envelope).await;
             }
         });
-
-        let processor_outgoing = Arc::clone(&outgoing_message_sender);
-        let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
-            let mut processor = MessageProcessor::new(MessageProcessorArgs {
-                outgoing: Arc::clone(&processor_outgoing),
-                arg0_paths: args.arg0_paths,
-                config: args.config,
-                cli_overrides: args.cli_overrides,
-                loader_overrides: args.loader_overrides,
-                cloud_requirements: args.cloud_requirements,
-                feedback: args.feedback,
-                log_db: None,
-                config_warnings: args.config_warnings,
-                session_source: args.session_source,
-                enable_codex_api_key_env: args.enable_codex_api_key_env,
-            });
             let mut thread_created_rx = processor.thread_created_receiver();
             let mut session = ConnectionSessionState::default();
             let mut listen_for_threads = true;
@@ -714,6 +746,7 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
         client: InProcessClientSender { client_tx },
         event_rx,
         runtime_handle,
+        runtime_handles,
     }
 }
 

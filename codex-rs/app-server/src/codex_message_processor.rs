@@ -3230,6 +3230,14 @@ impl CodexMessageProcessor {
         self.thread_manager.subscribe_thread_created()
     }
 
+    pub(crate) fn thread_manager(&self) -> Arc<ThreadManager> {
+        Arc::clone(&self.thread_manager)
+    }
+
+    pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
+        Arc::clone(&self.auth_manager)
+    }
+
     pub(crate) async fn connection_initialized(&self, connection_id: ConnectionId) {
         self.thread_state_manager
             .connection_initialized(connection_id)
