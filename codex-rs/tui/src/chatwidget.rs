@@ -481,6 +481,13 @@ pub(crate) struct InProcessAgentContext {
     pub(crate) cloud_requirements: CloudRequirementsLoader,
 }
 
+#[derive(Clone)]
+pub(crate) enum InProcessAgentBootstrap {
+    Start,
+    Resume { thread_id: String },
+    Fork { thread_id: String },
+}
+
 /// Common initialization parameters shared by all `ChatWidget` constructors
 /// (fresh session, resume, fork). Bundled into a struct to keep constructor
 /// signatures manageable.
@@ -501,6 +508,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) status_line_invalid_items_warned: Arc<AtomicBool>,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) in_process_context: InProcessAgentContext,
+    pub(crate) in_process_bootstrap: InProcessAgentBootstrap,
     /// Present only for the initial fresh-session bootstrap when `App::run`
     /// has already started the in-process app-server and wants the first
     /// agent to reuse that client instead of starting a second runtime.
@@ -3280,6 +3288,7 @@ impl ChatWidget {
             status_line_invalid_items_warned,
             session_telemetry,
             in_process_context,
+            in_process_bootstrap,
             prestarted_in_process_client,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
@@ -3293,6 +3302,7 @@ impl ChatWidget {
             app_event_tx.clone(),
             thread_manager,
             in_process_context,
+            in_process_bootstrap,
             prestarted_in_process_client,
         );
 
@@ -3479,6 +3489,7 @@ impl ChatWidget {
             status_line_invalid_items_warned,
             session_telemetry,
             in_process_context: _,
+            in_process_bootstrap: _,
             prestarted_in_process_client: _,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
@@ -3639,6 +3650,7 @@ impl ChatWidget {
         widget
     }
 
+    #[cfg(test)]
     /// Create a ChatWidget attached to an existing conversation (e.g., a fork).
     pub(crate) fn new_from_existing(
         common: ChatWidgetInit,
@@ -3661,6 +3673,7 @@ impl ChatWidget {
             status_line_invalid_items_warned,
             session_telemetry,
             in_process_context: _,
+            in_process_bootstrap: _,
             prestarted_in_process_client: _,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());

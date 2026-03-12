@@ -1752,6 +1752,7 @@ async fn helpers_are_available_and_do_not_panic() {
             cli_kv_overrides: Vec::new(),
             cloud_requirements: CloudRequirementsLoader::default(),
         },
+        in_process_bootstrap: InProcessAgentBootstrap::Start,
         prestarted_in_process_client: None,
     };
     let mut w = ChatWidget::new(init, thread_manager);
@@ -1804,6 +1805,7 @@ async fn new_from_existing_submits_ops_to_the_provided_thread() {
             cli_kv_overrides: Vec::new(),
             cloud_requirements: CloudRequirementsLoader::default(),
         },
+        in_process_bootstrap: InProcessAgentBootstrap::Start,
         prestarted_in_process_client: None,
     };
 
@@ -6025,6 +6027,7 @@ async fn collaboration_modes_defaults_to_code_on_startup() {
             cli_kv_overrides: Vec::new(),
             cloud_requirements: CloudRequirementsLoader::default(),
         },
+        in_process_bootstrap: InProcessAgentBootstrap::Start,
         prestarted_in_process_client: None,
     };
 
@@ -6081,6 +6084,7 @@ async fn experimental_mode_plan_is_ignored_on_startup() {
             cli_kv_overrides: Vec::new(),
             cloud_requirements: CloudRequirementsLoader::default(),
         },
+        in_process_bootstrap: InProcessAgentBootstrap::Start,
         prestarted_in_process_client: None,
     };
 

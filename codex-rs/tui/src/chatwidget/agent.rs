@@ -71,11 +71,15 @@ use codex_app_server_protocol::SkillsRemoteReadResponse;
 use codex_app_server_protocol::SkillsRemoteWriteResponse;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanResponse;
 use codex_app_server_protocol::ThreadCompactStartResponse;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadRealtimeAppendAudioResponse;
 use codex_app_server_protocol::ThreadRealtimeAppendTextResponse;
 use codex_app_server_protocol::ThreadRealtimeStartResponse;
 use codex_app_server_protocol::ThreadRealtimeStopResponse;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -90,6 +94,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_core::CodexThread;
+use codex_core::RolloutRecorder;
 use codex_core::ThreadManager;
 use codex_core::auth::AuthManager;
 use codex_core::config::Config;
@@ -102,6 +107,7 @@ use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::approvals::ApplyPatchApprovalRequestEvent;
 use codex_protocol::approvals::ElicitationRequestEvent;
 use codex_protocol::approvals::ExecApprovalRequestEvent;
+use codex_protocol::config_types::ServiceTier;
 use codex_protocol::dynamic_tools::DynamicToolCallRequest;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::MacOsSeatbeltProfileExtensions;
@@ -113,12 +119,14 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::GetHistoryEntryResponseEvent;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::ListCustomPromptsResponseEvent;
 use codex_protocol::protocol::ListRemoteSkillsResponseEvent;
 use codex_protocol::protocol::ListSkillsResponseEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RemoteSkillDownloadedEvent;
 use codex_protocol::protocol::ReviewTarget as CoreReviewTarget;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::WarningEvent;
@@ -132,6 +140,7 @@ use tracing::warn;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::chatwidget::InProcessAgentBootstrap;
 use crate::chatwidget::InProcessAgentContext;
 use crate::version::CODEX_CLI_VERSION;
 
@@ -1593,6 +1602,102 @@ fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
     }
 }
 
+fn thread_resume_params_from_config(config: &Config, thread_id: String) -> ThreadResumeParams {
+    ThreadResumeParams {
+        thread_id,
+        history: None,
+        path: None,
+        model: config.model.clone(),
+        model_provider: Some(config.model_provider_id.clone()),
+        service_tier: Some(config.service_tier),
+        cwd: Some(config.cwd.to_string_lossy().into_owned()),
+        approval_policy: Some(config.permissions.approval_policy.value().into()),
+        sandbox: Some(thread_sandbox_mode(config.permissions.sandbox_policy.get())),
+        config: None,
+        base_instructions: config.base_instructions.clone(),
+        developer_instructions: config.developer_instructions.clone(),
+        personality: config.personality,
+        persist_extended_history: false,
+    }
+}
+
+fn thread_fork_params_from_config(config: &Config, thread_id: String) -> ThreadForkParams {
+    ThreadForkParams {
+        thread_id,
+        path: None,
+        model: config.model.clone(),
+        model_provider: Some(config.model_provider_id.clone()),
+        service_tier: Some(config.service_tier),
+        cwd: Some(config.cwd.to_string_lossy().into_owned()),
+        approval_policy: Some(config.permissions.approval_policy.value().into()),
+        sandbox: Some(thread_sandbox_mode(config.permissions.sandbox_policy.get())),
+        config: None,
+        base_instructions: config.base_instructions.clone(),
+        developer_instructions: config.developer_instructions.clone(),
+        ephemeral: false,
+        persist_extended_history: false,
+    }
+}
+
+async fn initial_messages_from_rollout_path(path: Option<&PathBuf>) -> Option<Vec<EventMsg>> {
+    let path = path?;
+    let history = RolloutRecorder::get_rollout_history(path).await.ok()?;
+    let InitialHistory::Resumed(resumed) = history else {
+        return None;
+    };
+    let events = resumed
+        .history
+        .into_iter()
+        .filter_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::SessionConfigured(_)) => None,
+            RolloutItem::EventMsg(event) => Some(event),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!events.is_empty()).then_some(events)
+}
+
+struct BootstrappedThreadResponse {
+    thread: codex_app_server_protocol::Thread,
+    model: String,
+    model_provider_id: String,
+    service_tier: Option<ServiceTier>,
+    approval_policy: codex_app_server_protocol::AskForApproval,
+    sandbox_policy: codex_app_server_protocol::SandboxPolicy,
+    cwd: PathBuf,
+    reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+}
+
+impl From<ThreadResumeResponse> for BootstrappedThreadResponse {
+    fn from(response: ThreadResumeResponse) -> Self {
+        Self {
+            thread: response.thread,
+            model: response.model,
+            model_provider_id: response.model_provider,
+            service_tier: response.service_tier,
+            approval_policy: response.approval_policy,
+            sandbox_policy: response.sandbox,
+            cwd: response.cwd,
+            reasoning_effort: response.reasoning_effort,
+        }
+    }
+}
+
+impl From<ThreadForkResponse> for BootstrappedThreadResponse {
+    fn from(response: ThreadForkResponse) -> Self {
+        Self {
+            thread: response.thread,
+            model: response.model,
+            model_provider_id: response.model_provider,
+            service_tier: response.service_tier,
+            approval_policy: response.approval_policy,
+            sandbox_policy: response.sandbox,
+            cwd: response.cwd,
+            reasoning_effort: response.reasoning_effort,
+        }
+    }
+}
+
 /// Enriches an early synthetic `SessionConfigured` with later authoritative
 /// data from the event stream.
 ///
@@ -1655,6 +1760,45 @@ fn active_turn_id_from_turns(turns: &[codex_app_server_protocol::Turn]) -> Optio
         } else {
             None
         }
+    })
+}
+
+async fn session_configured_from_resumed_or_forked_thread(
+    config: &Config,
+    response: BootstrappedThreadResponse,
+    forked_from_id: Option<ThreadId>,
+) -> Result<SessionConfiguredEvent, String> {
+    let BootstrappedThreadResponse {
+        thread,
+        model,
+        model_provider_id,
+        service_tier,
+        approval_policy,
+        sandbox_policy,
+        cwd,
+        reasoning_effort,
+    } = response;
+    let session_id = ThreadId::from_string(&thread.id)
+        .map_err(|err| format!("bootstrap request returned invalid thread id: {err}"))?;
+    let (history_log_id, history_entry_count) = local_history_metadata(config).await;
+    let initial_messages = initial_messages_from_rollout_path(thread.path.as_ref()).await;
+
+    Ok(SessionConfiguredEvent {
+        session_id,
+        forked_from_id,
+        thread_name: thread.name,
+        model,
+        model_provider_id,
+        service_tier,
+        approval_policy: approval_policy.to_core(),
+        sandbox_policy: sandbox_policy.to_core(),
+        cwd,
+        reasoning_effort,
+        history_log_id,
+        history_entry_count,
+        initial_messages,
+        network_proxy: None,
+        rollout_path: thread.path,
     })
 }
 
@@ -3125,6 +3269,7 @@ pub(crate) fn spawn_agent(
     app_event_tx: AppEventSender,
     _server: Arc<ThreadManager>,
     in_process_context: InProcessAgentContext,
+    in_process_bootstrap: InProcessAgentBootstrap,
     prestarted_in_process_client: Option<InProcessAppServerClient>,
 ) -> (UnboundedSender<Op>, UnboundedSender<ThreadScopedOp>) {
     let (codex_op_tx, codex_op_rx) = unbounded_channel::<Op>();
@@ -3156,36 +3301,111 @@ pub(crate) fn spawn_agent(
         };
         let thread_manager = client.thread_manager();
         let auth_manager = client.auth_manager();
+        let session_configured = match in_process_bootstrap {
+            InProcessAgentBootstrap::Start => {
+                let thread_start = match send_request_with_response::<ThreadStartResponse>(
+                    &client,
+                    ClientRequest::ThreadStart {
+                        request_id: request_ids.next(),
+                        params: thread_start_params_from_config(&config),
+                    },
+                    "thread/start",
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        send_error_event(&app_event_tx_clone, err.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(err));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                };
 
-        let thread_start = match send_request_with_response::<ThreadStartResponse>(
-            &client,
-            ClientRequest::ThreadStart {
-                request_id: request_ids.next(),
-                params: thread_start_params_from_config(&config),
-            },
-            "thread/start",
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                send_error_event(&app_event_tx_clone, err.clone());
-                app_event_tx_clone.send(AppEvent::FatalExitRequest(err));
-                let _ = client.shutdown().await;
-                return;
+                match session_configured_from_thread_start_response(&config, thread_start).await {
+                    Ok(event) => event,
+                    Err(message) => {
+                        send_error_event(&app_event_tx_clone, message.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                }
+            }
+            InProcessAgentBootstrap::Resume { thread_id } => {
+                let response = match send_request_with_response::<ThreadResumeResponse>(
+                    &client,
+                    ClientRequest::ThreadResume {
+                        request_id: request_ids.next(),
+                        params: thread_resume_params_from_config(&config, thread_id),
+                    },
+                    "thread/resume",
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        send_error_event(&app_event_tx_clone, err.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(err));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                };
+
+                match session_configured_from_resumed_or_forked_thread(
+                    &config,
+                    response.into(),
+                    None,
+                )
+                .await
+                {
+                    Ok(event) => event,
+                    Err(message) => {
+                        send_error_event(&app_event_tx_clone, message.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                }
+            }
+            InProcessAgentBootstrap::Fork { thread_id } => {
+                let response = match send_request_with_response::<ThreadForkResponse>(
+                    &client,
+                    ClientRequest::ThreadFork {
+                        request_id: request_ids.next(),
+                        params: thread_fork_params_from_config(&config, thread_id.clone()),
+                    },
+                    "thread/fork",
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        send_error_event(&app_event_tx_clone, err.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(err));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                };
+
+                let forked_from_id = ThreadId::from_string(&thread_id).ok();
+                match session_configured_from_resumed_or_forked_thread(
+                    &config,
+                    response.into(),
+                    forked_from_id,
+                )
+                .await
+                {
+                    Ok(event) => event,
+                    Err(message) => {
+                        send_error_event(&app_event_tx_clone, message.clone());
+                        app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
+                        let _ = client.shutdown().await;
+                        return;
+                    }
+                }
             }
         };
-
-        let session_configured =
-            match session_configured_from_thread_start_response(&config, thread_start).await {
-                Ok(event) => event,
-                Err(message) => {
-                    send_error_event(&app_event_tx_clone, message.clone());
-                    app_event_tx_clone.send(AppEvent::FatalExitRequest(message));
-                    let _ = client.shutdown().await;
-                    return;
-                }
-            };
 
         let thread_id = session_configured.session_id.to_string();
         send_codex_event(
@@ -4169,6 +4389,7 @@ mod tests {
                 cli_kv_overrides: Vec::new(),
                 cloud_requirements: CloudRequirementsLoader::default(),
             },
+            InProcessAgentBootstrap::Start,
             None,
         );
 

@@ -13,6 +13,7 @@ use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ExternalEditorState;
+use crate::chatwidget::InProcessAgentBootstrap;
 use crate::chatwidget::InProcessAgentContext;
 use crate::chatwidget::ThreadInputState;
 use crate::chatwidget::ThreadScopedOp;
@@ -57,7 +58,6 @@ use codex_core::config::types::ModelAvailabilityNuxConfig;
 use codex_core::config_loader::CloudRequirementsLoader;
 use codex_core::config_loader::ConfigLayerStackOrdering;
 use codex_core::features::Feature;
-use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::models_manager::model_presets::HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG;
 use codex_core::models_manager::model_presets::HIDE_GPT5_1_MIGRATION_PROMPT_CONFIG;
@@ -821,6 +821,22 @@ fn normalize_harness_overrides_for_cwd(
     Ok(overrides)
 }
 
+async fn start_in_process_primary_client(
+    config: &Config,
+    arg0_paths: Arg0DispatchPaths,
+    cli_kv_overrides: Vec<(String, TomlValue)>,
+    cloud_requirements: CloudRequirementsLoader,
+) -> Result<InProcessAppServerClient> {
+    InProcessAppServerClient::start(in_process_start_args(
+        config,
+        arg0_paths,
+        cli_kv_overrides,
+        cloud_requirements,
+    ))
+    .await
+    .wrap_err("Failed to initialize in-process app-server client")
+}
+
 impl App {
     pub fn chatwidget_init_for_forked_or_resumed_thread(
         &self,
@@ -848,6 +864,7 @@ impl App {
                 cli_kv_overrides: self.cli_kv_overrides.clone(),
                 cloud_requirements: self.cloud_requirements.clone(),
             },
+            in_process_bootstrap: InProcessAgentBootstrap::Start,
             prestarted_in_process_client: None,
         }
     }
@@ -1773,6 +1790,23 @@ impl App {
             self.chat_widget.thread_id(),
             self.chat_widget.thread_name(),
         );
+        let prestarted_in_process_client = match start_in_process_primary_client(
+            &config,
+            self.arg0_paths.clone(),
+            self.cli_kv_overrides.clone(),
+            self.cloud_requirements.clone(),
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to start fresh session: {err}"));
+                return;
+            }
+        };
+        let next_server = prestarted_in_process_client.thread_manager();
+        let next_auth_manager = prestarted_in_process_client.auth_manager();
         self.shutdown_current_thread().await;
         let report = self
             .server
@@ -1785,6 +1819,8 @@ impl App {
                 "failed to close all threads"
             );
         }
+        self.server = next_server.clone();
+        self.auth_manager = next_auth_manager.clone();
         let init = crate::chatwidget::ChatWidgetInit {
             config,
             frame_requester: tui.frame_requester(),
@@ -1792,8 +1828,8 @@ impl App {
             // New sessions start without prefilled message content.
             initial_user_message: None,
             enhanced_keys_supported: self.enhanced_keys_supported,
-            auth_manager: self.auth_manager.clone(),
-            models_manager: self.server.get_models_manager(),
+            auth_manager: next_auth_manager,
+            models_manager: next_server.get_models_manager(),
             feedback: self.feedback.clone(),
             is_first_run: false,
             feedback_audience: self.feedback_audience,
@@ -1806,9 +1842,10 @@ impl App {
                 cli_kv_overrides: self.cli_kv_overrides.clone(),
                 cloud_requirements: self.cloud_requirements.clone(),
             },
-            prestarted_in_process_client: None,
+            in_process_bootstrap: InProcessAgentBootstrap::Start,
+            prestarted_in_process_client: Some(prestarted_in_process_client),
         };
-        self.chat_widget = ChatWidget::new(init, self.server.clone());
+        self.chat_widget = ChatWidget::new(init, next_server);
         self.active_session_events_via_app_server = true;
         self.reset_thread_event_state();
         self.primary_app_server_op_tx = self.chat_widget.thread_scoped_op_sender();
@@ -1970,7 +2007,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         tui: &mut tui::Tui,
-        auth_manager: Arc<AuthManager>,
+        _auth_manager: Arc<AuthManager>,
         mut config: Config,
         arg0_paths: Arg0DispatchPaths,
         cli_kv_overrides: Vec<(String, TomlValue)>,
@@ -1992,32 +2029,16 @@ impl App {
 
         let harness_overrides =
             normalize_harness_overrides_for_cwd(harness_overrides, &config.cwd)?;
-        let (thread_manager, auth_manager, mut prestarted_in_process_client) = if matches!(
-            &session_selection,
-            SessionSelection::StartFresh | SessionSelection::Exit
-        ) {
-            let client = InProcessAppServerClient::start(in_process_start_args(
-                &config,
-                arg0_paths.clone(),
-                cli_kv_overrides.clone(),
-                cloud_requirements.clone(),
-            ))
-            .await
-            .wrap_err("Failed to initialize in-process app-server client")?;
-            (client.thread_manager(), client.auth_manager(), Some(client))
-        } else {
-            let thread_manager = Arc::new(ThreadManager::new(
-                &config,
-                auth_manager.clone(),
-                SessionSource::Cli,
-                CollaborationModesConfig {
-                    default_mode_request_user_input: config
-                        .features
-                        .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
-                },
-            ));
-            (thread_manager, auth_manager, None)
-        };
+        let prestarted_client = start_in_process_primary_client(
+            &config,
+            arg0_paths.clone(),
+            cli_kv_overrides.clone(),
+            cloud_requirements.clone(),
+        )
+        .await?;
+        let thread_manager = prestarted_client.thread_manager();
+        let auth_manager = prestarted_client.auth_manager();
+        let mut prestarted_in_process_client = Some(prestarted_client);
         // TODO(xl): Move into PluginManager once this no longer depends on config feature gating.
         thread_manager
             .plugins_manager()
@@ -2088,10 +2109,6 @@ impl App {
         let enhanced_keys_supported = tui.enhanced_keys_supported();
         let wait_for_initial_session_configured =
             Self::should_wait_for_initial_session(&session_selection);
-        let mut existing_primary_thread: Option<(
-            Arc<codex_core::CodexThread>,
-            SessionConfiguredEvent,
-        )> = None;
         let mut chat_widget = match session_selection {
             SessionSelection::StartFresh | SessionSelection::Exit => {
                 let startup_tooltip_override =
@@ -2122,23 +2139,12 @@ impl App {
                         cli_kv_overrides: cli_kv_overrides.clone(),
                         cloud_requirements: cloud_requirements.clone(),
                     },
+                    in_process_bootstrap: InProcessAgentBootstrap::Start,
                     prestarted_in_process_client: prestarted_in_process_client.take(),
                 };
                 ChatWidget::new(init, thread_manager.clone())
             }
             SessionSelection::Resume(target_session) => {
-                let resumed = thread_manager
-                    .resume_thread_from_rollout(
-                        config.clone(),
-                        target_session.path.clone(),
-                        auth_manager.clone(),
-                        None,
-                    )
-                    .await
-                    .wrap_err_with(|| {
-                        let path_display = target_session.path.display();
-                        format!("Failed to resume session from {path_display}")
-                    })?;
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
@@ -2164,27 +2170,15 @@ impl App {
                         cli_kv_overrides: cli_kv_overrides.clone(),
                         cloud_requirements: cloud_requirements.clone(),
                     },
-                    prestarted_in_process_client: None,
+                    in_process_bootstrap: InProcessAgentBootstrap::Resume {
+                        thread_id: target_session.thread_id.to_string(),
+                    },
+                    prestarted_in_process_client: prestarted_in_process_client.take(),
                 };
-                existing_primary_thread =
-                    Some((resumed.thread.clone(), resumed.session_configured.clone()));
-                ChatWidget::new_from_existing(init, resumed.thread, resumed.session_configured)
+                ChatWidget::new(init, thread_manager.clone())
             }
             SessionSelection::Fork(target_session) => {
                 session_telemetry.counter("codex.thread.fork", 1, &[("source", "cli_subcommand")]);
-                let forked = thread_manager
-                    .fork_thread(
-                        usize::MAX,
-                        config.clone(),
-                        target_session.path.clone(),
-                        false,
-                        None,
-                    )
-                    .await
-                    .wrap_err_with(|| {
-                        let path_display = target_session.path.display();
-                        format!("Failed to fork session from {path_display}")
-                    })?;
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
@@ -2210,11 +2204,12 @@ impl App {
                         cli_kv_overrides: cli_kv_overrides.clone(),
                         cloud_requirements: cloud_requirements.clone(),
                     },
-                    prestarted_in_process_client: None,
+                    in_process_bootstrap: InProcessAgentBootstrap::Fork {
+                        thread_id: target_session.thread_id.to_string(),
+                    },
+                    prestarted_in_process_client: prestarted_in_process_client.take(),
                 };
-                existing_primary_thread =
-                    Some((forked.thread.clone(), forked.session_configured.clone()));
-                ChatWidget::new_from_existing(init, forked.thread, forked.session_configured)
+                ChatWidget::new(init, thread_manager.clone())
             }
         };
 
@@ -2268,10 +2263,6 @@ impl App {
             pending_primary_events: VecDeque::new(),
         };
         app.primary_app_server_op_tx = app.chat_widget.thread_scoped_op_sender();
-        if let Some((thread, session_configured)) = existing_primary_thread.take() {
-            app.attach_existing_primary_thread(thread, session_configured)
-                .await;
-        }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
         #[cfg(target_os = "windows")]
@@ -2502,57 +2493,82 @@ impl App {
                             self.chat_widget.thread_id(),
                             self.chat_widget.thread_name(),
                         );
-                        match self
-                            .server
-                            .resume_thread_from_rollout(
-                                resume_config.clone(),
-                                target_session.path.clone(),
-                                self.auth_manager.clone(),
-                                None,
-                            )
-                            .await
+                        let prestarted_in_process_client = match start_in_process_primary_client(
+                            &resume_config,
+                            self.arg0_paths.clone(),
+                            self.cli_kv_overrides.clone(),
+                            self.cloud_requirements.clone(),
+                        )
+                        .await
                         {
-                            Ok(resumed) => {
-                                self.shutdown_current_thread().await;
-                                let resumed_thread = resumed.thread.clone();
-                                let resumed_session_configured = resumed.session_configured.clone();
-                                self.config = resume_config;
-                                tui.set_notification_method(self.config.tui_notification_method);
-                                self.file_search.update_search_dir(self.config.cwd.clone());
-                                let init = self.chatwidget_init_for_forked_or_resumed_thread(
-                                    tui,
-                                    self.config.clone(),
-                                );
-                                self.chat_widget = ChatWidget::new_from_existing(
-                                    init,
-                                    resumed.thread,
-                                    resumed.session_configured,
-                                );
-                                self.reset_thread_event_state();
-                                self.attach_existing_primary_thread(
-                                    resumed_thread,
-                                    resumed_session_configured,
-                                )
-                                .await;
-                                if let Some(summary) = summary {
-                                    let mut lines: Vec<Line<'static>> =
-                                        vec![summary.usage_line.clone().into()];
-                                    if let Some(command) = summary.resume_command {
-                                        let spans = vec![
-                                            "To continue this session, run ".into(),
-                                            command.cyan(),
-                                        ];
-                                        lines.push(spans.into());
-                                    }
-                                    self.chat_widget.add_plain_history_lines(lines);
-                                }
-                            }
+                            Ok(client) => client,
                             Err(err) => {
-                                let path_display = target_session.path.display();
                                 self.chat_widget.add_error_message(format!(
-                                    "Failed to resume session from {path_display}: {err}"
+                                    "Failed to resume session from {}: {err}",
+                                    target_session.path.display()
                                 ));
+                                return Ok(AppRunControl::Continue);
                             }
+                        };
+                        let next_server = prestarted_in_process_client.thread_manager();
+                        let next_auth_manager = prestarted_in_process_client.auth_manager();
+                        self.shutdown_current_thread().await;
+                        let report = self
+                            .server
+                            .shutdown_all_threads_bounded(Duration::from_secs(10))
+                            .await;
+                        if !report.submit_failed.is_empty() || !report.timed_out.is_empty() {
+                            tracing::warn!(
+                                submit_failed = report.submit_failed.len(),
+                                timed_out = report.timed_out.len(),
+                                "failed to close all threads before resume"
+                            );
+                        }
+                        self.server = next_server.clone();
+                        self.auth_manager = next_auth_manager.clone();
+                        self.config = resume_config;
+                        tui.set_notification_method(self.config.tui_notification_method);
+                        self.file_search.update_search_dir(self.config.cwd.clone());
+                        let init = crate::chatwidget::ChatWidgetInit {
+                            config: self.config.clone(),
+                            frame_requester: tui.frame_requester(),
+                            app_event_tx: self.app_event_tx.clone(),
+                            initial_user_message: None,
+                            enhanced_keys_supported: self.enhanced_keys_supported,
+                            auth_manager: next_auth_manager,
+                            models_manager: next_server.get_models_manager(),
+                            feedback: self.feedback.clone(),
+                            is_first_run: false,
+                            feedback_audience: self.feedback_audience,
+                            model: Some(self.chat_widget.current_model().to_string()),
+                            startup_tooltip_override: None,
+                            status_line_invalid_items_warned: self
+                                .status_line_invalid_items_warned
+                                .clone(),
+                            session_telemetry: self.session_telemetry.clone(),
+                            in_process_context: InProcessAgentContext {
+                                arg0_paths: self.arg0_paths.clone(),
+                                cli_kv_overrides: self.cli_kv_overrides.clone(),
+                                cloud_requirements: self.cloud_requirements.clone(),
+                            },
+                            in_process_bootstrap: InProcessAgentBootstrap::Resume {
+                                thread_id: target_session.thread_id.to_string(),
+                            },
+                            prestarted_in_process_client: Some(prestarted_in_process_client),
+                        };
+                        self.chat_widget = ChatWidget::new(init, next_server);
+                        self.active_session_events_via_app_server = true;
+                        self.reset_thread_event_state();
+                        self.primary_app_server_op_tx = self.chat_widget.thread_scoped_op_sender();
+                        if let Some(summary) = summary {
+                            let mut lines: Vec<Line<'static>> =
+                                vec![summary.usage_line.clone().into()];
+                            if let Some(command) = summary.resume_command {
+                                let spans =
+                                    vec!["To continue this session, run ".into(), command.cyan()];
+                                lines.push(spans.into());
+                            }
+                            self.chat_widget.add_plain_history_lines(lines);
                         }
                     }
                     SessionSelection::Exit
@@ -2576,67 +2592,84 @@ impl App {
                 );
                 self.chat_widget
                     .add_plain_history_lines(vec!["/fork".magenta().into()]);
-                if let Some(path) = self.chat_widget.rollout_path() {
-                    self.refresh_in_memory_config_from_disk_best_effort("forking the thread")
-                        .await;
-                    // Fresh threads expose a precomputed path, but the file is
-                    // materialized lazily on first user message.
-                    if path.exists() {
-                        match self
-                            .server
-                            .fork_thread(usize::MAX, self.config.clone(), path.clone(), false, None)
-                            .await
-                        {
-                            Ok(forked) => {
-                                self.shutdown_current_thread().await;
-                                let forked_thread = forked.thread.clone();
-                                let forked_session_configured = forked.session_configured.clone();
-                                let init = self.chatwidget_init_for_forked_or_resumed_thread(
-                                    tui,
-                                    self.config.clone(),
-                                );
-                                self.chat_widget = ChatWidget::new_from_existing(
-                                    init,
-                                    forked.thread,
-                                    forked.session_configured,
-                                );
-                                self.reset_thread_event_state();
-                                self.attach_existing_primary_thread(
-                                    forked_thread,
-                                    forked_session_configured,
-                                )
-                                .await;
-                                if let Some(summary) = summary {
-                                    let mut lines: Vec<Line<'static>> =
-                                        vec![summary.usage_line.clone().into()];
-                                    if let Some(command) = summary.resume_command {
-                                        let spans = vec![
-                                            "To continue this session, run ".into(),
-                                            command.cyan(),
-                                        ];
-                                        lines.push(spans.into());
-                                    }
-                                    self.chat_widget.add_plain_history_lines(lines);
-                                }
-                            }
-                            Err(err) => {
-                                let path_display = path.display();
-                                self.chat_widget.add_error_message(format!(
-                                    "Failed to fork current session from {path_display}: {err}"
-                                ));
-                            }
-                        }
-                    } else {
-                        self.chat_widget.add_error_message(
-                            "A thread must contain at least one turn before it can be forked."
-                                .to_string(),
-                        );
-                    }
-                } else {
+                let Some(thread_id) = self.chat_widget.thread_id() else {
                     self.chat_widget.add_error_message(
                         "A thread must contain at least one turn before it can be forked."
                             .to_string(),
                     );
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                };
+                self.refresh_in_memory_config_from_disk_best_effort("forking the thread")
+                    .await;
+                let prestarted_in_process_client = match start_in_process_primary_client(
+                    &self.config,
+                    self.arg0_paths.clone(),
+                    self.cli_kv_overrides.clone(),
+                    self.cloud_requirements.clone(),
+                )
+                .await
+                {
+                    Ok(client) => client,
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to fork current session: {err}"));
+                        tui.frame_requester().schedule_frame();
+                        return Ok(AppRunControl::Continue);
+                    }
+                };
+                let next_server = prestarted_in_process_client.thread_manager();
+                let next_auth_manager = prestarted_in_process_client.auth_manager();
+                self.shutdown_current_thread().await;
+                let report = self
+                    .server
+                    .shutdown_all_threads_bounded(Duration::from_secs(10))
+                    .await;
+                if !report.submit_failed.is_empty() || !report.timed_out.is_empty() {
+                    tracing::warn!(
+                        submit_failed = report.submit_failed.len(),
+                        timed_out = report.timed_out.len(),
+                        "failed to close all threads before fork"
+                    );
+                }
+                self.server = next_server.clone();
+                self.auth_manager = next_auth_manager.clone();
+                let init = crate::chatwidget::ChatWidgetInit {
+                    config: self.config.clone(),
+                    frame_requester: tui.frame_requester(),
+                    app_event_tx: self.app_event_tx.clone(),
+                    initial_user_message: None,
+                    enhanced_keys_supported: self.enhanced_keys_supported,
+                    auth_manager: next_auth_manager,
+                    models_manager: next_server.get_models_manager(),
+                    feedback: self.feedback.clone(),
+                    is_first_run: false,
+                    feedback_audience: self.feedback_audience,
+                    model: Some(self.chat_widget.current_model().to_string()),
+                    startup_tooltip_override: None,
+                    status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
+                    session_telemetry: self.session_telemetry.clone(),
+                    in_process_context: InProcessAgentContext {
+                        arg0_paths: self.arg0_paths.clone(),
+                        cli_kv_overrides: self.cli_kv_overrides.clone(),
+                        cloud_requirements: self.cloud_requirements.clone(),
+                    },
+                    in_process_bootstrap: InProcessAgentBootstrap::Fork {
+                        thread_id: thread_id.to_string(),
+                    },
+                    prestarted_in_process_client: Some(prestarted_in_process_client),
+                };
+                self.chat_widget = ChatWidget::new(init, next_server);
+                self.active_session_events_via_app_server = true;
+                self.reset_thread_event_state();
+                self.primary_app_server_op_tx = self.chat_widget.thread_scoped_op_sender();
+                if let Some(summary) = summary {
+                    let mut lines: Vec<Line<'static>> = vec![summary.usage_line.clone().into()];
+                    if let Some(command) = summary.resume_command {
+                        let spans = vec!["To continue this session, run ".into(), command.cyan()];
+                        lines.push(spans.into());
+                    }
+                    self.chat_widget.add_plain_history_lines(lines);
                 }
 
                 tui.frame_requester().schedule_frame();
@@ -3994,28 +4027,6 @@ impl App {
             self.primary_session_configured = Some(session_configured);
             self.activate_thread_channel(thread_id).await;
         }
-    }
-
-    /// Adopt a `CodexThread` obtained from `ThreadManager` (resume or fork) as
-    /// the primary session. Unlike a fresh `spawn_agent` session the thread
-    /// already exists, so this method registers it with a `next_event()`
-    /// listener and flips `active_session_events_via_app_server` off so
-    /// subsequent `register_live_thread` calls know the primary thread's events
-    /// come from the direct listener, not the app-server stream.
-    async fn attach_existing_primary_thread(
-        &mut self,
-        thread: Arc<codex_core::CodexThread>,
-        session_configured: SessionConfiguredEvent,
-    ) {
-        self.active_session_events_via_app_server = false;
-        self.primary_app_server_op_tx = None;
-        let event = Event {
-            id: String::new(),
-            msg: EventMsg::SessionConfigured(session_configured.clone()),
-        };
-        self.register_live_thread(thread, session_configured, true, true)
-            .await;
-        self.handle_codex_event_now(event);
     }
 
     fn reasoning_label(reasoning_effort: Option<ReasoningEffortConfig>) -> &'static str {
@@ -7898,6 +7909,7 @@ mod tests {
                     cli_kv_overrides: Vec::new(),
                     cloud_requirements: CloudRequirementsLoader::default(),
                 },
+                in_process_bootstrap: InProcessAgentBootstrap::Start,
                 prestarted_in_process_client: None,
             },
             codex_op_tx,
