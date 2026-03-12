@@ -2180,6 +2180,7 @@ impl App {
                                 config.clone(),
                                 target_session.path.clone(),
                                 auth_manager.clone(),
+                                None,
                             )
                             .await
                             .wrap_err_with(|| {
@@ -2238,6 +2239,7 @@ impl App {
                                 config.clone(),
                                 target_session.path.clone(),
                                 false,
+                                None,
                             )
                             .await
                             .wrap_err_with(|| {
