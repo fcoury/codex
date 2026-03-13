@@ -38,6 +38,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use self::realtime::PendingSteerCompareKey;
+use crate::app_event::AppServerEvent;
 use crate::app_event::RealtimeAudioDeviceKind;
 #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
 use crate::audio_device::list_realtime_audio_device_names;
@@ -482,6 +483,7 @@ pub(crate) struct ChatWidgetInit {
     // Shared latch so we only warn once about invalid status-line item IDs.
     pub(crate) status_line_invalid_items_warned: Arc<AtomicBool>,
     pub(crate) session_telemetry: SessionTelemetry,
+    pub(crate) use_app_server: bool,
 }
 
 #[derive(Default)]
@@ -708,6 +710,7 @@ pub(crate) struct ChatWidget {
     external_editor_state: ExternalEditorState,
     realtime_conversation: RealtimeConversationUiState,
     last_rendered_user_message_event: Option<RenderedUserMessageEvent>,
+    use_app_server: bool,
 }
 
 /// Snapshot of active-cell state that affects transcript overlay rendering.
@@ -3185,6 +3188,7 @@ impl ChatWidget {
             startup_tooltip_override,
             status_line_invalid_items_warned,
             session_telemetry,
+            use_app_server,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
@@ -3314,6 +3318,7 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            use_app_server,
         };
 
         widget.prefetch_rate_limits();
@@ -3371,6 +3376,7 @@ impl ChatWidget {
             startup_tooltip_override,
             status_line_invalid_items_warned,
             session_telemetry,
+            use_app_server,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
@@ -3499,6 +3505,7 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            use_app_server,
         };
 
         widget.prefetch_rate_limits();
@@ -3548,6 +3555,7 @@ impl ChatWidget {
             startup_tooltip_override: _,
             status_line_invalid_items_warned,
             session_telemetry,
+            use_app_server,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
@@ -3676,6 +3684,7 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            use_app_server,
         };
 
         widget.prefetch_rate_limits();
@@ -8346,13 +8355,24 @@ impl ChatWidget {
     pub(crate) fn clear_esc_backtrack_hint(&mut self) {
         self.bottom_pane.clear_esc_backtrack_hint();
     }
+
     /// Forward an `Op` directly to codex.
     pub(crate) fn submit_op(&mut self, op: Op) -> bool {
         // Record outbound operation for session replay fidelity.
         crate::session_log::log_outbound_op(&op);
-        if matches!(&op, Op::Review { .. }) && !self.bottom_pane.is_task_running() {
-            self.bottom_pane.set_task_running(true);
+
+        match op {
+            Op::ListSkills { cwds, force_reload } => {
+                self.app_event_tx
+                    .send_app_server(AppServerEvent::RequestSkillsList { cwds, force_reload });
+                return true;
+            }
+            Op::Review { .. } if !self.bottom_pane.is_task_running() => {
+                self.bottom_pane.set_task_running(true);
+            }
+            _ => {}
         }
+
         if let Err(e) = self.codex_op_tx.send(op) {
             tracing::error!("failed to submit op: {e}");
             return false;
@@ -8476,7 +8496,7 @@ impl ChatWidget {
         self.bottom_pane.set_connectors_snapshot(Some(snapshot));
     }
 
-    fn refresh_plugin_mentions(&mut self) {
+    pub(crate) fn refresh_plugin_mentions(&mut self) {
         if !self.config.features.enabled(Feature::Plugins) {
             self.bottom_pane.set_plugin_mentions(None);
             return;
@@ -8730,6 +8750,10 @@ impl ChatWidget {
             RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(1, 0, 0, 0)),
         );
         RenderableItem::Owned(Box::new(flex))
+    }
+
+    pub(crate) fn use_app_server(&self) -> bool {
+        self.use_app_server
     }
 }
 

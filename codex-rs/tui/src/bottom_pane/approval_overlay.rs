@@ -894,6 +894,7 @@ fn elicitation_options() -> Vec<ApprovalOption> {
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
     use codex_protocol::models::FileSystemPermissions;
     use codex_protocol::models::MacOsAutomationPermission;
     use codex_protocol::models::MacOsPreferencesPermission;
@@ -905,7 +906,24 @@ mod tests {
     use codex_utils_absolute_path::AbsolutePathBuf;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
+    use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::mpsc::unbounded_channel;
+
+    struct TestAppEventRx(tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>);
+
+    impl TestAppEventRx {
+        fn new(rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>) -> Self {
+            Self(rx)
+        }
+
+        fn try_recv(&mut self) -> Result<AppEvent, TryRecvError> {
+            match self.0.try_recv() {
+                Ok(RuntimeEvent::App(event)) => Ok(event),
+                Ok(other) => panic!("unexpected runtime event: {other:?}"),
+                Err(err) => Err(err),
+            }
+        }
+    }
 
     fn absolute_path(path: &str) -> AbsolutePathBuf {
         AbsolutePathBuf::from_absolute_path(path).expect("absolute path")
@@ -972,7 +990,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_aborts_and_clears_queue() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
         let mut view = ApprovalOverlay::new(make_exec_request(), tx, Features::with_defaults());
         view.enqueue_request(make_exec_request());
@@ -983,8 +1001,9 @@ mod tests {
 
     #[test]
     fn shortcut_triggers_selection() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
+        let mut rx = TestAppEventRx::new(rx);
         let mut view = ApprovalOverlay::new(make_exec_request(), tx, Features::with_defaults());
         assert!(!view.is_complete());
         view.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
@@ -1001,8 +1020,9 @@ mod tests {
 
     #[test]
     fn o_opens_source_thread_for_cross_thread_approval() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
+        let mut rx = TestAppEventRx::new(rx);
         let thread_id = ThreadId::new();
         let mut view = ApprovalOverlay::new(
             ApprovalRequest::Exec {
@@ -1030,7 +1050,7 @@ mod tests {
 
     #[test]
     fn cross_thread_footer_hint_mentions_o_shortcut() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
         let view = ApprovalOverlay::new(
             ApprovalRequest::Exec {
@@ -1055,8 +1075,9 @@ mod tests {
 
     #[test]
     fn exec_prefix_option_emits_execpolicy_amendment() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
+        let mut rx = TestAppEventRx::new(rx);
         let mut view = ApprovalOverlay::new(
             ApprovalRequest::Exec {
                 thread_id: ThreadId::new(),
@@ -1107,8 +1128,9 @@ mod tests {
 
     #[test]
     fn network_deny_forever_shortcut_is_not_bound() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
+        let mut rx = TestAppEventRx::new(rx);
         let mut view = ApprovalOverlay::new(
             ApprovalRequest::Exec {
                 thread_id: ThreadId::new(),
@@ -1146,7 +1168,7 @@ mod tests {
 
     #[test]
     fn header_includes_command_snippet() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
         let command = vec!["echo".into(), "hello".into(), "world".into()];
         let exec_request = ApprovalRequest::Exec {
@@ -1279,7 +1301,7 @@ mod tests {
 
     #[test]
     fn permissions_session_shortcut_submits_session_scope() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, mut rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
         let mut view =
             ApprovalOverlay::new(make_permissions_request(), tx, Features::with_defaults());
@@ -1288,10 +1310,10 @@ mod tests {
 
         let mut saw_op = false;
         while let Ok(ev) = rx.try_recv() {
-            if let AppEvent::SubmitThreadOp {
+            if let RuntimeEvent::App(AppEvent::SubmitThreadOp {
                 op: Op::RequestPermissionsResponse { response, .. },
                 ..
-            } = ev
+            }) = ev
             {
                 assert_eq!(response.scope, PermissionGrantScope::Session);
                 saw_op = true;
@@ -1306,7 +1328,7 @@ mod tests {
 
     #[test]
     fn additional_permissions_prompt_shows_permission_rule_line() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
         let exec_request = ApprovalRequest::Exec {
             thread_id: ThreadId::new(),
@@ -1354,7 +1376,7 @@ mod tests {
 
     #[test]
     fn additional_permissions_prompt_snapshot() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
         let exec_request = ApprovalRequest::Exec {
             thread_id: ThreadId::new(),
@@ -1385,7 +1407,7 @@ mod tests {
 
     #[test]
     fn permissions_prompt_snapshot() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
         let view = ApprovalOverlay::new(make_permissions_request(), tx, Features::with_defaults());
         assert_snapshot!(
@@ -1396,7 +1418,7 @@ mod tests {
 
     #[test]
     fn additional_permissions_macos_prompt_snapshot() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
         let exec_request = ApprovalRequest::Exec {
             thread_id: ThreadId::new(),
@@ -1432,7 +1454,7 @@ mod tests {
 
     #[test]
     fn network_exec_prompt_title_includes_host() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
         let exec_request = ApprovalRequest::Exec {
             thread_id: ThreadId::new(),
@@ -1516,8 +1538,9 @@ mod tests {
 
     #[test]
     fn enter_sets_last_selected_index_without_dismissing() {
-        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
+        let mut rx = TestAppEventRx::new(rx);
         let mut view = ApprovalOverlay::new(make_exec_request(), tx, Features::with_defaults());
         view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 

@@ -65,6 +65,20 @@ pub(crate) struct ConnectorsSnapshot {
     pub(crate) connectors: Vec<AppInfo>,
 }
 
+#[derive(Debug)]
+pub(crate) enum RuntimeEvent {
+    App(AppEvent),
+    AppServer(AppServerEvent),
+}
+
+#[derive(Debug)]
+pub(crate) enum AppServerEvent {
+    RequestSkillsList {
+        cwds: Vec<PathBuf>,
+        force_reload: bool,
+    },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {

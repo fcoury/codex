@@ -1279,6 +1279,7 @@ impl BottomPaneView for RequestUserInputOverlay {
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
     use crate::bottom_pane::selection_popup_common::menu_surface_inset;
     use crate::render::renderable::Renderable;
     use codex_protocol::request_user_input::RequestUserInputQuestion;
@@ -1287,18 +1288,32 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use std::collections::HashMap;
+    use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::mpsc::unbounded_channel;
     use unicode_width::UnicodeWidthStr;
 
-    fn test_sender() -> (
-        AppEventSender,
-        tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-    ) {
-        let (tx_raw, rx) = unbounded_channel::<AppEvent>();
-        (AppEventSender::new(tx_raw), rx)
+    struct TestAppEventRx(tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>);
+
+    impl TestAppEventRx {
+        fn new(rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>) -> Self {
+            Self(rx)
+        }
+
+        fn try_recv(&mut self) -> Result<AppEvent, TryRecvError> {
+            match self.0.try_recv() {
+                Ok(RuntimeEvent::App(event)) => Ok(event),
+                Ok(other) => panic!("unexpected runtime event: {other:?}"),
+                Err(err) => Err(err),
+            }
+        }
     }
 
-    fn expect_interrupt_only(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    fn test_sender() -> (AppEventSender, TestAppEventRx) {
+        let (tx_raw, rx) = unbounded_channel::<RuntimeEvent>();
+        (AppEventSender::new(tx_raw), TestAppEventRx::new(rx))
+    }
+
+    fn expect_interrupt_only(rx: &mut TestAppEventRx) {
         let event = rx.try_recv().expect("expected interrupt AppEvent");
         let AppEvent::CodexOp(op) = event else {
             panic!("expected CodexOp");

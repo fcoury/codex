@@ -291,7 +291,7 @@ mod tests {
     use ratatui::layout::Rect;
     use tokio::sync::mpsc::unbounded_channel;
 
-    use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
 
     #[test]
     fn preview_uses_runtime_values() {
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn setup_view_snapshot_uses_runtime_preview_values() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let view = StatusLineSetupView::new(
             Some(&[
                 StatusLineItem::ModelName.to_string(),

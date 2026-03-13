@@ -9,6 +9,7 @@ use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
 #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
 use crate::app_event::RealtimeAudioDeviceKind;
+use crate::app_event::RuntimeEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::LocalImageAttachment;
@@ -123,6 +124,30 @@ use tempfile::tempdir;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::unbounded_channel;
 use toml::Value as TomlValue;
+
+pub(crate) struct TestAppEventRx(tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>);
+
+impl TestAppEventRx {
+    pub(crate) fn new(rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>) -> Self {
+        Self(rx)
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<AppEvent, TryRecvError> {
+        match self.0.try_recv() {
+            Ok(RuntimeEvent::App(event)) => Ok(event),
+            Ok(other) => panic!("unexpected runtime event: {other:?}"),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub(crate) async fn recv(&mut self) -> Option<AppEvent> {
+        match self.0.recv().await {
+            Some(RuntimeEvent::App(event)) => Some(event),
+            Some(other) => panic!("unexpected runtime event: {other:?}"),
+            None => None,
+        }
+    }
+}
 
 async fn test_config() -> Config {
     // Use base defaults to avoid depending on host state.
@@ -1715,7 +1740,7 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
 )]
 #[tokio::test]
 async fn helpers_are_available_and_do_not_panic() {
-    let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+    let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
     let tx = AppEventSender::new(tx_raw);
     let cfg = test_config().await;
     let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
@@ -1743,6 +1768,7 @@ async fn helpers_are_available_and_do_not_panic() {
         startup_tooltip_override: None,
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         session_telemetry,
+        use_app_server: false,
     };
     let mut w = ChatWidget::new(init, thread_manager);
     // Basic construction sanity.
@@ -1770,10 +1796,10 @@ async fn make_chatwidget_manual(
     model_override: Option<&str>,
 ) -> (
     ChatWidget,
-    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    TestAppEventRx,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
 ) {
-    let (tx_raw, rx) = unbounded_channel::<AppEvent>();
+    let (tx_raw, rx) = unbounded_channel::<RuntimeEvent>();
     let app_event_tx = AppEventSender::new(tx_raw);
     let (op_tx, op_rx) = unbounded_channel::<Op>();
     let mut cfg = test_config().await;
@@ -1901,9 +1927,10 @@ async fn make_chatwidget_manual(
         external_editor_state: ExternalEditorState::Closed,
         realtime_conversation: RealtimeConversationUiState::default(),
         last_rendered_user_message_event: None,
+        use_app_server: false,
     };
     widget.set_model(&resolved_model);
-    (widget, rx, op_rx)
+    (widget, TestAppEventRx::new(rx), op_rx)
 }
 
 // ChatWidget may emit other `Op`s (e.g. history/logging updates) on the same channel; this helper
@@ -1980,7 +2007,7 @@ async fn worked_elapsed_from_resets_when_timer_restarts() {
 pub(crate) async fn make_chatwidget_manual_with_sender() -> (
     ChatWidget,
     AppEventSender,
-    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    TestAppEventRx,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
 ) {
     let (widget, rx, op_rx) = make_chatwidget_manual(None).await;
@@ -1988,9 +2015,7 @@ pub(crate) async fn make_chatwidget_manual_with_sender() -> (
     (widget, app_event_tx, rx, op_rx)
 }
 
-fn drain_insert_history(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-) -> Vec<Vec<ratatui::text::Line<'static>>> {
+fn drain_insert_history(rx: &mut TestAppEventRx) -> Vec<Vec<ratatui::text::Line<'static>>> {
     let mut out = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = ev {
@@ -5588,7 +5613,7 @@ async fn collaboration_modes_defaults_to_code_on_startup() {
     let init = ChatWidgetInit {
         config: cfg,
         frame_requester: FrameRequester::test_dummy(),
-        app_event_tx: AppEventSender::new(unbounded_channel::<AppEvent>().0),
+        app_event_tx: AppEventSender::new(unbounded_channel::<RuntimeEvent>().0),
         initial_user_message: None,
         enhanced_keys_supported: false,
         auth_manager,
@@ -5600,6 +5625,7 @@ async fn collaboration_modes_defaults_to_code_on_startup() {
         startup_tooltip_override: None,
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         session_telemetry,
+        use_app_server: false,
     };
 
     let chat = ChatWidget::new(init, thread_manager);
@@ -5638,7 +5664,7 @@ async fn experimental_mode_plan_is_ignored_on_startup() {
     let init = ChatWidgetInit {
         config: cfg,
         frame_requester: FrameRequester::test_dummy(),
-        app_event_tx: AppEventSender::new(unbounded_channel::<AppEvent>().0),
+        app_event_tx: AppEventSender::new(unbounded_channel::<RuntimeEvent>().0),
         initial_user_message: None,
         enhanced_keys_supported: false,
         auth_manager,
@@ -5650,6 +5676,7 @@ async fn experimental_mode_plan_is_ignored_on_startup() {
         startup_tooltip_override: None,
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         session_telemetry,
+        use_app_server: false,
     };
 
     let chat = ChatWidget::new(init, thread_manager);

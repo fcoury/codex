@@ -548,9 +548,27 @@ impl crate::render::renderable::Renderable for AppLinkView {
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
     use crate::render::renderable::Renderable;
     use insta::assert_snapshot;
+    use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::mpsc::unbounded_channel;
+
+    struct TestAppEventRx(tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>);
+
+    impl TestAppEventRx {
+        fn new(rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>) -> Self {
+            Self(rx)
+        }
+
+        fn try_recv(&mut self) -> Result<AppEvent, TryRecvError> {
+            match self.0.try_recv() {
+                Ok(RuntimeEvent::App(event)) => Ok(event),
+                Ok(other) => panic!("unexpected runtime event: {other:?}"),
+                Err(err) => Err(err),
+            }
+        }
+    }
 
     fn suggestion_target() -> AppLinkElicitationTarget {
         AppLinkElicitationTarget {
@@ -585,7 +603,7 @@ mod tests {
 
     #[test]
     fn installed_app_has_toggle_action() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let view = AppLinkView::new(
             AppLinkViewParams {
@@ -611,8 +629,9 @@ mod tests {
 
     #[test]
     fn toggle_action_sends_set_app_enabled_and_updates_label() {
-        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
+        let mut rx = TestAppEventRx::new(rx);
         let mut view = AppLinkView::new(
             AppLinkViewParams {
                 app_id: "connector_1".to_string(),
@@ -648,7 +667,7 @@ mod tests {
 
     #[test]
     fn install_confirmation_does_not_split_long_url_like_token_without_scheme() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let url_like =
             "example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890";
@@ -692,7 +711,7 @@ mod tests {
 
     #[test]
     fn install_confirmation_render_keeps_url_tail_visible_when_narrow() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let url = "https://example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/artifacts/reports/performance/summary/detail/with/a/very/long/path/tail42";
         let mut view = AppLinkView::new(
@@ -742,8 +761,9 @@ mod tests {
 
     #[test]
     fn install_tool_suggestion_resolves_elicitation_after_confirmation() {
-        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
+        let mut rx = TestAppEventRx::new(rx);
         let mut view = AppLinkView::new(
             AppLinkViewParams {
                 app_id: "connector_google_calendar".to_string(),
@@ -800,8 +820,9 @@ mod tests {
 
     #[test]
     fn declined_tool_suggestion_resolves_elicitation_decline() {
-        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
+        let mut rx = TestAppEventRx::new(rx);
         let mut view = AppLinkView::new(
             AppLinkViewParams {
                 app_id: "connector_google_calendar".to_string(),
@@ -842,8 +863,9 @@ mod tests {
 
     #[test]
     fn enable_tool_suggestion_resolves_elicitation_after_enable() {
-        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
+        let mut rx = TestAppEventRx::new(rx);
         let mut view = AppLinkView::new(
             AppLinkViewParams {
                 app_id: "connector_google_calendar".to_string(),
@@ -892,7 +914,7 @@ mod tests {
 
     #[test]
     fn install_suggestion_with_reason_snapshot() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let view = AppLinkView::new(
             AppLinkViewParams {
@@ -918,7 +940,7 @@ mod tests {
 
     #[test]
     fn enable_suggestion_with_reason_snapshot() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let view = AppLinkView::new(
             AppLinkViewParams {

@@ -292,9 +292,27 @@ impl ChatComposerHistory {
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
     use codex_protocol::protocol::Op;
     use pretty_assertions::assert_eq;
+    use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::mpsc::unbounded_channel;
+
+    struct TestAppEventRx(tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>);
+
+    impl TestAppEventRx {
+        fn new(rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>) -> Self {
+            Self(rx)
+        }
+
+        fn try_recv(&mut self) -> Result<AppEvent, TryRecvError> {
+            match self.0.try_recv() {
+                Ok(RuntimeEvent::App(event)) => Ok(event),
+                Ok(other) => panic!("unexpected runtime event: {other:?}"),
+                Err(err) => Err(err),
+            }
+        }
+    }
 
     #[test]
     fn duplicate_submissions_are_not_recorded() {
@@ -327,8 +345,9 @@ mod tests {
 
     #[test]
     fn navigation_with_async_fetch() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
+        let mut rx = TestAppEventRx::new(rx);
 
         let mut history = ChatComposerHistory::new();
         // Pretend there are 3 persistent entries.
@@ -381,7 +400,7 @@ mod tests {
 
     #[test]
     fn reset_navigation_resets_cursor() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx);
 
         let mut history = ChatComposerHistory::new();

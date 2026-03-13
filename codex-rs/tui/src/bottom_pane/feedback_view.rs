@@ -590,7 +590,7 @@ pub(crate) fn feedback_upload_consent_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
     use crate::app_event_sender::AppEventSender;
     use codex_feedback::feedback_diagnostics::FeedbackDiagnostic;
     use pretty_assertions::assert_eq;
@@ -626,7 +626,7 @@ mod tests {
     }
 
     fn make_view(category: FeedbackCategory) -> FeedbackNoteView {
-        let (tx_raw, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let snapshot = codex_feedback::CodexFeedback::new().snapshot(None);
         FeedbackNoteView::new(
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn feedback_view_with_connectivity_diagnostics() {
-        let (tx_raw, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let diagnostics = FeedbackDiagnostics::new(vec![
             FeedbackDiagnostic {

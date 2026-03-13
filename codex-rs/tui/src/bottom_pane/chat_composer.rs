@@ -4501,6 +4501,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
 
     use crate::bottom_pane::AppEventSender;
     use crate::bottom_pane::ChatComposer;
@@ -4514,7 +4515,7 @@ mod tests {
 
     #[test]
     fn footer_hint_row_is_separated_from_composer() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let composer = ChatComposer::new(
             true,
@@ -4568,7 +4569,7 @@ mod tests {
 
     #[test]
     fn footer_flash_overrides_footer_hint_override() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -4606,7 +4607,7 @@ mod tests {
 
     #[test]
     fn footer_flash_expires_and_falls_back_to_hint_override() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -4655,7 +4656,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -4916,7 +4917,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -4943,7 +4944,7 @@ mod tests {
     fn base_footer_mode_tracks_empty_state_after_quit_hint_expires() {
         use crossterm::event::KeyCode;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -4966,7 +4967,7 @@ mod tests {
 
     #[test]
     fn clear_for_ctrl_c_records_cleared_draft() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -4992,7 +4993,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5054,7 +5055,7 @@ mod tests {
 
     #[test]
     fn clear_for_ctrl_c_preserves_image_draft_state() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5097,7 +5098,7 @@ mod tests {
 
     #[test]
     fn clear_for_ctrl_c_preserves_remote_offset_image_labels() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5139,7 +5140,7 @@ mod tests {
 
     #[test]
     fn apply_history_entry_preserves_local_placeholders_after_remote_prefix() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5182,7 +5183,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5224,7 +5225,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5253,7 +5254,7 @@ mod tests {
 
     #[test]
     fn set_connector_mentions_refreshes_open_mention_popup() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5295,7 +5296,7 @@ mod tests {
 
     #[test]
     fn set_plugin_mentions_refreshes_open_mention_popup() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5402,7 +5403,7 @@ mod tests {
 
     #[test]
     fn set_connector_mentions_excludes_disabled_apps_from_mention_popup() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5440,7 +5441,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5690,7 +5691,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5725,7 +5726,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5756,7 +5757,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5780,7 +5781,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5813,7 +5814,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5861,7 +5862,7 @@ mod tests {
 白云千载 青山依旧\n\
 程序员 与 Unicode 同行";
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5898,7 +5899,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5952,7 +5953,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -5981,7 +5982,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6016,7 +6017,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6049,7 +6050,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6078,7 +6079,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6107,7 +6108,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6141,7 +6142,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6169,7 +6170,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, mut rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6190,7 +6191,7 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let AppEvent::InsertHistoryCell(cell) = event {
+            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
                 let message = cell
                     .display_lines(80)
                     .into_iter()
@@ -6211,7 +6212,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, mut rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6232,7 +6233,7 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let AppEvent::InsertHistoryCell(cell) = event {
+            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
                 let message = cell
                     .display_lines(80)
                     .into_iter()
@@ -6256,7 +6257,7 @@ mod tests {
         use crossterm::event::KeyModifiers;
 
         let large = "y".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6282,7 +6283,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut terminal = match Terminal::new(TestBackend::new(100, 10)) {
             Ok(t) => t,
@@ -6388,7 +6389,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
 
         let mut composer = ChatComposer::new(
@@ -6417,7 +6418,7 @@ mod tests {
     #[test]
     fn slash_popup_model_first_for_mo_logic() {
         use super::super::command_popup::CommandItem;
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6447,7 +6448,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
 
         let mut composer = ChatComposer::new(
@@ -6473,7 +6474,7 @@ mod tests {
     #[test]
     fn slash_popup_resume_for_res_logic() {
         use super::super::command_popup::CommandItem;
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6529,7 +6530,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6572,7 +6573,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6606,7 +6607,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6644,7 +6645,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, mut rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6666,7 +6667,7 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let AppEvent::InsertHistoryCell(cell) = event {
+            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
                 let message = cell
                     .display_lines(80)
                     .into_iter()
@@ -6688,7 +6689,7 @@ mod tests {
         use crossterm::event::KeyEventKind;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6717,7 +6718,7 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn space_hold_timeout_without_release_or_repeat_keeps_typed_space() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6749,7 +6750,7 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn space_hold_timeout_with_repeat_uses_hold_path_without_release() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6783,7 +6784,7 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn space_hold_timeout_with_repeat_does_not_duplicate_existing_space() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6817,7 +6818,7 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn replace_transcription_stops_spinner_for_placeholder() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6844,7 +6845,7 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn set_text_content_stops_all_transcription_spinners() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6914,7 +6915,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6935,7 +6936,7 @@ mod tests {
 
     #[test]
     fn slash_tab_then_enter_dispatches_builtin_command() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6973,7 +6974,7 @@ mod tests {
 
     #[test]
     fn slash_command_elementizes_on_space() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -6995,7 +6996,7 @@ mod tests {
 
     #[test]
     fn slash_command_elementizes_only_known_commands() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7016,7 +7017,7 @@ mod tests {
 
     #[test]
     fn slash_command_element_removed_when_not_at_start() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7048,7 +7049,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7076,7 +7077,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7105,7 +7106,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7146,7 +7147,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7184,7 +7185,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7241,7 +7242,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7320,7 +7321,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7394,7 +7395,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7433,7 +7434,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7473,7 +7474,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7521,7 +7522,7 @@ mod tests {
     // --- Image attachment tests ---
     #[test]
     fn attach_image_and_submit_includes_local_image_paths() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7559,7 +7560,7 @@ mod tests {
 
     #[test]
     fn submit_captures_recent_mention_bindings_before_clearing_textarea() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7592,7 +7593,7 @@ mod tests {
 
     #[test]
     fn history_navigation_restores_remote_and_local_image_attachments() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7626,7 +7627,7 @@ mod tests {
 
     #[test]
     fn history_navigation_restores_remote_only_submissions() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7658,7 +7659,7 @@ mod tests {
 
     #[test]
     fn history_navigation_leaves_cursor_at_end_of_line() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7701,7 +7702,7 @@ mod tests {
 
     #[test]
     fn set_text_content_reattaches_images_without_placeholder_metadata() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7723,7 +7724,7 @@ mod tests {
 
     #[test]
     fn large_paste_preserves_image_text_elements_on_submit() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7766,7 +7767,7 @@ mod tests {
 
     #[test]
     fn large_paste_with_leading_whitespace_trims_and_shifts_elements() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7809,7 +7810,7 @@ mod tests {
 
     #[test]
     fn pasted_crlf_normalizes_newlines_for_elements() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7852,7 +7853,7 @@ mod tests {
 
     #[test]
     fn suppressed_submission_restores_pending_paste_payload() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7898,7 +7899,7 @@ mod tests {
 
     #[test]
     fn attach_image_without_text_submits_empty_text_and_images() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7937,7 +7938,7 @@ mod tests {
 
     #[test]
     fn duplicate_image_placeholders_get_suffix() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -7960,7 +7961,7 @@ mod tests {
 
     #[test]
     fn image_placeholder_backspace_behaves_like_text_placeholder() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8000,7 +8001,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8026,7 +8027,7 @@ mod tests {
 
     #[test]
     fn deleting_one_of_duplicate_image_placeholders_removes_one_entry() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8086,7 +8087,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8149,7 +8150,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8187,7 +8188,7 @@ mod tests {
             ImageBuffer::from_fn(3, 2, |_x, _y| Rgba([1, 2, 3, 255]));
         img.save(&tmp_path).expect("failed to write temp png");
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8209,7 +8210,7 @@ mod tests {
     fn selecting_custom_prompt_without_args_submits_content() {
         let prompt_text = "Hello from saved prompt";
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8248,7 +8249,7 @@ mod tests {
 
     #[test]
     fn custom_prompt_submission_expands_arguments() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8283,7 +8284,7 @@ mod tests {
 
     #[test]
     fn custom_prompt_submission_accepts_quoted_values() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8322,7 +8323,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8377,7 +8378,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8433,7 +8434,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8481,7 +8482,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8545,7 +8546,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8603,7 +8604,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, mut rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8627,7 +8628,8 @@ mod tests {
         }
         assert!(composer.textarea.is_empty());
         match rx.try_recv() {
-            Ok(event) => panic!("unexpected event: {event:?}"),
+            Ok(RuntimeEvent::App(event)) => panic!("unexpected event: {event:?}"),
+            Ok(event) => panic!("unexpected runtime event: {event:?}"),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
             Err(err) => panic!("unexpected channel state: {err:?}"),
         }
@@ -8639,7 +8641,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, mut rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8663,7 +8665,8 @@ mod tests {
         }
         assert!(composer.textarea.is_empty());
         match rx.try_recv() {
-            Ok(event) => panic!("unexpected event: {event:?}"),
+            Ok(RuntimeEvent::App(event)) => panic!("unexpected event: {event:?}"),
+            Ok(event) => panic!("unexpected runtime event: {event:?}"),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
             Err(err) => panic!("unexpected channel state: {err:?}"),
         }
@@ -8671,7 +8674,7 @@ mod tests {
 
     #[test]
     fn custom_prompt_invalid_args_reports_error() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, mut rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8704,7 +8707,7 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let AppEvent::InsertHistoryCell(cell) = event {
+            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
                 let message = cell
                     .display_lines(80)
                     .into_iter()
@@ -8721,7 +8724,7 @@ mod tests {
 
     #[test]
     fn custom_prompt_missing_required_args_reports_error() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, mut rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8752,7 +8755,7 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let AppEvent::InsertHistoryCell(cell) = event {
+            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
                 let message = cell
                     .display_lines(80)
                     .into_iter()
@@ -8776,7 +8779,7 @@ mod tests {
         // Support $1..$9 and $ARGUMENTS in prompt content.
         let prompt_text = "Header: $1\nArgs: $ARGUMENTS\nNinth: $9\n";
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8814,7 +8817,7 @@ mod tests {
 
     #[test]
     fn popup_prompt_submission_prunes_unused_image_attachments() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8852,7 +8855,7 @@ mod tests {
 
     #[test]
     fn numeric_prompt_auto_submit_prunes_unused_image_attachments() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8895,7 +8898,7 @@ mod tests {
 
     #[test]
     fn numeric_prompt_auto_submit_expands_pending_pastes() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8935,7 +8938,7 @@ mod tests {
 
     #[test]
     fn queued_prompt_submission_prunes_unused_image_attachments() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -8976,7 +8979,7 @@ mod tests {
 
     #[test]
     fn prompt_expansion_over_character_limit_reports_error_and_restores_draft() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let (tx, mut rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9010,7 +9013,7 @@ mod tests {
         let actual_chars = format!("Echo: {oversized_arg}").chars().count();
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let AppEvent::InsertHistoryCell(cell) = event {
+            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
                 let message = cell
                     .display_lines(80)
                     .into_iter()
@@ -9059,7 +9062,7 @@ mod tests {
     fn numeric_prompt_positional_args_does_not_error() {
         // Ensure that a prompt with only numeric placeholders does not trigger
         // key=value parsing errors when given positional arguments.
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9095,7 +9098,7 @@ mod tests {
     fn selecting_custom_prompt_with_no_args_inserts_template() {
         let prompt_text = "X:$1 Y:$2 All:[$ARGUMENTS]";
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9131,7 +9134,7 @@ mod tests {
         // '$$' should remain untouched.
         let prompt_text = "Cost: $$ and first: $1";
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9169,7 +9172,7 @@ mod tests {
     fn selecting_custom_prompt_reuses_cached_arguments_join() {
         let prompt_text = "First: $ARGUMENTS\nSecond: $ARGUMENTS";
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9212,7 +9215,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9241,7 +9244,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9288,7 +9291,7 @@ mod tests {
     /// the payload is large, it should insert a placeholder and defer the full text until submit.
     #[test]
     fn burst_paste_fast_large_inserts_placeholder_on_flush() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9327,7 +9330,7 @@ mod tests {
     /// burst. Characters should appear immediately and should not trigger a paste placeholder.
     #[test]
     fn humanlike_typing_1000_chars_appears_live_no_placeholder() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9352,7 +9355,7 @@ mod tests {
         use crossterm::event::KeyModifiers;
         use tokio::sync::mpsc::unbounded_channel;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9382,7 +9385,7 @@ mod tests {
         // use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use tokio::sync::mpsc::unbounded_channel;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9425,7 +9428,7 @@ mod tests {
 
     #[test]
     fn apply_external_edit_rebuilds_text_and_attachments() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9459,7 +9462,7 @@ mod tests {
 
     #[test]
     fn apply_external_edit_drops_missing_attachments() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9484,7 +9487,7 @@ mod tests {
 
     #[test]
     fn apply_external_edit_renumbers_image_placeholders() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9512,7 +9515,7 @@ mod tests {
 
     #[test]
     fn current_text_with_pending_expands_placeholders() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9537,7 +9540,7 @@ mod tests {
 
     #[test]
     fn apply_external_edit_limits_duplicates_to_occurrences() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9565,7 +9568,7 @@ mod tests {
 
     #[test]
     fn remote_images_do_not_modify_textarea_text_or_elements() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9586,7 +9589,7 @@ mod tests {
 
     #[test]
     fn attach_image_after_remote_prefix_uses_offset_label() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9608,7 +9611,7 @@ mod tests {
 
     #[test]
     fn prepare_submission_keeps_remote_offset_local_placeholder_numbering() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9645,7 +9648,7 @@ mod tests {
 
     #[test]
     fn prepare_submission_with_only_remote_images_returns_empty_text() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9665,7 +9668,7 @@ mod tests {
 
     #[test]
     fn delete_selected_remote_image_relabels_local_placeholders() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,
@@ -9704,7 +9707,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let (tx, _rx) = unbounded_channel::<RuntimeEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
             true,

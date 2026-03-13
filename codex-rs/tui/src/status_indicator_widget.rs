@@ -292,7 +292,7 @@ impl Renderable for StatusIndicatorWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
     use crate::app_event_sender::AppEventSender;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn renders_with_working_header() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let w = StatusIndicatorWidget::new(tx, crate::tui::FrameRequester::test_dummy(), true);
 
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn renders_truncated() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let w = StatusIndicatorWidget::new(tx, crate::tui::FrameRequester::test_dummy(), true);
 
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn renders_wrapped_details_panama_two_lines() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let mut w = StatusIndicatorWidget::new(tx, crate::tui::FrameRequester::test_dummy(), false);
         w.update_details(
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn timer_pauses_when_requested() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let mut widget =
             StatusIndicatorWidget::new(tx, crate::tui::FrameRequester::test_dummy(), true);
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn details_overflow_adds_ellipsis() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let mut w = StatusIndicatorWidget::new(tx, crate::tui::FrameRequester::test_dummy(), true);
         w.update_details(
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn details_args_can_disable_capitalization_and_limit_lines() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let mut w = StatusIndicatorWidget::new(tx, crate::tui::FrameRequester::test_dummy(), true);
         w.update_details(

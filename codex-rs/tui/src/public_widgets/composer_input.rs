@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use std::time::Duration;
 
-use crate::app_event::AppEvent;
+use crate::app_event::RuntimeEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ChatComposer;
 use crate::bottom_pane::InputResult;
@@ -27,8 +27,8 @@ pub enum ComposerAction {
 /// reusable text input field with submit semantics.
 pub struct ComposerInput {
     inner: ChatComposer,
-    _tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
-    rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    _tx: tokio::sync::mpsc::UnboundedSender<RuntimeEvent>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>,
 }
 
 impl ComposerInput {

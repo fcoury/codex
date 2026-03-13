@@ -383,7 +383,7 @@ fn skills_toggle_hint_line() -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
     use insta::assert_snapshot;
     use ratatui::layout::Rect;
     use tokio::sync::mpsc::unbounded_channel;
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn renders_basic_popup() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<RuntimeEvent>();
         let tx = AppEventSender::new(tx_raw);
         let items = vec![
             SkillsToggleItem {

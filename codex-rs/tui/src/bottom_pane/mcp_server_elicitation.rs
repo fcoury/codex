@@ -1631,14 +1631,31 @@ fn wrap_footer_tips(width: u16, tips: Vec<FooterTip>) -> Vec<Vec<FooterTip>> {
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use crate::app_event::RuntimeEvent;
     use crate::render::renderable::Renderable;
     use pretty_assertions::assert_eq;
-    use tokio::sync::mpsc::UnboundedReceiver;
+    use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::mpsc::unbounded_channel;
 
-    fn test_sender() -> (AppEventSender, UnboundedReceiver<AppEvent>) {
-        let (tx_raw, rx) = unbounded_channel::<AppEvent>();
-        (AppEventSender::new(tx_raw), rx)
+    struct TestAppEventRx(tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>);
+
+    impl TestAppEventRx {
+        fn new(rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>) -> Self {
+            Self(rx)
+        }
+
+        fn try_recv(&mut self) -> Result<AppEvent, TryRecvError> {
+            match self.0.try_recv() {
+                Ok(RuntimeEvent::App(event)) => Ok(event),
+                Ok(other) => panic!("unexpected runtime event: {other:?}"),
+                Err(err) => Err(err),
+            }
+        }
+    }
+
+    fn test_sender() -> (AppEventSender, TestAppEventRx) {
+        let (tx_raw, rx) = unbounded_channel::<RuntimeEvent>();
+        (AppEventSender::new(tx_raw), TestAppEventRx::new(rx))
     }
 
     fn form_request(
