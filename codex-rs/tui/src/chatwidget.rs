@@ -8363,8 +8363,13 @@ impl ChatWidget {
 
         match op {
             Op::ListSkills { cwds, force_reload } => {
-                self.app_event_tx
-                    .send_app_server(AppServerEvent::RequestSkillsList { cwds, force_reload });
+                if self.use_app_server {
+                    self.app_event_tx
+                        .send_app_server(AppServerEvent::RequestSkillsList { cwds, force_reload });
+                } else {
+                    self.app_event_tx
+                        .send(AppEvent::CodexOp(Op::ListSkills { cwds, force_reload }));
+                }
                 return true;
             }
             Op::Review { .. } if !self.bottom_pane.is_task_running() => {
