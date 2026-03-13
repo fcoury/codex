@@ -15,6 +15,7 @@ use codex_file_search::FileMatch;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_utils_approval_presets::ApprovalPreset;
 
@@ -67,16 +68,30 @@ pub(crate) struct ConnectorsSnapshot {
 
 #[derive(Debug)]
 pub(crate) enum RuntimeEvent {
-    App(AppEvent),
-    AppServer(AppServerEvent),
+    App(Box<AppEvent>),
+    Action(TuiAction),
 }
 
-#[derive(Debug)]
-pub(crate) enum AppServerEvent {
-    RequestSkillsList {
+#[derive(Debug, Clone)]
+pub(crate) enum TuiAction {
+    ListSkills {
         cwds: Vec<PathBuf>,
         force_reload: bool,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum AppServerRequest {
+    SkillsList {
+        cwds: Vec<PathBuf>,
+        force_reload: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum RoutedRequest {
+    Core(Box<Op>),
+    AppServer(AppServerRequest),
 }
 
 #[allow(clippy::large_enum_variant)]

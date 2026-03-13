@@ -133,18 +133,22 @@ impl TestAppEventRx {
     }
 
     pub(crate) fn try_recv(&mut self) -> Result<AppEvent, TryRecvError> {
-        match self.0.try_recv() {
-            Ok(RuntimeEvent::App(event)) => Ok(event),
-            Ok(other) => panic!("unexpected runtime event: {other:?}"),
-            Err(err) => Err(err),
+        loop {
+            match self.0.try_recv() {
+                Ok(RuntimeEvent::App(event)) => return Ok(*event),
+                Ok(RuntimeEvent::Action(_)) => continue,
+                Err(err) => return Err(err),
+            }
         }
     }
 
     pub(crate) async fn recv(&mut self) -> Option<AppEvent> {
-        match self.0.recv().await {
-            Some(RuntimeEvent::App(event)) => Some(event),
-            Some(other) => panic!("unexpected runtime event: {other:?}"),
-            None => None,
+        loop {
+            match self.0.recv().await {
+                Some(RuntimeEvent::App(event)) => return Some(*event),
+                Some(RuntimeEvent::Action(_)) => continue,
+                None => return None,
+            }
         }
     }
 }
@@ -1799,6 +1803,17 @@ async fn make_chatwidget_manual(
     TestAppEventRx,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
 ) {
+    make_chatwidget_manual_with_use_app_server(model_override, false).await
+}
+
+pub(crate) async fn make_chatwidget_manual_with_use_app_server(
+    model_override: Option<&str>,
+    use_app_server: bool,
+) -> (
+    ChatWidget,
+    TestAppEventRx,
+    tokio::sync::mpsc::UnboundedReceiver<Op>,
+) {
     let (tx_raw, rx) = unbounded_channel::<RuntimeEvent>();
     let app_event_tx = AppEventSender::new(tx_raw);
     let (op_tx, op_rx) = unbounded_channel::<Op>();
@@ -1927,7 +1942,7 @@ async fn make_chatwidget_manual(
         external_editor_state: ExternalEditorState::Closed,
         realtime_conversation: RealtimeConversationUiState::default(),
         last_rendered_user_message_event: None,
-        use_app_server: false,
+        use_app_server,
     };
     widget.set_model(&resolved_model);
     (widget, TestAppEventRx::new(rx), op_rx)
@@ -1964,6 +1979,25 @@ fn assert_no_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) {
             "unexpected submit op: {op:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn list_skills_without_app_server_uses_core_op_channel() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+
+    assert!(chat.submit_op(Op::ListSkills {
+        cwds: Vec::new(),
+        force_reload: true,
+    }));
+
+    assert_matches!(
+        op_rx.try_recv(),
+        Ok(Op::ListSkills {
+            cwds,
+            force_reload: true,
+        }) if cwds.is_empty()
+    );
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
 }
 
 pub(crate) fn set_chatgpt_auth(chat: &mut ChatWidget) {
@@ -2011,6 +2045,20 @@ pub(crate) async fn make_chatwidget_manual_with_sender() -> (
     tokio::sync::mpsc::UnboundedReceiver<Op>,
 ) {
     let (widget, rx, op_rx) = make_chatwidget_manual(None).await;
+    let app_event_tx = widget.app_event_tx.clone();
+    (widget, app_event_tx, rx, op_rx)
+}
+
+pub(crate) async fn make_chatwidget_manual_with_sender_and_use_app_server(
+    use_app_server: bool,
+) -> (
+    ChatWidget,
+    AppEventSender,
+    TestAppEventRx,
+    tokio::sync::mpsc::UnboundedReceiver<Op>,
+) {
+    let (widget, rx, op_rx) =
+        make_chatwidget_manual_with_use_app_server(None, use_app_server).await;
     let app_event_tx = widget.app_event_tx.clone();
     (widget, app_event_tx, rx, op_rx)
 }

@@ -38,8 +38,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use self::realtime::PendingSteerCompareKey;
-use crate::app_event::AppServerEvent;
 use crate::app_event::RealtimeAudioDeviceKind;
+use crate::app_event::TuiAction;
 #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
 use crate::audio_device::list_realtime_audio_device_names;
 use crate::bottom_pane::StatusLineItem;
@@ -1304,10 +1304,7 @@ impl ChatWidget {
         }
         // Ask codex-core to enumerate custom prompts for this session.
         self.submit_op(Op::ListCustomPrompts);
-        self.submit_op(Op::ListSkills {
-            cwds: Vec::new(),
-            force_reload: true,
-        });
+        self.request_skills_list(Vec::new(), true);
         if self.connectors_enabled() {
             self.prefetch_connectors();
         }
@@ -4996,12 +4993,7 @@ impl ChatWidget {
             EventMsg::ListCustomPromptsResponse(ev) => self.on_list_custom_prompts(ev),
             EventMsg::ListSkillsResponse(ev) => self.on_list_skills(ev),
             EventMsg::ListRemoteSkillsResponse(_) | EventMsg::RemoteSkillDownloaded(_) => {}
-            EventMsg::SkillsUpdateAvailable => {
-                self.submit_op(Op::ListSkills {
-                    cwds: Vec::new(),
-                    force_reload: true,
-                });
-            }
+            EventMsg::SkillsUpdateAvailable => self.request_skills_list(Vec::new(), true),
             EventMsg::ShutdownComplete => self.on_shutdown_complete(),
             EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => self.on_turn_diff(unified_diff),
             EventMsg::DeprecationNotice(ev) => self.on_deprecation_notice(ev),
@@ -8361,21 +8353,8 @@ impl ChatWidget {
         // Record outbound operation for session replay fidelity.
         crate::session_log::log_outbound_op(&op);
 
-        match op {
-            Op::ListSkills { cwds, force_reload } => {
-                if self.use_app_server {
-                    self.app_event_tx
-                        .send_app_server(AppServerEvent::RequestSkillsList { cwds, force_reload });
-                } else {
-                    self.app_event_tx
-                        .send(AppEvent::CodexOp(Op::ListSkills { cwds, force_reload }));
-                }
-                return true;
-            }
-            Op::Review { .. } if !self.bottom_pane.is_task_running() => {
-                self.bottom_pane.set_task_running(true);
-            }
-            _ => {}
+        if matches!(&op, Op::Review { .. }) && !self.bottom_pane.is_task_running() {
+            self.bottom_pane.set_task_running(true);
         }
 
         if let Err(e) = self.codex_op_tx.send(op) {
@@ -8383,6 +8362,11 @@ impl ChatWidget {
             return false;
         }
         true
+    }
+
+    fn request_skills_list(&mut self, cwds: Vec<PathBuf>, force_reload: bool) {
+        self.app_event_tx
+            .send_tui_action(TuiAction::ListSkills { cwds, force_reload });
     }
 
     fn on_list_mcp_tools(&mut self, ev: McpListToolsResponseEvent) {

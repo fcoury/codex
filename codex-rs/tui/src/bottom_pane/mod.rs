@@ -1257,7 +1257,7 @@ mod tests {
 
         fn try_recv(&mut self) -> Result<AppEvent, TryRecvError> {
             match self.0.try_recv() {
-                Ok(RuntimeEvent::App(event)) => Ok(event),
+                Ok(RuntimeEvent::App(event)) => Ok(*event),
                 Ok(other) => panic!("unexpected runtime event: {other:?}"),
                 Err(err) => Err(err),
             }

@@ -6191,17 +6191,18 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
-                let message = cell
-                    .display_lines(80)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(message.contains(&user_input_too_large_message(input.chars().count())));
-                found_error = true;
-                break;
-            }
+            if let RuntimeEvent::App(event) = event
+                && let AppEvent::InsertHistoryCell(cell) = *event {
+                    let message = cell
+                        .display_lines(80)
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(message.contains(&user_input_too_large_message(input.chars().count())));
+                    found_error = true;
+                    break;
+                }
         }
         assert!(found_error, "expected oversized-input error history cell");
     }
@@ -6233,17 +6234,18 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
-                let message = cell
-                    .display_lines(80)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(message.contains(&user_input_too_large_message(input.chars().count())));
-                found_error = true;
-                break;
-            }
+            if let RuntimeEvent::App(event) = event
+                && let AppEvent::InsertHistoryCell(cell) = *event {
+                    let message = cell
+                        .display_lines(80)
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(message.contains(&user_input_too_large_message(input.chars().count())));
+                    found_error = true;
+                    break;
+                }
         }
         assert!(found_error, "expected oversized-input error history cell");
     }
@@ -6667,17 +6669,18 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
-                let message = cell
-                    .display_lines(80)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(message.contains("disabled while a task is in progress"));
-                found_error = true;
-                break;
-            }
+            if let RuntimeEvent::App(event) = event
+                && let AppEvent::InsertHistoryCell(cell) = *event {
+                    let message = cell
+                        .display_lines(80)
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(message.contains("disabled while a task is in progress"));
+                    found_error = true;
+                    break;
+                }
         }
         assert!(found_error, "expected error history cell to be sent");
     }
@@ -8628,7 +8631,7 @@ mod tests {
         }
         assert!(composer.textarea.is_empty());
         match rx.try_recv() {
-            Ok(RuntimeEvent::App(event)) => panic!("unexpected event: {event:?}"),
+            Ok(RuntimeEvent::App(event)) => panic!("unexpected event: {:?}", *event),
             Ok(event) => panic!("unexpected runtime event: {event:?}"),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
             Err(err) => panic!("unexpected channel state: {err:?}"),
@@ -8665,7 +8668,7 @@ mod tests {
         }
         assert!(composer.textarea.is_empty());
         match rx.try_recv() {
-            Ok(RuntimeEvent::App(event)) => panic!("unexpected event: {event:?}"),
+            Ok(RuntimeEvent::App(event)) => panic!("unexpected event: {:?}", *event),
             Ok(event) => panic!("unexpected runtime event: {event:?}"),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
             Err(err) => panic!("unexpected channel state: {err:?}"),
@@ -8707,17 +8710,18 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
-                let message = cell
-                    .display_lines(80)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(message.contains("expected key=value"));
-                found_error = true;
-                break;
-            }
+            if let RuntimeEvent::App(event) = event
+                && let AppEvent::InsertHistoryCell(cell) = *event {
+                    let message = cell
+                        .display_lines(80)
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(message.contains("expected key=value"));
+                    found_error = true;
+                    break;
+                }
         }
         assert!(found_error, "expected error history cell to be sent");
     }
@@ -8755,18 +8759,19 @@ mod tests {
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
-                let message = cell
-                    .display_lines(80)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(message.to_lowercase().contains("missing required args"));
-                assert!(message.contains("BRANCH"));
-                found_error = true;
-                break;
-            }
+            if let RuntimeEvent::App(event) = event
+                && let AppEvent::InsertHistoryCell(cell) = *event {
+                    let message = cell
+                        .display_lines(80)
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(message.to_lowercase().contains("missing required args"));
+                    assert!(message.contains("BRANCH"));
+                    found_error = true;
+                    break;
+                }
         }
         assert!(
             found_error,
@@ -9013,17 +9018,18 @@ mod tests {
         let actual_chars = format!("Echo: {oversized_arg}").chars().count();
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
-            if let RuntimeEvent::App(AppEvent::InsertHistoryCell(cell)) = event {
-                let message = cell
-                    .display_lines(80)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(message.contains(&user_input_too_large_message(actual_chars)));
-                found_error = true;
-                break;
-            }
+            if let RuntimeEvent::App(event) = event
+                && let AppEvent::InsertHistoryCell(cell) = *event {
+                    let message = cell
+                        .display_lines(80)
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(message.contains(&user_input_too_large_message(actual_chars)));
+                    found_error = true;
+                    break;
+                }
         }
         assert!(found_error, "expected oversized-input error history cell");
     }

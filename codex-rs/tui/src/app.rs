@@ -1,11 +1,13 @@
 use crate::EmbeddedAppServer;
 use crate::app_backtrack::BacktrackState;
 use crate::app_event::AppEvent;
-use crate::app_event::AppServerEvent;
+use crate::app_event::AppServerRequest;
 use crate::app_event::ConnectorsSnapshot;
 use crate::app_event::ExitMode;
 use crate::app_event::RealtimeAudioDeviceKind;
+use crate::app_event::RoutedRequest;
 use crate::app_event::RuntimeEvent;
+use crate::app_event::TuiAction;
 #[cfg(target_os = "windows")]
 use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_event_sender::AppEventSender;
@@ -189,6 +191,18 @@ fn session_summary(
         usage_line,
         resume_command,
     })
+}
+
+fn route_tui_action(chat_widget: &ChatWidget, action: TuiAction) -> RoutedRequest {
+    match action {
+        TuiAction::ListSkills { cwds, force_reload } => {
+            if chat_widget.use_app_server() {
+                RoutedRequest::AppServer(AppServerRequest::SkillsList { cwds, force_reload })
+            } else {
+                RoutedRequest::Core(Box::new(Op::ListSkills { cwds, force_reload }))
+            }
+        }
+    }
 }
 
 fn errors_for_cwd(cwd: &Path, response: &ListSkillsResponseEvent) -> Vec<SkillErrorInfo> {
@@ -2115,10 +2129,14 @@ impl App {
             let control = select! {
                 Some(event) = app_event_rx.recv() => {
                     match event {
-                        RuntimeEvent::App(event) => app.handle_event(tui, event).await?,
-                        RuntimeEvent::AppServer(event) => {
-                            match event {
-                                AppServerEvent::RequestSkillsList { cwds, force_reload } => {
+                        RuntimeEvent::App(event) => app.handle_event(tui, *event).await?,
+                        RuntimeEvent::Action(action) => match route_tui_action(&app.chat_widget, action) {
+                            RoutedRequest::Core(op) => {
+                                app.chat_widget.submit_op(*op);
+                                AppRunControl::Continue
+                            }
+                            RoutedRequest::AppServer(request) => match request {
+                                AppServerRequest::SkillsList { cwds, force_reload } => {
                                     let response: SkillsListResponse = embedded_app_server
                                         .client
                                         .request_typed(ClientRequest::SkillsList {
@@ -2133,18 +2151,23 @@ impl App {
                                         .map_err(|err| color_eyre::eyre::eyre!("skills/list failed: {err}"))?;
 
                                     let event = ListSkillsResponseEvent {
-                                        skills: response.data.into_iter().map(into_core_skills_list_entry).collect(),
+                                        skills: response
+                                            .data
+                                            .into_iter()
+                                            .map(into_core_skills_list_entry)
+                                            .collect(),
                                     };
 
-                                    emit_skill_load_warnings(&app.app_event_tx, &errors_for_cwd(&app.config.cwd, &event));
-
+                                    emit_skill_load_warnings(
+                                        &app.app_event_tx,
+                                        &errors_for_cwd(&app.config.cwd, &event),
+                                    );
                                     app.chat_widget.set_skills_from_response(&event);
                                     app.chat_widget.refresh_plugin_mentions();
 
-
                                     AppRunControl::Continue
                                 }
-                            }
+                            },
                         }
                     }
                 }
@@ -4075,6 +4098,7 @@ mod tests {
     use crate::app_backtrack::user_count;
     use crate::chatwidget::tests::TestAppEventRx;
     use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
+    use crate::chatwidget::tests::make_chatwidget_manual_with_sender_and_use_app_server;
     use crate::chatwidget::tests::set_chatgpt_auth;
     use crate::file_search::FileSearchManager;
     use crate::history_cell::AgentMessageCell;
@@ -5769,6 +5793,104 @@ mod tests {
             .join("\n");
 
         assert_snapshot!("clear_ui_header_fast_status_gpt54_only", rendered);
+    }
+
+    #[tokio::test]
+    async fn route_tui_action_routes_list_skills_to_core_without_app_server() {
+        let app = make_test_app().await;
+
+        let routed = route_tui_action(
+            &app.chat_widget,
+            TuiAction::ListSkills {
+                cwds: Vec::new(),
+                force_reload: true,
+            },
+        );
+
+        assert_matches!(
+            routed,
+            RoutedRequest::Core(op)
+                if matches!(
+                    &*op,
+                    Op::ListSkills {
+                        cwds,
+                        force_reload: true,
+                    } if cwds.is_empty()
+                )
+        );
+    }
+
+    #[tokio::test]
+    async fn route_tui_action_routes_list_skills_to_app_server_with_flag() {
+        let (chat_widget, app_event_tx, _rx, _op_rx) =
+            make_chatwidget_manual_with_sender_and_use_app_server(true).await;
+        let config = chat_widget.config_ref().clone();
+        let server = Arc::new(
+            codex_core::test_support::thread_manager_with_models_provider(
+                CodexAuth::from_api_key("Test API Key"),
+                config.model_provider.clone(),
+            ),
+        );
+        let auth_manager = codex_core::test_support::auth_manager_from_auth(
+            CodexAuth::from_api_key("Test API Key"),
+        );
+        let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
+        let model = codex_core::test_support::get_model_offline(config.model.as_deref());
+        let session_telemetry = test_session_telemetry(&config, model.as_str());
+
+        let app = App {
+            server,
+            session_telemetry,
+            app_event_tx,
+            chat_widget,
+            auth_manager,
+            config,
+            active_profile: None,
+            cli_kv_overrides: Vec::new(),
+            harness_overrides: ConfigOverrides::default(),
+            runtime_approval_policy_override: None,
+            runtime_sandbox_policy_override: None,
+            file_search,
+            transcript_cells: Vec::new(),
+            overlay: None,
+            deferred_history_lines: Vec::new(),
+            has_emitted_history_lines: false,
+            enhanced_keys_supported: false,
+            commit_anim_running: Arc::new(AtomicBool::new(false)),
+            status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+            backtrack: BacktrackState::default(),
+            backtrack_render_pending: false,
+            feedback: codex_feedback::CodexFeedback::new(),
+            feedback_audience: FeedbackAudience::External,
+            pending_update_action: None,
+            suppress_shutdown_complete: false,
+            pending_shutdown_exit_thread_id: None,
+            windows_sandbox: WindowsSandboxState::default(),
+            thread_event_channels: HashMap::new(),
+            thread_event_listener_tasks: HashMap::new(),
+            agent_navigation: AgentNavigationState::default(),
+            active_thread_id: None,
+            active_thread_rx: None,
+            primary_thread_id: None,
+            primary_session_configured: None,
+            pending_primary_events: VecDeque::new(),
+        };
+
+        let routed = route_tui_action(
+            &app.chat_widget,
+            TuiAction::ListSkills {
+                cwds: vec![PathBuf::from("/tmp/project")],
+                force_reload: true,
+            },
+        );
+
+        assert_matches!(
+            routed,
+            RoutedRequest::AppServer(AppServerRequest::SkillsList {
+                cwds,
+                force_reload: true,
+            }) if cwds == vec![PathBuf::from("/tmp/project")]
+        );
     }
 
     async fn make_test_app() -> App {

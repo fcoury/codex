@@ -1,8 +1,8 @@
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app_event::AppEvent;
-use crate::app_event::AppServerEvent;
 use crate::app_event::RuntimeEvent;
+use crate::app_event::TuiAction;
 use crate::session_log;
 
 #[derive(Clone, Debug)]
@@ -23,14 +23,14 @@ impl AppEventSender {
         if !matches!(event, AppEvent::CodexOp(_)) {
             session_log::log_inbound_app_event(&event);
         }
-        if let Err(e) = self.app_event_tx.send(RuntimeEvent::App(event)) {
+        if let Err(e) = self.app_event_tx.send(RuntimeEvent::App(Box::new(event))) {
             tracing::error!("failed to send event: {e}");
         }
     }
 
-    pub(crate) fn send_app_server(&self, event: AppServerEvent) {
-        if let Err(e) = self.app_event_tx.send(RuntimeEvent::AppServer(event)) {
-            tracing::error!("failed to send app server event: {e}");
+    pub(crate) fn send_tui_action(&self, event: TuiAction) {
+        if let Err(e) = self.app_event_tx.send(RuntimeEvent::Action(event)) {
+            tracing::error!("failed to send TUI action: {e}");
         }
     }
 }

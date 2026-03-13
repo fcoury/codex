@@ -918,7 +918,7 @@ mod tests {
 
         fn try_recv(&mut self) -> Result<AppEvent, TryRecvError> {
             match self.0.try_recv() {
-                Ok(RuntimeEvent::App(event)) => Ok(event),
+                Ok(RuntimeEvent::App(event)) => Ok(*event),
                 Ok(other) => panic!("unexpected runtime event: {other:?}"),
                 Err(err) => Err(err),
             }
@@ -1310,15 +1310,16 @@ mod tests {
 
         let mut saw_op = false;
         while let Ok(ev) = rx.try_recv() {
-            if let RuntimeEvent::App(AppEvent::SubmitThreadOp {
-                op: Op::RequestPermissionsResponse { response, .. },
-                ..
-            }) = ev
-            {
-                assert_eq!(response.scope, PermissionGrantScope::Session);
-                saw_op = true;
-                break;
-            }
+            if let RuntimeEvent::App(event) = ev
+                && let AppEvent::SubmitThreadOp {
+                    op: Op::RequestPermissionsResponse { response, .. },
+                    ..
+                } = *event
+                {
+                    assert_eq!(response.scope, PermissionGrantScope::Session);
+                    saw_op = true;
+                    break;
+                }
         }
         assert!(
             saw_op,
