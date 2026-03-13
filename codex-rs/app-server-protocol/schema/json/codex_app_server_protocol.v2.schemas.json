@@ -9505,6 +9505,232 @@
         }
       ]
     },
+    "ThreadLegacyOpParams": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "reloadUserConfig"
+              ],
+              "title": "ReloadUserConfigThreadLegacyOpParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ReloadUserConfigThreadLegacyOpParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "undo"
+              ],
+              "title": "UndoThreadLegacyOpParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UndoThreadLegacyOpParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "approvalPolicy": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AskForApproval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "collaborationMode": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CollaborationMode"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ReasoningEffort"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "personality": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Personality"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sandboxPolicy": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SandboxPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "serviceTier": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ServiceTier"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "summary": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ReasoningSummary"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "enum": [
+                "overrideTurnContext"
+              ],
+              "title": "OverrideTurnContextThreadLegacyOpParamsType",
+              "type": "string"
+            },
+            "windowsSandboxLevel": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WindowsSandboxLevel"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "OverrideTurnContextThreadLegacyOpParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "dropMemories"
+              ],
+              "title": "DropMemoriesThreadLegacyOpParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "DropMemoriesThreadLegacyOpParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "updateMemories"
+              ],
+              "title": "UpdateMemoriesThreadLegacyOpParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UpdateMemoriesThreadLegacyOpParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "runUserShellCommand"
+              ],
+              "title": "RunUserShellCommandThreadLegacyOpParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "type"
+          ],
+          "title": "RunUserShellCommandThreadLegacyOpParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "listMcpTools"
+              ],
+              "title": "ListMcpToolsThreadLegacyOpParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ListMcpToolsThreadLegacyOpParams",
+          "type": "object"
+        }
+      ]
+    },
     "ThreadListParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -11260,6 +11486,14 @@
         }
       },
       "type": "object"
+    },
+    "WindowsSandboxLevel": {
+      "enum": [
+        "disabled",
+        "restricted-token",
+        "elevated"
+      ],
+      "type": "string"
     },
     "WindowsSandboxSetupCompletedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",

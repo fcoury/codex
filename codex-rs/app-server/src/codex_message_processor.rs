@@ -126,6 +126,9 @@ use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadIncrementElicitationParams;
 use codex_app_server_protocol::ThreadIncrementElicitationResponse;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadLegacyOpParams;
+use codex_app_server_protocol::ThreadLegacyOpSubmitParams;
+use codex_app_server_protocol::ThreadLegacyOpSubmitResponse;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadLoadedListParams;
@@ -695,6 +698,10 @@ impl CodexMessageProcessor {
                     params,
                 )
                 .await;
+            }
+            ClientRequest::ThreadLegacyOpSubmit { request_id, params } => {
+                self.thread_legacy_op_submit(to_connection_request_id(request_id), params)
+                    .await;
             }
             ClientRequest::ThreadRollback { request_id, params } => {
                 self.thread_rollback(to_connection_request_id(request_id), params)
@@ -2931,6 +2938,84 @@ impl CodexMessageProcessor {
                 self.send_internal_error(
                     request_id,
                     format!("failed to clean background terminals: {err}"),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn thread_legacy_op_submit(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadLegacyOpSubmitParams,
+    ) {
+        let ThreadLegacyOpSubmitParams { thread_id, op } = params;
+
+        let (_, thread) = match self.load_thread(&thread_id).await {
+            Ok(v) => v,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+
+        let op_type = serde_json::to_value(&op)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let core_op = match op {
+            ThreadLegacyOpParams::ReloadUserConfig => Op::ReloadUserConfig,
+            ThreadLegacyOpParams::Undo => Op::Undo,
+            ThreadLegacyOpParams::OverrideTurnContext {
+                cwd,
+                approval_policy,
+                sandbox_policy,
+                windows_sandbox_level,
+                model,
+                effort,
+                summary,
+                service_tier,
+                collaboration_mode,
+                personality,
+            } => Op::OverrideTurnContext {
+                cwd,
+                approval_policy: approval_policy
+                    .map(codex_app_server_protocol::AskForApproval::to_core),
+                sandbox_policy: sandbox_policy.map(|policy| policy.to_core()),
+                windows_sandbox_level,
+                model,
+                effort,
+                summary,
+                service_tier,
+                collaboration_mode,
+                personality,
+            },
+            ThreadLegacyOpParams::DropMemories => Op::DropMemories,
+            ThreadLegacyOpParams::UpdateMemories => Op::UpdateMemories,
+            ThreadLegacyOpParams::RunUserShellCommand { command } => {
+                Op::RunUserShellCommand { command }
+            }
+            ThreadLegacyOpParams::ListMcpTools => Op::ListMcpTools,
+        };
+
+        match self
+            .submit_core_op(&request_id, thread.as_ref(), core_op)
+            .await
+        {
+            Ok(_) => {
+                self.outgoing
+                    .send_response(request_id, ThreadLegacyOpSubmitResponse {})
+                    .await;
+            }
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to submit thread legacy op `{op_type}`: {err}"),
                 )
                 .await;
             }

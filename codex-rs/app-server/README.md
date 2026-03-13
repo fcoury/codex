@@ -139,6 +139,7 @@ Example with notification opt-out:
 - `thread/unarchive` — move an archived rollout file back into the sessions directory; returns the restored `thread` on success and emits `thread/unarchived`.
 - `thread/compact/start` — trigger conversation history compaction for a thread; returns `{}` immediately while progress streams through standard turn/item notifications.
 - `thread/backgroundTerminals/clean` — terminate all running background terminals for a thread (experimental; requires `capabilities.experimentalApi`); returns `{}` when the cleanup request is accepted.
+- `thread/legacyOp/submit` — submit one of the remaining thread-scoped legacy core ops through app-server instead of reaching into `ThreadManager` directly (experimental; requires `capabilities.experimentalApi`); returns `{}` when the op is accepted and any follow-up results continue to arrive on the normal event stream.
 - `thread/rollback` — drop the last N turns from the agent’s in-memory context and persist a rollback marker in the rollout so future resumes see the pruned history; returns the updated `thread` (with `turns` populated) on success.
 - `turn/start` — add user input to a thread and begin Codex generation; responds with the initial `turn` object and streams `turn/started`, `item/*`, and `turn/completed` notifications. For `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode".
 - `turn/steer` — add user input to an already in-flight turn without starting a new turn; returns the active `turnId` that accepted the input.
@@ -528,6 +529,19 @@ Use `thread/backgroundTerminals/clean` to terminate all running background termi
     "threadId": "thr_123"
 } }
 { "id": 35, "result": {} }
+```
+
+Use `thread/legacyOp/submit` as a temporary bridge for legacy thread-scoped ops that still surface as `Op` values in older clients. The request is experimental and accepts a tagged `op` payload, for example:
+
+```json
+{ "method": "thread/legacyOp/submit", "id": 36, "params": {
+    "threadId": "thr_123",
+    "op": {
+        "type": "runUserShellCommand",
+        "command": "echo hello"
+    }
+} }
+{ "id": 36, "result": {} }
 ```
 
 ### Example: Steer an active turn

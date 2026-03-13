@@ -240,6 +240,7 @@ export type { ThreadCompactStartResponse } from "./ThreadCompactStartResponse";
 export type { ThreadForkParams } from "./ThreadForkParams";
 export type { ThreadForkResponse } from "./ThreadForkResponse";
 export type { ThreadItem } from "./ThreadItem";
+export type { ThreadLegacyOpParams } from "./ThreadLegacyOpParams";
 export type { ThreadListParams } from "./ThreadListParams";
 export type { ThreadListResponse } from "./ThreadListResponse";
 export type { ThreadLoadedListParams } from "./ThreadLoadedListParams";

@@ -24,6 +24,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WebSearchToolConfig;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent as CoreAgentMessageContent;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::mcp::Resource as McpResource;
@@ -2668,6 +2669,72 @@ pub struct ThreadBackgroundTerminalsCleanParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadBackgroundTerminalsCleanResponse {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadLegacyOpSubmitParams {
+    pub thread_id: String,
+    pub op: ThreadLegacyOpParams,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(tag = "type", export_to = "v2/")]
+pub enum ThreadLegacyOpParams {
+    ReloadUserConfig,
+    Undo,
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    OverrideTurnContext {
+        #[ts(optional = nullable)]
+        cwd: Option<PathBuf>,
+        #[experimental(nested)]
+        #[ts(optional = nullable)]
+        approval_policy: Option<AskForApproval>,
+        #[ts(optional = nullable)]
+        sandbox_policy: Option<SandboxPolicy>,
+        #[ts(optional = nullable)]
+        windows_sandbox_level: Option<WindowsSandboxLevel>,
+        #[ts(optional = nullable)]
+        model: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "super::serde_helpers::deserialize_double_option",
+            serialize_with = "super::serde_helpers::serialize_double_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[ts(optional = nullable)]
+        effort: Option<Option<ReasoningEffort>>,
+        #[ts(optional = nullable)]
+        summary: Option<ReasoningSummary>,
+        #[serde(
+            default,
+            deserialize_with = "super::serde_helpers::deserialize_double_option",
+            serialize_with = "super::serde_helpers::serialize_double_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[ts(optional = nullable)]
+        service_tier: Option<Option<ServiceTier>>,
+        #[ts(optional = nullable)]
+        collaboration_mode: Option<CollaborationMode>,
+        #[ts(optional = nullable)]
+        personality: Option<Personality>,
+    },
+    DropMemories,
+    UpdateMemories,
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    RunUserShellCommand {
+        command: String,
+    },
+    ListMcpTools,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadLegacyOpSubmitResponse {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]

@@ -272,6 +272,11 @@ client_request_definitions! {
         params: v2::ThreadBackgroundTerminalsCleanParams,
         response: v2::ThreadBackgroundTerminalsCleanResponse,
     },
+    #[experimental("thread/legacyOp/submit")]
+    ThreadLegacyOpSubmit => "thread/legacyOp/submit" {
+        params: v2::ThreadLegacyOpSubmitParams,
+        response: v2::ThreadLegacyOpSubmitResponse,
+    },
     ThreadRollback => "thread/rollback" {
         params: v2::ThreadRollbackParams,
         response: v2::ThreadRollbackResponse,
@@ -1457,9 +1462,37 @@ mod tests {
     }
 
     #[test]
+    fn serialize_thread_legacy_op_submit() -> Result<()> {
+        let request = ClientRequest::ThreadLegacyOpSubmit {
+            request_id: RequestId::Integer(9),
+            params: v2::ThreadLegacyOpSubmitParams {
+                thread_id: "thr_123".to_string(),
+                op: v2::ThreadLegacyOpParams::RunUserShellCommand {
+                    command: "echo hello".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "thread/legacyOp/submit",
+                "id": 9,
+                "params": {
+                    "threadId": "thr_123",
+                    "op": {
+                        "type": "runUserShellCommand",
+                        "command": "echo hello"
+                    }
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn serialize_thread_realtime_start() -> Result<()> {
         let request = ClientRequest::ThreadRealtimeStart {
-            request_id: RequestId::Integer(9),
+            request_id: RequestId::Integer(10),
             params: v2::ThreadRealtimeStartParams {
                 thread_id: "thr_123".to_string(),
                 prompt: "You are on a call".to_string(),
@@ -1469,7 +1502,7 @@ mod tests {
         assert_eq!(
             json!({
                 "method": "thread/realtime/start",
-                "id": 9,
+                "id": 10,
                 "params": {
                     "threadId": "thr_123",
                     "prompt": "You are on a call",

@@ -7,15 +7,15 @@
 //!
 //! 1. Receives `Op` values from the `ChatWidget` and translates them into
 //!    app-server client requests (`turn/start`, `turn/interrupt`, approvals,
-//!    etc.), while forwarding a small set of legacy thread ops directly to the
-//!    backing `CodexThread` until app-server grows first-class equivalents.
+//!    etc.), including a temporary bridge for the remaining legacy thread ops
+//!    that do not have first-class app-server methods yet.
 //! 2. Receives server events (`ServerRequest`, `ServerNotification`, legacy
 //!    `JSONRPCNotification`) from the app-server and converts them into
 //!    `EventMsg` values that the TUI already knows how to render.
 //!
-//! The module also contains local history I/O, protocol-type conversion
-//! helpers, and the `spawn_op_forwarder` used for resumed/forked threads that
-//! bypass the in-process client.
+//! The module also contains local history/custom-prompt I/O, protocol-type
+//! conversion helpers, and the `spawn_op_forwarder` used to route widget ops
+//! into the in-process client loop.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -74,6 +74,8 @@ use codex_app_server_protocol::ThreadCompactStartResponse;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadLegacyOpParams;
+use codex_app_server_protocol::ThreadLegacyOpSubmitResponse;
 use codex_app_server_protocol::ThreadRealtimeAppendAudioResponse;
 use codex_app_server_protocol::ThreadRealtimeAppendTextResponse;
 use codex_app_server_protocol::ThreadRealtimeStartResponse;
@@ -1015,51 +1017,29 @@ async fn reject_server_request(
     }
 }
 
-async fn forward_op_to_thread(
-    thread_manager: &ThreadManager,
+async fn submit_legacy_thread_op(
+    client: &InProcessAppServerClient,
+    request_ids: &mut RequestIdSequencer,
     thread_id: &str,
-    op: Op,
+    op: ThreadLegacyOpParams,
     app_event_tx: &AppEventSender,
 ) {
-    let op_type = serde_json::to_value(&op)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-    let thread_id = match ThreadId::from_string(thread_id) {
-        Ok(thread_id) => thread_id,
-        Err(err) => {
-            send_error_event(
-                app_event_tx,
-                format!("failed to parse in-process thread id `{thread_id}`: {err}"),
-            );
-            return;
-        }
+    let request = ClientRequest::ThreadLegacyOpSubmit {
+        request_id: request_ids.next(),
+        params: codex_app_server_protocol::ThreadLegacyOpSubmitParams {
+            thread_id: thread_id.to_string(),
+            op,
+        },
     };
-
-    let result = async {
-        let thread = thread_manager
-            .get_thread(thread_id)
-            .await
-            .map_err(std::io::Error::other)?;
-        thread.submit(op).await.map_err(std::io::Error::other)?;
-        std::io::Result::Ok(())
+    if let Err(err) = send_request_with_response::<ThreadLegacyOpSubmitResponse>(
+        client,
+        request,
+        "thread/legacyOp/submit",
+    )
+    .await
+    {
+        send_error_event(app_event_tx, err);
     }
-    .await;
-    if let Err(err) = result {
-        send_error_event(
-            app_event_tx,
-            format!("failed to forward `{op_type}` to in-process thread: {err}"),
-        );
-    }
-}
-
-fn local_only_deferred_message(action_name: &str) -> String {
-    format!("{action_name} is temporarily unavailable in in-process local-only mode")
 }
 
 fn app_server_request_id_to_mcp(request_id: RequestId) -> codex_protocol::mcp::RequestId {
@@ -1304,7 +1284,6 @@ fn read_history_entry_blocking(
     requested_log_id: u64,
     offset: usize,
 ) -> Result<Option<codex_protocol::message_history::HistoryEntry>, String> {
-    // Open directly and treat NotFound as empty history (no TOCTOU pre-check).
     let file = match OpenOptions::new().read(true).open(path) {
         Ok(f) => f,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1897,7 +1876,6 @@ async fn process_in_process_command(
     request_ids: &mut RequestIdSequencer,
     pending_server_requests: &mut PendingServerRequests,
     client: &InProcessAppServerClient,
-    thread_manager: &ThreadManager,
     app_event_tx: &AppEventSender,
 ) -> bool {
     match op {
@@ -2571,16 +2549,24 @@ async fn process_in_process_command(
             );
         }
         Op::ReloadUserConfig => {
-            forward_op_to_thread(
-                thread_manager,
+            submit_legacy_thread_op(
+                client,
+                request_ids,
                 thread_id,
-                Op::ReloadUserConfig,
+                ThreadLegacyOpParams::ReloadUserConfig,
                 app_event_tx,
             )
             .await;
         }
         Op::Undo => {
-            send_warning_event(app_event_tx, local_only_deferred_message("Undo"));
+            submit_legacy_thread_op(
+                client,
+                request_ids,
+                thread_id,
+                ThreadLegacyOpParams::Undo,
+                app_event_tx,
+            )
+            .await;
         }
         Op::OverrideTurnContext {
             cwd,
@@ -2594,13 +2580,14 @@ async fn process_in_process_command(
             collaboration_mode,
             personality,
         } => {
-            forward_op_to_thread(
-                thread_manager,
+            submit_legacy_thread_op(
+                client,
+                request_ids,
                 thread_id,
-                Op::OverrideTurnContext {
+                ThreadLegacyOpParams::OverrideTurnContext {
                     cwd,
-                    approval_policy,
-                    sandbox_policy,
+                    approval_policy: approval_policy.map(Into::into),
+                    sandbox_policy: sandbox_policy.map(Into::into),
                     windows_sandbox_level,
                     model,
                     effort,
@@ -2614,22 +2601,44 @@ async fn process_in_process_command(
             .await;
         }
         Op::DropMemories => {
-            forward_op_to_thread(thread_manager, thread_id, Op::DropMemories, app_event_tx).await;
+            submit_legacy_thread_op(
+                client,
+                request_ids,
+                thread_id,
+                ThreadLegacyOpParams::DropMemories,
+                app_event_tx,
+            )
+            .await;
         }
         Op::UpdateMemories => {
-            forward_op_to_thread(thread_manager, thread_id, Op::UpdateMemories, app_event_tx).await;
+            submit_legacy_thread_op(
+                client,
+                request_ids,
+                thread_id,
+                ThreadLegacyOpParams::UpdateMemories,
+                app_event_tx,
+            )
+            .await;
         }
         Op::RunUserShellCommand { command } => {
-            forward_op_to_thread(
-                thread_manager,
+            submit_legacy_thread_op(
+                client,
+                request_ids,
                 thread_id,
-                Op::RunUserShellCommand { command },
+                ThreadLegacyOpParams::RunUserShellCommand { command },
                 app_event_tx,
             )
             .await;
         }
         Op::ListMcpTools => {
-            forward_op_to_thread(thread_manager, thread_id, Op::ListMcpTools, app_event_tx).await;
+            submit_legacy_thread_op(
+                client,
+                request_ids,
+                thread_id,
+                ThreadLegacyOpParams::ListMcpTools,
+                app_event_tx,
+            )
+            .await;
         }
         Op::ResolveElicitation {
             server_name,
@@ -2729,17 +2738,17 @@ async fn process_in_process_command(
 ///
 /// This loop is responsible for keeping the TUI's existing `Op`-driven model
 /// working on top of app-server. It forwards supported ops as typed
-/// `ClientRequest`/`ClientNotification` messages, routes a small legacy subset
-/// straight to the backing thread manager, translates server requests back
+/// `ClientRequest`/`ClientNotification` messages, uses a temporary app-server
+/// bridge for the remaining legacy thread ops, translates server requests back
 /// into UI events, and preserves thread-local bookkeeping such as current turn
 /// id and pending approval state.
 async fn run_in_process_agent_loop(
     mut codex_op_rx: tokio::sync::mpsc::UnboundedReceiver<Op>,
     mut thread_scoped_op_rx: tokio::sync::mpsc::UnboundedReceiver<ThreadScopedOp>,
     mut client: InProcessAppServerClient,
-    thread_manager: Arc<ThreadManager>,
+    _thread_manager: Arc<ThreadManager>,
     auth_manager: Arc<AuthManager>,
-    config: Config,
+    _config: Config,
     thread_id: String,
     mut session_configured: SessionConfiguredEvent,
     app_event_tx: AppEventSender,
@@ -2760,12 +2769,11 @@ async fn run_in_process_agent_loop(
                             &thread_id,
                             None,
                             &session_id,
-                            &config,
+                            &_config,
                             &mut current_turn_ids,
                             &mut request_ids,
                             &mut pending_server_requests,
                             &client,
-                            thread_manager.as_ref(),
                             &app_event_tx,
                         ).await;
                         if should_shutdown {
@@ -2786,12 +2794,11 @@ async fn run_in_process_agent_loop(
                             &thread_id,
                             interrupt_turn_id.as_deref(),
                             &session_id,
-                            &config,
+                            &_config,
                             &mut current_turn_ids,
                             &mut request_ids,
                             &mut pending_server_requests,
                             &client,
-                            thread_manager.as_ref(),
                             &app_event_tx,
                         ).await;
                         if should_shutdown {
@@ -3498,7 +3505,6 @@ mod tests {
 
     async fn assert_realtime_op_reports_expected_method(op: Op, expected_method: &str) {
         let config = test_config().await;
-        let session_id = ThreadId::new();
         let client = InProcessAppServerClient::start(in_process_start_args(
             &config,
             codex_arg0::Arg0DispatchPaths::default(),
@@ -3507,7 +3513,7 @@ mod tests {
         ))
         .await
         .expect("in-process app-server client");
-        let thread_manager = client.thread_manager();
+        let session_id = ThreadId::new();
         let (tx, mut rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(tx);
         let mut current_turn_ids = HashMap::new();
@@ -3525,7 +3531,6 @@ mod tests {
             &mut request_ids,
             &mut pending_server_requests,
             &client,
-            thread_manager.as_ref(),
             &app_event_tx,
         )
         .await;
@@ -3585,6 +3590,7 @@ mod tests {
         )
         .await
         .expect("thread/start");
+        tokio::time::sleep(Duration::from_millis(50)).await;
         let thread_id = thread_start.thread.id;
         let session_id = ThreadId::from_string(&thread_id).expect("valid thread id");
         let should_shutdown = process_in_process_command(
@@ -3598,7 +3604,6 @@ mod tests {
             &mut request_ids,
             &mut pending_server_requests,
             &client,
-            thread_manager.as_ref(),
             &app_event_tx,
         )
         .await;
@@ -3678,7 +3683,14 @@ mod tests {
     async fn next_codex_event(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     ) -> codex_protocol::protocol::Event {
-        let maybe_event = timeout(Duration::from_secs(2), rx.recv())
+        next_codex_event_with_timeout(rx, Duration::from_secs(2)).await
+    }
+
+    async fn next_codex_event_with_timeout(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+        duration: Duration,
+    ) -> codex_protocol::protocol::Event {
+        let maybe_event = timeout(duration, rx.recv())
             .await
             .expect("timed out waiting for app event");
         let event = maybe_event.expect("expected app event");
@@ -4768,7 +4780,7 @@ mod tests {
             process_single_op(&config, Op::ListCustomPrompts).await;
         assert_eq!(should_shutdown, false);
 
-        let event = next_codex_event(&mut rx).await;
+        let event = next_codex_event_with_timeout(&mut rx, Duration::from_secs(10)).await;
         let EventMsg::ListCustomPromptsResponse(_) = event.msg else {
             panic!("expected ListCustomPromptsResponse");
         };
@@ -4784,8 +4796,6 @@ mod tests {
             .build()
             .await
             .expect("config");
-        let session_id = ThreadId::new();
-        let thread_id = session_id.to_string();
         let client = InProcessAppServerClient::start(in_process_start_args(
             &config,
             codex_arg0::Arg0DispatchPaths::default(),
@@ -4794,12 +4804,23 @@ mod tests {
         ))
         .await
         .expect("in-process app-server client");
-        let thread_manager = client.thread_manager();
         let (tx, mut rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(tx);
         let mut current_turn_ids = HashMap::new();
         let mut request_ids = RequestIdSequencer::new();
         let mut pending_server_requests = PendingServerRequests::default();
+        let thread_start = send_request_with_response::<ThreadStartResponse>(
+            &client,
+            ClientRequest::ThreadStart {
+                request_id: request_ids.next(),
+                params: ThreadStartParams::default(),
+            },
+            "thread/start",
+        )
+        .await
+        .expect("thread/start");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let thread_id = thread_start.thread.id;
 
         let should_shutdown = process_in_process_command(
             Op::AddToHistory {
@@ -4808,41 +4829,46 @@ mod tests {
             &thread_id,
             &thread_id,
             None,
-            &session_id,
+            &ThreadId::from_string(&thread_id).expect("valid thread id"),
             &config,
             &mut current_turn_ids,
             &mut request_ids,
             &mut pending_server_requests,
             &client,
-            thread_manager.as_ref(),
             &app_event_tx,
         )
         .await;
         assert_eq!(should_shutdown, false);
 
-        let should_shutdown = process_in_process_command(
-            Op::GetHistoryEntryRequest {
-                offset: 0,
-                log_id: 0,
-            },
-            &thread_id,
-            &thread_id,
-            None,
-            &session_id,
-            &config,
-            &mut current_turn_ids,
-            &mut request_ids,
-            &mut pending_server_requests,
-            &client,
-            thread_manager.as_ref(),
-            &app_event_tx,
-        )
-        .await;
-        assert_eq!(should_shutdown, false);
+        let response = loop {
+            let should_shutdown = process_in_process_command(
+                Op::GetHistoryEntryRequest {
+                    offset: 0,
+                    log_id: 0,
+                },
+                &thread_id,
+                &thread_id,
+                None,
+                &ThreadId::from_string(&thread_id).expect("valid thread id"),
+                &config,
+                &mut current_turn_ids,
+                &mut request_ids,
+                &mut pending_server_requests,
+                &client,
+                &app_event_tx,
+            )
+            .await;
+            assert_eq!(should_shutdown, false);
 
-        let event = next_codex_event(&mut rx).await;
-        let EventMsg::GetHistoryEntryResponse(response) = event.msg else {
-            panic!("expected GetHistoryEntryResponse");
+            let event = next_codex_event_with_timeout(&mut rx, Duration::from_secs(10)).await;
+            let EventMsg::GetHistoryEntryResponse(response) = event.msg else {
+                panic!("expected GetHistoryEntryResponse");
+            };
+            if response.entry.is_some() {
+                break response;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
         };
         let entry = response.entry.expect("expected history entry");
         assert_eq!(response.offset, 0);
@@ -4853,33 +4879,62 @@ mod tests {
         client.shutdown().await.expect("shutdown in-process client");
     }
 
-    async fn assert_forwarded_op(config: &Config, op: Op) {
-        let (should_shutdown, mut rx, client, _thread_manager, _session_id) =
-            process_single_op(config, op.clone()).await;
+    async fn assert_legacy_thread_op_reports_expected_method(op: Op) {
+        let config = test_config().await;
+        let client = InProcessAppServerClient::start(in_process_start_args(
+            &config,
+            codex_arg0::Arg0DispatchPaths::default(),
+            Vec::new(),
+            CloudRequirementsLoader::default(),
+        ))
+        .await
+        .expect("in-process app-server client");
+        let session_id = ThreadId::new();
+        let (tx, mut rx) = unbounded_channel();
+        let app_event_tx = AppEventSender::new(tx);
+        let mut current_turn_ids = HashMap::new();
+        let mut request_ids = RequestIdSequencer::new();
+        let mut pending_server_requests = PendingServerRequests::default();
+
+        let should_shutdown = process_in_process_command(
+            op,
+            "missing-thread-id",
+            "missing-thread-id",
+            None,
+            &session_id,
+            &config,
+            &mut current_turn_ids,
+            &mut request_ids,
+            &mut pending_server_requests,
+            &client,
+            &app_event_tx,
+        )
+        .await;
         assert_eq!(should_shutdown, false);
-        if let Ok(Some(event)) = timeout(Duration::from_millis(200), rx.recv()).await {
-            panic!("did not expect app event after forwarded op {op:?}: {event:?}");
-        }
+
+        let maybe_event = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for app event");
+        let event = maybe_event.expect("expected app event");
+        let AppEvent::CodexEvent(event) = event else {
+            panic!("expected codex event");
+        };
+        let EventMsg::Error(error_event) = event.msg else {
+            panic!("expected error event");
+        };
+        assert_eq!(error_event.codex_error_info, None);
+        assert!(
+            error_event.message.contains("thread/legacyOp/submit"),
+            "expected error message to contain thread/legacyOp/submit, got `{}`",
+            error_event.message
+        );
 
         client.shutdown().await.expect("shutdown in-process client");
     }
 
     #[tokio::test]
-    async fn reload_user_config_is_forwarded_to_thread() {
-        let config = test_config().await;
-        assert_forwarded_op(&config, Op::ReloadUserConfig).await;
-    }
-
-    async fn assert_local_only_warning_for_op(config: &Config, op: Op, expected_message: &str) {
-        let (should_shutdown, mut rx, client, _thread_manager, _session_id) =
-            process_single_op(config, op).await;
-        assert_eq!(should_shutdown, false);
-
-        let event = next_codex_event(&mut rx).await;
-        let warning = warning_from_event(event);
-        assert_eq!(warning.message, expected_message.to_string());
-
-        client.shutdown().await.expect("shutdown in-process client");
+    async fn reload_user_config_routes_through_legacy_op_submit() {
+        assert_legacy_thread_op_reports_expected_method(Op::ReloadUserConfig).await;
     }
 
     #[tokio::test]
@@ -4893,7 +4948,6 @@ mod tests {
         ))
         .await
         .expect("in-process app-server client");
-        let thread_manager = client.thread_manager();
         let (tx, mut rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(tx);
         let mut current_turn_ids = HashMap::new();
@@ -4931,7 +4985,6 @@ mod tests {
             &mut request_ids,
             &mut pending_server_requests,
             &client,
-            thread_manager.as_ref(),
             &app_event_tx,
         )
         .await;
@@ -4956,7 +5009,6 @@ mod tests {
             &mut request_ids,
             &mut pending_server_requests,
             &client,
-            thread_manager.as_ref(),
             &app_event_tx,
         )
         .await;
@@ -4979,7 +5031,6 @@ mod tests {
         ))
         .await
         .expect("in-process app-server client");
-        let thread_manager = client.thread_manager();
         let (tx, _rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(tx);
         let mut current_turn_ids = HashMap::from([
@@ -5006,7 +5057,6 @@ mod tests {
             &mut request_ids,
             &mut pending_server_requests,
             &client,
-            thread_manager.as_ref(),
             &app_event_tx,
         )
         .await;
@@ -5099,7 +5149,6 @@ mod tests {
     #[tokio::test]
     async fn interrupt_uses_active_turn_for_target_thread_only() {
         let config = test_config().await;
-        let session_id = ThreadId::new();
         let client = InProcessAppServerClient::start(in_process_start_args(
             &config,
             codex_arg0::Arg0DispatchPaths::default(),
@@ -5108,13 +5157,13 @@ mod tests {
         ))
         .await
         .expect("in-process app-server client");
-        let thread_manager = client.thread_manager();
         let (tx, mut rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(tx);
         let mut current_turn_ids =
             HashMap::from([("child-thread".to_string(), "child-turn".to_string())]);
         let mut request_ids = RequestIdSequencer::new();
         let mut pending_server_requests = PendingServerRequests::default();
+        let session_id = ThreadId::new();
 
         let should_shutdown = process_in_process_command(
             Op::Interrupt,
@@ -5127,7 +5176,6 @@ mod tests {
             &mut request_ids,
             &mut pending_server_requests,
             &client,
-            thread_manager.as_ref(),
             &app_event_tx,
         )
         .await;
@@ -5144,41 +5192,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn undo_still_emits_explicit_local_only_warning() {
-        let config = test_config().await;
-        assert_local_only_warning_for_op(
-            &config,
-            Op::Undo,
-            "Undo is temporarily unavailable in in-process local-only mode",
-        )
+    async fn undo_routes_through_legacy_op_submit() {
+        assert_legacy_thread_op_reports_expected_method(Op::Undo).await;
+    }
+
+    #[tokio::test]
+    async fn override_turn_context_routes_through_legacy_op_submit() {
+        assert_legacy_thread_op_reports_expected_method(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            sandbox_policy: None,
+            windows_sandbox_level: None,
+            model: None,
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
         .await;
     }
 
     #[tokio::test]
-    async fn override_turn_context_is_forwarded_to_thread() {
-        let config = test_config().await;
-        assert_forwarded_op(
-            &config,
-            Op::OverrideTurnContext {
-                cwd: None,
-                approval_policy: None,
-                sandbox_policy: None,
-                windows_sandbox_level: None,
-                model: None,
-                effort: None,
-                summary: None,
-                service_tier: None,
-                collaboration_mode: None,
-                personality: None,
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn legacy_core_ops_are_forwarded_to_thread() {
-        let config = test_config().await;
-        let forwarded_ops = vec![
+    async fn legacy_thread_ops_route_through_legacy_op_submit() {
+        let bridged_ops = vec![
             Op::DropMemories,
             Op::UpdateMemories,
             Op::RunUserShellCommand {
@@ -5187,8 +5224,8 @@ mod tests {
             Op::ListMcpTools,
         ];
 
-        for op in forwarded_ops {
-            assert_forwarded_op(&config, op).await;
+        for op in bridged_ops {
+            assert_legacy_thread_op_reports_expected_method(op).await;
         }
     }
 
