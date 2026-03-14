@@ -41,8 +41,11 @@ use crate::version::CODEX_CLI_VERSION;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessAppServerRequester;
+use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::ThreadStartParams;
+use codex_app_server_protocol::ThreadStartResponse;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ThreadManager;
@@ -1757,7 +1760,57 @@ impl App {
         self.sync_active_agent_label();
     }
 
-    async fn start_fresh_session_with_summary_hint(&mut self, tui: &mut tui::Tui) {
+    async fn start_fresh_thread_via_app_server(
+        &self,
+        app_server: &InProcessAppServerClient,
+        config: &Config,
+        model: String,
+    ) -> Result<ThreadStartResponse> {
+        let sandbox = match config.permissions.sandbox_policy.get() {
+            SandboxPolicy::ReadOnly { .. } => codex_app_server_protocol::SandboxMode::ReadOnly,
+            SandboxPolicy::WorkspaceWrite { .. } => {
+                codex_app_server_protocol::SandboxMode::WorkspaceWrite
+            }
+            SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. } => {
+                codex_app_server_protocol::SandboxMode::DangerFullAccess
+            }
+        };
+
+        let response = app_server
+            .requester()
+            .request_typed_with_generated_id(|request_id| ClientRequest::ThreadStart {
+                request_id,
+                params: ThreadStartParams {
+                    model: Some(model),
+                    model_provider: Some(config.model_provider_id.clone()),
+                    service_tier: Some(config.service_tier),
+                    cwd: Some(config.cwd.display().to_string()),
+                    approval_policy: Some(config.permissions.approval_policy.value().into()),
+                    approvals_reviewer: Some(config.approvals_reviewer.into()),
+                    sandbox: Some(sandbox),
+                    config: None,
+                    service_name: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: config.personality,
+                    ephemeral: Some(config.ephemeral),
+                    dynamic_tools: None,
+                    mock_experimental_field: None,
+                    experimental_raw_events: false,
+                    persist_extended_history: false,
+                },
+            })
+            .await
+            .map_err(|err| color_eyre::eyre::eyre!("thread/start failed: {err}"))?;
+
+        Ok(response)
+    }
+
+    async fn start_fresh_session_with_summary_hint_with_frame_requester(
+        &mut self,
+        frame_requester: crate::tui::FrameRequester,
+        app_server: &InProcessAppServerClient,
+    ) {
         // Start a fresh in-memory session while preserving resumability via persisted rollout
         // history.
         self.refresh_in_memory_config_from_disk_best_effort("starting a new thread")
@@ -1782,8 +1835,8 @@ impl App {
             );
         }
         let init = crate::chatwidget::ChatWidgetInit {
-            config,
-            frame_requester: tui.frame_requester(),
+            config: config.clone(),
+            frame_requester: frame_requester.clone(),
             app_event_tx: self.app_event_tx.clone(),
             // New sessions start without prefilled message content.
             initial_user_message: None,
@@ -1793,13 +1846,50 @@ impl App {
             feedback: self.feedback.clone(),
             is_first_run: false,
             feedback_audience: self.feedback_audience,
-            model: Some(model),
+            model: Some(model.clone()),
             startup_tooltip_override: None,
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             session_telemetry: self.session_telemetry.clone(),
         };
-        self.chat_widget = ChatWidget::new(init, self.server.clone());
+        let started = match self
+            .start_fresh_thread_via_app_server(app_server, &config, model.clone())
+            .await
+        {
+            Ok(started) => started,
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to start thread: {err}"));
+                frame_requester.schedule_frame();
+                return;
+            }
+        };
+
+        let bootstrap = Self::bootstrap_from_thread_start_response(&started);
+        let thread = match self
+            .fetch_started_thread_from_app_server(app_server, &started)
+            .await
+        {
+            Ok(thread) => thread,
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to attach started thread: {err}"));
+                frame_requester.schedule_frame();
+                return;
+            }
+        };
+        let listener_thread = thread.clone();
+
+        self.chat_widget = ChatWidget::new_from_existing(init, thread, bootstrap);
         self.reset_thread_event_state();
+        if let Some(thread_id) = self.chat_widget.thread_id() {
+            if let Err(err) = self.attach_thread_created(thread_id, listener_thread).await {
+                self.chat_widget
+                    .add_error_message(format!("Failed to attach thread listener: {err}"));
+            } else {
+                self.primary_thread_id = Some(thread_id);
+                self.activate_thread_channel(thread_id).await;
+            }
+        }
         if let Some(summary) = summary {
             let mut lines: Vec<Line<'static>> = vec![summary.usage_line.clone().into()];
             if let Some(command) = summary.resume_command {
@@ -1808,7 +1898,75 @@ impl App {
             }
             self.chat_widget.add_plain_history_lines(lines);
         }
-        tui.frame_requester().schedule_frame();
+        frame_requester.schedule_frame();
+    }
+
+    async fn start_fresh_session_with_summary_hint(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &InProcessAppServerClient,
+    ) {
+        self.start_fresh_session_with_summary_hint_with_frame_requester(
+            tui.frame_requester(),
+            app_server,
+        )
+        .await;
+    }
+
+    fn app_server_approval_policy_to_protocol(
+        policy: codex_app_server_protocol::AskForApproval,
+    ) -> AskForApproval {
+        policy.to_core()
+    }
+
+    fn bootstrap_from_thread_start_response(
+        response: &ThreadStartResponse,
+    ) -> crate::chatwidget::ExistingThreadBootstrap {
+        crate::chatwidget::ExistingThreadBootstrap {
+            initial_event: Event {
+                id: String::new(),
+                msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                    session_id: ThreadId::from_string(&response.thread.id)
+                        .expect("thread/start must return a valid ThreadId"),
+                    forked_from_id: None,
+                    thread_name: response.thread.name.clone(),
+                    model: response.model.clone(),
+                    model_provider_id: response.model_provider.clone(),
+                    service_tier: response.service_tier,
+                    approval_policy: Self::app_server_approval_policy_to_protocol(
+                        response.approval_policy,
+                    ),
+                    approvals_reviewer: response.approvals_reviewer.to_core(),
+                    sandbox_policy: response.sandbox.to_core(),
+                    cwd: response.cwd.clone(),
+                    reasoning_effort: response.reasoning_effort.map(Into::into),
+                    history_log_id: 0,
+                    history_entry_count: 0,
+                    initial_messages: None,
+                    network_proxy: None,
+                    rollout_path: response.thread.path.clone().map(PathBuf::from),
+                }),
+            },
+            model: response.model.clone(),
+            cwd: response.cwd.clone(),
+        }
+    }
+
+    async fn fetch_started_thread_from_app_server(
+        &self,
+        app_server: &InProcessAppServerClient,
+        response: &ThreadStartResponse,
+    ) -> Result<Arc<codex_core::CodexThread>> {
+        let thread_id = ThreadId::from_string(&response.thread.id)
+            .map_err(|err| color_eyre::eyre::eyre!("invalid thread id from thread/start: {err}"))?;
+
+        let thread = app_server
+            .thread_manager()
+            .get_thread(thread_id)
+            .await
+            .map_err(|err| color_eyre::eyre::eyre!("failed to fetch started thread: {err}"))?;
+
+        Ok(thread)
     }
 
     fn fresh_session_config(&self) -> Config {
@@ -2068,7 +2226,15 @@ impl App {
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     session_telemetry: session_telemetry.clone(),
                 };
-                ChatWidget::new_from_existing(init, resumed.thread, resumed.session_configured)
+                let bootstrap = crate::chatwidget::ExistingThreadBootstrap {
+                    initial_event: Event {
+                        id: String::new(),
+                        msg: EventMsg::SessionConfigured(resumed.session_configured.clone()),
+                    },
+                    model: resumed.session_configured.model.clone(),
+                    cwd: resumed.session_configured.cwd.clone(),
+                };
+                ChatWidget::new_from_existing(init, resumed.thread, bootstrap)
             }
             SessionSelection::Fork(target_session) => {
                 session_telemetry.counter("codex.thread.fork", 1, &[("source", "cli_subcommand")]);
@@ -2106,7 +2272,15 @@ impl App {
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     session_telemetry: session_telemetry.clone(),
                 };
-                ChatWidget::new_from_existing(init, forked.thread, forked.session_configured)
+                let bootstrap = crate::chatwidget::ExistingThreadBootstrap {
+                    initial_event: Event {
+                        id: String::new(),
+                        msg: EventMsg::SessionConfigured(forked.session_configured.clone()),
+                    },
+                    model: forked.session_configured.model.clone(),
+                    cwd: forked.session_configured.cwd.clone(),
+                };
+                ChatWidget::new_from_existing(init, forked.thread, bootstrap)
             }
         };
 
@@ -2220,6 +2394,20 @@ impl App {
                 let control = select! {
                     Some(event) = app_event_rx.recv() => {
                         match event {
+                            AppEvent::NewSession => {
+                                app.start_fresh_session_with_summary_hint(tui, &app_server).await;
+                                AppRunControl::Continue
+                            }
+                            AppEvent::ClearUi => {
+                                match app.clear_terminal_ui(tui, false) {
+                                    Ok(()) => {
+                                        app.reset_app_ui_state_after_clear();
+                                        app.start_fresh_session_with_summary_hint(tui, &app_server).await;
+                                        AppRunControl::Continue
+                                    }
+                                    Err(err) => break Err(err),
+                                }
+                            }
                             AppEvent::CodexOp(Op::ListSkills { cwds, force_reload }) =>
                             {
                                 app.trigger_skills_list_request(app_server.requester(), cwds, force_reload);
@@ -2442,13 +2630,10 @@ impl App {
     async fn handle_event(&mut self, tui: &mut tui::Tui, event: AppEvent) -> Result<AppRunControl> {
         match event {
             AppEvent::NewSession => {
-                self.start_fresh_session_with_summary_hint(tui).await;
+                unreachable!("NewSession is handled in App::run before handle_event");
             }
             AppEvent::ClearUi => {
-                self.clear_terminal_ui(tui, false)?;
-                self.reset_app_ui_state_after_clear();
-
-                self.start_fresh_session_with_summary_hint(tui).await;
+                unreachable!("ClearUi is handled in App::run before handle_event");
             }
             AppEvent::OpenResumePicker => {
                 match crate::resume_picker::run_resume_picker(tui, &self.config, false).await? {
@@ -2508,11 +2693,18 @@ impl App {
                                     tui,
                                     self.config.clone(),
                                 );
-                                self.chat_widget = ChatWidget::new_from_existing(
-                                    init,
-                                    resumed.thread,
-                                    resumed.session_configured,
-                                );
+                                let bootstrap = crate::chatwidget::ExistingThreadBootstrap {
+                                    initial_event: Event {
+                                        id: String::new(),
+                                        msg: EventMsg::SessionConfigured(
+                                            resumed.session_configured.clone(),
+                                        ),
+                                    },
+                                    model: resumed.session_configured.model.clone(),
+                                    cwd: resumed.session_configured.cwd.clone(),
+                                };
+                                self.chat_widget =
+                                    ChatWidget::new_from_existing(init, resumed.thread, bootstrap);
                                 self.reset_thread_event_state();
                                 if let Some(summary) = summary {
                                     let mut lines: Vec<Line<'static>> =
@@ -2573,11 +2765,18 @@ impl App {
                                     tui,
                                     self.config.clone(),
                                 );
-                                self.chat_widget = ChatWidget::new_from_existing(
-                                    init,
-                                    forked.thread,
-                                    forked.session_configured,
-                                );
+                                let bootstrap = crate::chatwidget::ExistingThreadBootstrap {
+                                    initial_event: Event {
+                                        id: String::new(),
+                                        msg: EventMsg::SessionConfigured(
+                                            forked.session_configured.clone(),
+                                        ),
+                                    },
+                                    model: forked.session_configured.model.clone(),
+                                    cwd: forked.session_configured.cwd.clone(),
+                                };
+                                self.chat_widget =
+                                    ChatWidget::new_from_existing(init, forked.thread, bootstrap);
                                 self.reset_thread_event_state();
                                 if let Some(summary) = summary {
                                     let mut lines: Vec<Line<'static>> =
@@ -3862,17 +4061,14 @@ impl App {
         Ok(())
     }
 
-    async fn handle_thread_created(&mut self, thread_id: ThreadId) -> Result<()> {
+    async fn attach_thread_created(
+        &mut self,
+        thread_id: ThreadId,
+        thread: Arc<codex_core::CodexThread>,
+    ) -> Result<()> {
         if self.thread_event_channels.contains_key(&thread_id) {
             return Ok(());
         }
-        let thread = match self.server.get_thread(thread_id).await {
-            Ok(thread) => thread,
-            Err(err) => {
-                tracing::warn!("failed to attach listener for thread {thread_id}: {err}");
-                return Ok(());
-            }
-        };
         let config_snapshot = thread.config_snapshot().await;
         self.upsert_agent_picker_thread(
             thread_id,
@@ -3920,6 +4116,17 @@ impl App {
         self.thread_event_listener_tasks
             .insert(thread_id, listener_handle);
         Ok(())
+    }
+
+    async fn handle_thread_created(&mut self, thread_id: ThreadId) -> Result<()> {
+        let thread = match self.server.get_thread(thread_id).await {
+            Ok(thread) => thread,
+            Err(err) => {
+                tracing::warn!("failed to attach listener for thread {thread_id}: {err}");
+                return Ok(());
+            }
+        };
+        self.attach_thread_created(thread_id, thread).await
     }
 
     fn reasoning_label(reasoning_effort: Option<ReasoningEffortConfig>) -> &'static str {
@@ -6623,6 +6830,31 @@ smart_approvals = true
                 result,
             } if requested_cwds == vec![current_cwd] && generation == 0 && result.is_ok()
         );
+
+        client.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fresh_session_started_via_app_server_registers_thread_immediately() -> Result<()> {
+        let mut app = make_test_app().await;
+        let client = start_test_app_server_client(app.config.clone()).await;
+
+        app.start_fresh_session_with_summary_hint_with_frame_requester(
+            crate::tui::FrameRequester::test_dummy(),
+            &client,
+        )
+        .await;
+
+        let thread_id = app
+            .chat_widget
+            .thread_id()
+            .expect("fresh session should have a thread id");
+
+        assert_eq!(app.active_thread_id, Some(thread_id));
+        assert_eq!(app.primary_thread_id, Some(thread_id));
+        assert!(app.thread_event_channels.contains_key(&thread_id));
+        assert!(app.active_thread_rx.is_some());
 
         client.shutdown().await?;
         Ok(())

@@ -485,6 +485,12 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) session_telemetry: SessionTelemetry,
 }
 
+pub(crate) struct ExistingThreadBootstrap {
+    pub initial_event: codex_protocol::protocol::Event,
+    pub model: String,
+    pub cwd: PathBuf,
+}
+
 #[derive(Default)]
 enum RateLimitSwitchPromptState {
     #[default]
@@ -3870,8 +3876,13 @@ impl ChatWidget {
     pub(crate) fn new_from_existing(
         common: ChatWidgetInit,
         conversation: std::sync::Arc<codex_core::CodexThread>,
-        session_configured: codex_protocol::protocol::SessionConfiguredEvent,
+        bootstrap: ExistingThreadBootstrap,
     ) -> Self {
+        let ExistingThreadBootstrap {
+            initial_event,
+            model: existing_model,
+            cwd: existing_cwd,
+        } = bootstrap;
         let ChatWidgetInit {
             config,
             frame_requester,
@@ -3894,9 +3905,7 @@ impl ChatWidget {
         let placeholder = PLACEHOLDERS[rng.random_range(0..PLACEHOLDERS.len())].to_string();
 
         let model_override = model.as_deref();
-        let header_model = model
-            .clone()
-            .unwrap_or_else(|| session_configured.model.clone());
+        let header_model = model.clone().unwrap_or_else(|| existing_model.clone());
         let active_collaboration_mask =
             Self::initial_collaboration_mask(&config, models_manager.as_ref(), model_override);
         let header_model = active_collaboration_mask
@@ -3904,9 +3913,14 @@ impl ChatWidget {
             .and_then(|mask| mask.model.clone())
             .unwrap_or(header_model);
 
-        let current_cwd = Some(session_configured.cwd.clone());
+        let current_cwd = Some(existing_cwd);
+        let initial_session_configured = match &initial_event.msg {
+            EventMsg::SessionConfigured(event) => Some(event.clone()),
+            _ => None,
+        };
+
         let codex_op_tx =
-            spawn_agent_from_existing(conversation, session_configured, app_event_tx.clone());
+            spawn_agent_from_existing(conversation, initial_event, app_event_tx.clone());
 
         let fallback_default = Settings {
             model: header_model.clone(),
@@ -3979,9 +3993,15 @@ impl ChatWidget {
             retry_status_header: None,
             pending_status_indicator_restore: false,
             suppress_queue_autosend: false,
-            thread_id: None,
-            thread_name: None,
-            forked_from: None,
+            thread_id: initial_session_configured
+                .as_ref()
+                .map(|event| event.session_id),
+            thread_name: initial_session_configured
+                .as_ref()
+                .and_then(|event| event.thread_name.clone()),
+            forked_from: initial_session_configured
+                .as_ref()
+                .and_then(|event| event.forked_from_id),
             queued_user_messages: VecDeque::new(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
@@ -4005,9 +4025,13 @@ impl ChatWidget {
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             feedback_audience,
-            current_rollout_path: None,
+            current_rollout_path: initial_session_configured
+                .as_ref()
+                .and_then(|event| event.rollout_path.clone()),
             current_cwd,
-            session_network_proxy: None,
+            session_network_proxy: initial_session_configured
+                .as_ref()
+                .and_then(|event| event.network_proxy.clone()),
             status_line_invalid_items_warned,
             status_line_branch: None,
             status_line_branch_cwd: None,
@@ -4017,6 +4041,11 @@ impl ChatWidget {
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
         };
+        if let Some(event) = initial_session_configured {
+            widget
+                .bottom_pane
+                .set_history_metadata(event.history_log_id, event.history_entry_count);
+        }
 
         widget.prefetch_rate_limits();
         widget.bottom_pane.set_voice_transcription_enabled(
