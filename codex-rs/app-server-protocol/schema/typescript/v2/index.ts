@@ -137,6 +137,8 @@ export type { ItemGuardianApprovalReviewStartedNotification } from "./ItemGuardi
 export type { ItemStartedNotification } from "./ItemStartedNotification";
 export type { ListMcpServerStatusParams } from "./ListMcpServerStatusParams";
 export type { ListMcpServerStatusResponse } from "./ListMcpServerStatusResponse";
+export type { LocalShellStartParams } from "./LocalShellStartParams";
+export type { LocalShellStartResponse } from "./LocalShellStartResponse";
 export type { LoginAccountParams } from "./LoginAccountParams";
 export type { LoginAccountResponse } from "./LoginAccountResponse";
 export type { LogoutAccountResponse } from "./LogoutAccountResponse";

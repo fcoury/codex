@@ -1864,6 +1864,31 @@
           "type": "object"
         },
         {
+          "description": "Start a thread-scoped local shell command and record its output in the thread history.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "localShell/start"
+              ],
+              "title": "LocalShell/startRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/LocalShellStartParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "LocalShell/startRequest",
+          "type": "object"
+        },
+        {
           "description": "Execute a standalone command (argv vector) under the server's sandbox.",
           "properties": {
             "id": {
@@ -5125,6 +5150,41 @@
           "type": "object"
         }
       ]
+    },
+    "LocalShellStartParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Start a thread-scoped local shell command.",
+      "properties": {
+        "command": {
+          "description": "Shell command text to execute.",
+          "type": "string"
+        },
+        "threadId": {
+          "description": "Target thread id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "threadId"
+      ],
+      "title": "LocalShellStartParams",
+      "type": "object"
+    },
+    "LocalShellStartResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Accepted local shell command start response.",
+      "properties": {
+        "turnId": {
+          "description": "Turn id associated with the shell command submission.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "turnId"
+      ],
+      "title": "LocalShellStartResponse",
+      "type": "object"
     },
     "LocalShellStatus": {
       "enum": [

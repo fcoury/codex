@@ -4,12 +4,12 @@ use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ClientRequest;
-use codex_app_server_protocol::CommandExecTerminateParams;
-use codex_app_server_protocol::CommandExecTerminateResponse;
 use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::LocalShellStartParams;
+use codex_app_server_protocol::LocalShellStartResponse;
 use codex_app_server_protocol::Model as ApiModel;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
@@ -406,17 +406,22 @@ impl AppServerSession {
             .wrap_err("turn/steer failed in app-server TUI")
     }
 
-    pub(crate) async fn command_exec_terminate(&mut self, process_id: String) -> Result<()> {
+    pub(crate) async fn local_shell_start(
+        &mut self,
+        thread_id: ThreadId,
+        command: String,
+    ) -> Result<LocalShellStartResponse> {
         let request_id = self.next_request_id();
-        let _: CommandExecTerminateResponse = self
-            .client
-            .request_typed(ClientRequest::CommandExecTerminate {
+        self.client
+            .request_typed(ClientRequest::LocalShellStart {
                 request_id,
-                params: CommandExecTerminateParams { process_id },
+                params: LocalShellStartParams {
+                    thread_id: thread_id.to_string(),
+                    command,
+                },
             })
             .await
-            .wrap_err("command/exec/terminate failed in app-server TUI")?;
-        Ok(())
+            .wrap_err("localShell/start failed in app-server TUI")
     }
 
     pub(crate) async fn thread_set_name(

@@ -142,6 +142,7 @@ Example with notification opt-out:
 - `thread/rollback` — drop the last N turns from the agent’s in-memory context and persist a rollback marker in the rollout so future resumes see the pruned history; returns the updated `thread` (with `turns` populated) on success.
 - `turn/start` — add user input to a thread and begin Codex generation; responds with the initial `turn` object and streams `turn/started`, `item/*`, and `turn/completed` notifications. For `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode".
 - `turn/steer` — add user input to an already in-flight turn without starting a new turn; returns the active `turnId` that accepted the input.
+- `localShell/start` — run a user shell command in a thread. If the thread already has an active turn, the shell result is injected into that turn; otherwise the server starts a standalone shell turn. The shell result is recorded in thread history and future resumes.
 - `turn/interrupt` — request cancellation of an in-flight turn by `(thread_id, turn_id)`; success is an empty `{}` response and the turn finishes with `status: "interrupted"`.
 - `thread/realtime/start` — start a thread-scoped realtime session (experimental); returns `{}` and streams `thread/realtime/*` notifications.
 - `thread/realtime/appendAudio` — append an input audio chunk to the active realtime session (experimental); returns `{}`.
@@ -559,6 +560,23 @@ Use `turn/steer` to append additional user input to the currently active turn. T
 ```
 
 `expectedTurnId` is required. If there is no active turn (or `expectedTurnId` does not match the active turn), the request fails with an `invalid request` error.
+
+### Example: Run a thread-scoped local shell command
+
+Use `localShell/start` when you want shell output recorded into a thread without treating it as a
+standalone `command/exec` utility request.
+
+```json
+{ "method": "localShell/start", "id": 36, "params": {
+    "threadId": "thr_123",
+    "command": "printf 'shell result'"
+} }
+{ "id": 36, "result": { "turnId": "turn_789" } }
+```
+
+The server then streams the usual `turn/started`, `item/started`, `item/completed`, and
+`turn/completed` notifications for that thread. Unlike `command/exec`, the shell output is added
+to thread history so later turns and resumes can reference it.
 
 ### Example: Request a code review
 

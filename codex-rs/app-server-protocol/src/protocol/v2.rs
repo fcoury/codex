@@ -2406,6 +2406,26 @@ pub struct CommandExecResponse {
     pub stderr: String,
 }
 
+/// Start a thread-scoped local shell command.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct LocalShellStartParams {
+    /// Target thread id.
+    pub thread_id: String,
+    /// Shell command text to execute.
+    pub command: String,
+}
+
+/// Accepted local shell command start response.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct LocalShellStartResponse {
+    /// Turn id associated with the shell command submission.
+    pub turn_id: String,
+}
+
 /// Write stdin bytes to a running `command/exec` session, close stdin, or
 /// both.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

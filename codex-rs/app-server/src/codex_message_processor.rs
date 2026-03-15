@@ -68,6 +68,8 @@ use codex_app_server_protocol::HazelnutScope as ApiHazelnutScope;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ListMcpServerStatusParams;
 use codex_app_server_protocol::ListMcpServerStatusResponse;
+use codex_app_server_protocol::LocalShellStartParams;
+use codex_app_server_protocol::LocalShellStartResponse;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LoginApiKeyParams;
@@ -876,6 +878,10 @@ impl CodexMessageProcessor {
             }
             ClientRequest::FuzzyFileSearchSessionStop { request_id, params } => {
                 self.fuzzy_file_search_session_stop(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::LocalShellStart { request_id, params } => {
+                self.local_shell_start(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::OneOffCommandExec { request_id, params } => {
@@ -1793,6 +1799,50 @@ impl CodexMessageProcessor {
                     data: None,
                 };
                 self.outgoing.send_error(request, error).await;
+            }
+        }
+    }
+
+    async fn local_shell_start(
+        &self,
+        request_id: ConnectionRequestId,
+        params: LocalShellStartParams,
+    ) {
+        let LocalShellStartParams { thread_id, command } = params;
+        if command.trim().is_empty() {
+            self.send_invalid_request_error(request_id, "command must not be empty".to_string())
+                .await;
+            return;
+        }
+
+        let (_, thread) = match self.load_thread(&thread_id).await {
+            Ok(v) => v,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+
+        match self
+            .submit_core_op(
+                &request_id,
+                thread.as_ref(),
+                Op::RunUserShellCommand { command },
+            )
+            .await
+        {
+            Ok(turn_id) => {
+                self.outgoing
+                    .send_response(request_id, LocalShellStartResponse { turn_id })
+                    .await;
+            }
+            Err(err) => {
+                let error = JSONRPCErrorError {
+                    code: INTERNAL_ERROR_CODE,
+                    message: format!("failed to start local shell command: {err}"),
+                    data: None,
+                };
+                self.outgoing.send_error(request_id, error).await;
             }
         }
     }
