@@ -18,6 +18,7 @@ use crate::app_server_session::app_server_rate_limit_snapshot_to_core;
 use crate::app_server_session::status_account_display_from_auth_mode;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
+use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ServerNotification;
@@ -46,6 +47,12 @@ use codex_protocol::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExecCommandBeginEvent;
+use codex_protocol::protocol::ExecCommandEndEvent;
+use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
+use codex_protocol::protocol::ExecCommandSource;
+use codex_protocol::protocol::ExecCommandStatus;
+use codex_protocol::protocol::ExecOutputStream;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::PlanDeltaEvent;
@@ -54,6 +61,7 @@ use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
 use codex_protocol::protocol::RealtimeConversationStartedEvent;
 use codex_protocol::protocol::RealtimeEvent;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::TerminalInteractionEvent;
 use codex_protocol::protocol::ThreadNameUpdatedEvent;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
@@ -68,6 +76,7 @@ use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::request_user_input::RequestUserInputQuestionOption;
 use serde_json::Value;
+use std::time::Duration;
 
 impl App {
     pub(super) async fn handle_app_server_event(
@@ -510,25 +519,19 @@ fn server_notification_thread_events(
         )),
         ServerNotification::ItemStarted(notification) => Some((
             ThreadId::from_string(&notification.thread_id).ok()?,
-            vec![Event {
-                id: String::new(),
-                msg: EventMsg::ItemStarted(ItemStartedEvent {
-                    thread_id: ThreadId::from_string(&notification.thread_id).ok()?,
-                    turn_id: notification.turn_id,
-                    item: thread_item_to_core(notification.item)?,
-                }),
-            }],
+            thread_item_started_events(
+                ThreadId::from_string(&notification.thread_id).ok()?,
+                notification.turn_id,
+                notification.item,
+            )?,
         )),
         ServerNotification::ItemCompleted(notification) => Some((
             ThreadId::from_string(&notification.thread_id).ok()?,
-            vec![Event {
-                id: String::new(),
-                msg: EventMsg::ItemCompleted(ItemCompletedEvent {
-                    thread_id: ThreadId::from_string(&notification.thread_id).ok()?,
-                    turn_id: notification.turn_id,
-                    item: thread_item_to_core(notification.item)?,
-                }),
-            }],
+            thread_item_completed_events(
+                ThreadId::from_string(&notification.thread_id).ok()?,
+                notification.turn_id,
+                notification.item,
+            )?,
         )),
         ServerNotification::AgentMessageDelta(notification) => Some((
             ThreadId::from_string(&notification.thread_id).ok()?,
@@ -566,6 +569,28 @@ fn server_notification_thread_events(
                 id: String::new(),
                 msg: EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent {
                     delta: notification.delta,
+                }),
+            }],
+        )),
+        ServerNotification::CommandExecutionOutputDelta(notification) => Some((
+            ThreadId::from_string(&notification.thread_id).ok()?,
+            vec![Event {
+                id: String::new(),
+                msg: EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
+                    call_id: notification.item_id,
+                    stream: ExecOutputStream::Stdout,
+                    chunk: notification.delta.into_bytes(),
+                }),
+            }],
+        )),
+        ServerNotification::TerminalInteraction(notification) => Some((
+            ThreadId::from_string(&notification.thread_id).ok()?,
+            vec![Event {
+                id: String::new(),
+                msg: EventMsg::TerminalInteraction(TerminalInteractionEvent {
+                    call_id: notification.item_id,
+                    process_id: notification.process_id,
+                    stdin: notification.stdin,
                 }),
             }],
         )),
@@ -640,16 +665,8 @@ fn turn_snapshot_events(thread_id: ThreadId, turn: &Turn) -> Vec<Event> {
         }),
     }];
 
-    events.extend(turn.items.iter().filter_map(|item| {
-        let item = thread_item_to_core(item.clone())?;
-        Some(Event {
-            id: String::new(),
-            msg: EventMsg::ItemCompleted(ItemCompletedEvent {
-                thread_id,
-                turn_id: turn.id.clone(),
-                item,
-            }),
-        })
+    events.extend(turn.items.iter().flat_map(|item| {
+        thread_item_snapshot_events(thread_id, turn.id.clone(), item.clone()).unwrap_or_default()
     }));
 
     match turn.status {
@@ -692,6 +709,171 @@ fn turn_snapshot_events(thread_id: ThreadId, turn: &Turn) -> Vec<Event> {
     }
 
     events
+}
+
+fn thread_item_snapshot_events(
+    thread_id: ThreadId,
+    turn_id: String,
+    item: ThreadItem,
+) -> Option<Vec<Event>> {
+    if let Some(events) = command_execution_snapshot_events(&turn_id, &item) {
+        return Some(events);
+    }
+
+    let item = thread_item_to_core(item)?;
+    Some(vec![Event {
+        id: String::new(),
+        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id,
+            turn_id,
+            item,
+        }),
+    }])
+}
+
+fn thread_item_started_events(
+    thread_id: ThreadId,
+    turn_id: String,
+    item: ThreadItem,
+) -> Option<Vec<Event>> {
+    if let Some(event) = command_execution_begin_event(&turn_id, &item) {
+        return Some(vec![event]);
+    }
+
+    let item = thread_item_to_core(item)?;
+    Some(vec![Event {
+        id: String::new(),
+        msg: EventMsg::ItemStarted(ItemStartedEvent {
+            thread_id,
+            turn_id,
+            item,
+        }),
+    }])
+}
+
+fn thread_item_completed_events(
+    thread_id: ThreadId,
+    turn_id: String,
+    item: ThreadItem,
+) -> Option<Vec<Event>> {
+    if let Some(event) = command_execution_end_event(&turn_id, &item) {
+        return Some(vec![event]);
+    }
+
+    let item = thread_item_to_core(item)?;
+    Some(vec![Event {
+        id: String::new(),
+        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id,
+            turn_id,
+            item,
+        }),
+    }])
+}
+
+fn command_execution_snapshot_events(turn_id: &str, item: &ThreadItem) -> Option<Vec<Event>> {
+    let begin = command_execution_begin_event(turn_id, item);
+    let end = command_execution_end_event(turn_id, item);
+
+    match (begin, end) {
+        (Some(begin), Some(end)) => Some(vec![begin, end]),
+        (Some(begin), None) => Some(vec![begin]),
+        (None, Some(end)) => Some(vec![end]),
+        (None, None) => None,
+    }
+}
+
+fn command_execution_begin_event(turn_id: &str, item: &ThreadItem) -> Option<Event> {
+    let ThreadItem::CommandExecution {
+        id,
+        command,
+        cwd,
+        process_id,
+        status,
+        command_actions,
+        ..
+    } = item
+    else {
+        return None;
+    };
+
+    if *status != CommandExecutionStatus::InProgress {
+        return None;
+    }
+
+    Some(Event {
+        id: String::new(),
+        msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+            call_id: id.clone(),
+            process_id: process_id.clone(),
+            turn_id: turn_id.to_string(),
+            command: split_remote_command_for_approval(command),
+            cwd: cwd.clone(),
+            parsed_cmd: command_actions
+                .clone()
+                .into_iter()
+                .map(|action| action.into_core())
+                .collect(),
+            source: ExecCommandSource::Agent,
+            interaction_input: None,
+        }),
+    })
+}
+
+fn command_execution_end_event(turn_id: &str, item: &ThreadItem) -> Option<Event> {
+    let ThreadItem::CommandExecution {
+        id,
+        command,
+        cwd,
+        process_id,
+        status,
+        command_actions,
+        aggregated_output,
+        exit_code,
+        duration_ms,
+    } = item
+    else {
+        return None;
+    };
+
+    if *status == CommandExecutionStatus::InProgress {
+        return None;
+    }
+
+    let aggregated_output = aggregated_output.clone().unwrap_or_default();
+    Some(Event {
+        id: String::new(),
+        msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+            call_id: id.clone(),
+            process_id: process_id.clone(),
+            turn_id: turn_id.to_string(),
+            command: split_remote_command_for_approval(command),
+            cwd: cwd.clone(),
+            parsed_cmd: command_actions
+                .clone()
+                .into_iter()
+                .map(|action| action.into_core())
+                .collect(),
+            source: ExecCommandSource::Agent,
+            interaction_input: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            aggregated_output: aggregated_output.clone(),
+            exit_code: exit_code.unwrap_or(-1),
+            duration: Duration::from_millis(duration_ms.unwrap_or_default().max(0) as u64),
+            formatted_output: aggregated_output,
+            status: command_execution_status_to_core(status),
+        }),
+    })
+}
+
+fn command_execution_status_to_core(status: &CommandExecutionStatus) -> ExecCommandStatus {
+    match status {
+        CommandExecutionStatus::Completed => ExecCommandStatus::Completed,
+        CommandExecutionStatus::Failed => ExecCommandStatus::Failed,
+        CommandExecutionStatus::Declined => ExecCommandStatus::Declined,
+        CommandExecutionStatus::InProgress => ExecCommandStatus::Failed,
+    }
 }
 
 fn thread_item_to_core(item: ThreadItem) -> Option<TurnItem> {
@@ -783,9 +965,13 @@ mod tests {
     use super::server_request_thread_event;
     use super::thread_snapshot_events;
     use codex_app_server_protocol::AgentMessageDeltaNotification;
+    use codex_app_server_protocol::CommandAction;
     use codex_app_server_protocol::CommandExecutionApprovalDecision;
+    use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
     use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
+    use codex_app_server_protocol::CommandExecutionStatus;
     use codex_app_server_protocol::ItemCompletedNotification;
+    use codex_app_server_protocol::ItemStartedNotification;
     use codex_app_server_protocol::PermissionsRequestApprovalParams;
     use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
     use codex_app_server_protocol::RequestId as AppServerRequestId;
@@ -802,7 +988,10 @@ mod tests {
     use codex_protocol::items::AgentMessageItem;
     use codex_protocol::items::TurnItem;
     use codex_protocol::models::MessagePhase;
+    use codex_protocol::parse_command::ParsedCommand;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ExecCommandStatus;
+    use codex_protocol::protocol::ExecOutputStream;
     use codex_protocol::protocol::NetworkPolicyRuleAction;
     use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::SessionSource;
@@ -994,6 +1183,149 @@ mod tests {
         };
         assert_eq!(turn_id.as_deref(), Some("turn-interrupted"));
         assert_eq!(*reason, TurnAbortReason::Interrupted);
+    }
+
+    #[test]
+    fn bridges_command_execution_notifications() {
+        let thread_id = ThreadId::new().to_string();
+        let turn_id = "turn-cmd".to_string();
+        let item_id = "cmd-1".to_string();
+
+        let (_, started_events) = server_notification_thread_events(
+            ServerNotification::ItemStarted(ItemStartedNotification {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                item: ThreadItem::CommandExecution {
+                    id: item_id.clone(),
+                    command: "cargo build".to_string(),
+                    cwd: PathBuf::from("/tmp/rupro"),
+                    process_id: Some("proc-1".to_string()),
+                    status: CommandExecutionStatus::InProgress,
+                    command_actions: vec![CommandAction::Unknown {
+                        command: "cargo build".to_string(),
+                    }],
+                    aggregated_output: None,
+                    exit_code: None,
+                    duration_ms: None,
+                },
+            }),
+        )
+        .expect("item started should bridge");
+        let [started] = started_events.as_slice() else {
+            panic!("expected one start event");
+        };
+        let EventMsg::ExecCommandBegin(begin) = &started.msg else {
+            panic!("expected exec begin event");
+        };
+        assert_eq!(begin.call_id, item_id);
+        assert_eq!(begin.turn_id, turn_id);
+        assert_eq!(
+            begin.command,
+            vec!["cargo".to_string(), "build".to_string()]
+        );
+        assert_eq!(
+            begin.parsed_cmd,
+            vec![ParsedCommand::Unknown {
+                cmd: "cargo build".to_string(),
+            }]
+        );
+
+        let (_, delta_events) =
+            server_notification_thread_events(ServerNotification::CommandExecutionOutputDelta(
+                CommandExecutionOutputDeltaNotification {
+                    thread_id: thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    item_id: "cmd-1".to_string(),
+                    delta: "Compiling".to_string(),
+                },
+            ))
+            .expect("output delta should bridge");
+        let [delta] = delta_events.as_slice() else {
+            panic!("expected one output delta event");
+        };
+        let EventMsg::ExecCommandOutputDelta(delta) = &delta.msg else {
+            panic!("expected exec output delta event");
+        };
+        assert_eq!(delta.call_id, "cmd-1");
+        assert_eq!(delta.stream, ExecOutputStream::Stdout);
+        assert_eq!(delta.chunk, b"Compiling");
+
+        let (_, completed_events) = server_notification_thread_events(
+            ServerNotification::ItemCompleted(ItemCompletedNotification {
+                thread_id,
+                turn_id: "turn-cmd".to_string(),
+                item: ThreadItem::CommandExecution {
+                    id: "cmd-1".to_string(),
+                    command: "cargo build".to_string(),
+                    cwd: PathBuf::from("/tmp/rupro"),
+                    process_id: Some("proc-1".to_string()),
+                    status: CommandExecutionStatus::Completed,
+                    command_actions: vec![CommandAction::Unknown {
+                        command: "cargo build".to_string(),
+                    }],
+                    aggregated_output: Some("Finished".to_string()),
+                    exit_code: Some(0),
+                    duration_ms: Some(250),
+                },
+            }),
+        )
+        .expect("item completed should bridge");
+        let [completed] = completed_events.as_slice() else {
+            panic!("expected one end event");
+        };
+        let EventMsg::ExecCommandEnd(end) = &completed.msg else {
+            panic!("expected exec end event");
+        };
+        assert_eq!(end.call_id, "cmd-1");
+        assert_eq!(end.aggregated_output, "Finished");
+        assert_eq!(end.formatted_output, "Finished");
+        assert_eq!(end.exit_code, 0);
+        assert_eq!(end.status, ExecCommandStatus::Completed);
+    }
+
+    #[test]
+    fn bridges_command_execution_snapshot_for_resume_restore() {
+        let thread_id = ThreadId::new();
+        let events = thread_snapshot_events(&Thread {
+            id: thread_id.to_string(),
+            preview: "exec".to_string(),
+            ephemeral: false,
+            model_provider: "openai".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            status: ThreadStatus::Idle,
+            path: None,
+            cwd: PathBuf::from("/tmp/project"),
+            cli_version: "test".to_string(),
+            source: SessionSource::Cli.into(),
+            agent_nickname: None,
+            agent_role: None,
+            git_info: None,
+            name: Some("restore".to_string()),
+            turns: vec![Turn {
+                id: "turn-exec".to_string(),
+                items: vec![ThreadItem::CommandExecution {
+                    id: "cmd-restore".to_string(),
+                    command: "cargo test".to_string(),
+                    cwd: PathBuf::from("/tmp/project"),
+                    process_id: Some("proc-restore".to_string()),
+                    status: CommandExecutionStatus::Completed,
+                    command_actions: vec![CommandAction::Unknown {
+                        command: "cargo test".to_string(),
+                    }],
+                    aggregated_output: Some("test result: ok".to_string()),
+                    exit_code: Some(0),
+                    duration_ms: Some(1000),
+                }],
+                status: TurnStatus::Completed,
+                error: None,
+            }],
+        });
+
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0].msg, EventMsg::TurnStarted(_)));
+        assert!(matches!(events[1].msg, EventMsg::ExecCommandEnd(_)));
+        assert!(matches!(events[2].msg, EventMsg::TurnComplete(_)));
     }
 
     #[test]
