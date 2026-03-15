@@ -111,6 +111,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::task::JoinHandle;
 use toml::Value as TomlValue;
+
 mod agent_navigation;
 mod app_server_adapter;
 mod app_server_requests;
@@ -1715,6 +1716,12 @@ impl App {
             }
             AppCommandView::RealtimeConversationClose => {
                 app_server.thread_realtime_stop(thread_id).await?;
+                Ok(true)
+            }
+            AppCommandView::RunUserShellCommand { command } => {
+                app_server
+                    .local_shell_start(thread_id, command.to_string())
+                    .await?;
                 Ok(true)
             }
             AppCommandView::OverrideTurnContext { .. } => Ok(true),

@@ -277,14 +277,14 @@ fn server_request_thread_event(request: &ServerRequest) -> Result<(ThreadId, Eve
                     proposed_execpolicy_amendment: params
                         .proposed_execpolicy_amendment
                         .clone()
-                        .map(|amendment| amendment.into_core()),
+                        .map(codex_app_server_protocol::ExecPolicyAmendment::into_core),
                     proposed_network_policy_amendments: params
                         .proposed_network_policy_amendments
                         .clone()
                         .map(|amendments| {
                             amendments
                                 .into_iter()
-                                .map(|amendment| amendment.into_core())
+                                .map(codex_app_server_protocol::NetworkPolicyAmendment::into_core)
                                 .collect()
                         }),
                     additional_permissions: params.additional_permissions.clone().map(Into::into),
@@ -300,7 +300,7 @@ fn server_request_thread_event(request: &ServerRequest) -> Result<(ThreadId, Eve
                         .clone()
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|action| action.into_core())
+                        .map(codex_app_server_protocol::CommandAction::into_core)
                         .collect(),
                 }),
             },
@@ -802,7 +802,7 @@ fn command_execution_begin_event(turn_id: &str, item: &ThreadItem) -> Option<Eve
             parsed_cmd: command_actions
                 .clone()
                 .into_iter()
-                .map(|action| action.into_core())
+                .map(codex_app_server_protocol::CommandAction::into_core)
                 .collect(),
             source: ExecCommandSource::Agent,
             interaction_input: None,
@@ -842,7 +842,7 @@ fn command_execution_end_event(turn_id: &str, item: &ThreadItem) -> Option<Event
             parsed_cmd: command_actions
                 .clone()
                 .into_iter()
-                .map(|action| action.into_core())
+                .map(codex_app_server_protocol::CommandAction::into_core)
                 .collect(),
             source: ExecCommandSource::Agent,
             interaction_input: None,
@@ -1224,7 +1224,7 @@ mod tests {
             server_notification_thread_events(ServerNotification::CommandExecutionOutputDelta(
                 CommandExecutionOutputDeltaNotification {
                     thread_id: thread_id.clone(),
-                    turn_id: turn_id.clone(),
+                    turn_id,
                     item_id: "cmd-1".to_string(),
                     delta: "Compiling".to_string(),
                 },

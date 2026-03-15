@@ -43,6 +43,7 @@ use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::LocalShellStartParams;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::ModelListParams;
@@ -523,6 +524,15 @@ impl McpProcess {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("turn/start", params).await
+    }
+
+    /// Send a `localShell/start` JSON-RPC request (v2).
+    pub async fn send_local_shell_start_request(
+        &mut self,
+        params: LocalShellStartParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("localShell/start", params).await
     }
 
     /// Send a `command/exec` JSON-RPC request (v2).

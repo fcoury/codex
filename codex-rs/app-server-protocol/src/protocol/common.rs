@@ -457,6 +457,13 @@ client_request_definitions! {
         response: v2::FeedbackUploadResponse,
     },
 
+    /// Start a thread-scoped local shell command and record its output in the
+    /// thread history.
+    LocalShellStart => "localShell/start" {
+        params: v2::LocalShellStartParams,
+        response: v2::LocalShellStartResponse,
+    },
+
     /// Execute a standalone command (argv vector) under the server's sandbox.
     OneOffCommandExec => "command/exec" {
         params: v2::CommandExecParams,

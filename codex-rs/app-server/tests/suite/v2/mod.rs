@@ -14,6 +14,7 @@ mod experimental_api;
 mod experimental_feature_list;
 mod fs;
 mod initialize;
+mod local_shell_start;
 mod mcp_server_elicitation;
 mod model_list;
 mod output_schema;
