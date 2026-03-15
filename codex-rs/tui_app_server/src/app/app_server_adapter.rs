@@ -17,13 +17,18 @@ use crate::app_server_session::AppServerSession;
 use crate::app_server_session::app_server_rate_limit_snapshot_to_core;
 use crate::app_server_session::status_account_display_from_auth_mode;
 use codex_app_server_client::AppServerEvent;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::ThreadId;
+use codex_protocol::approvals::ElicitationRequestEvent;
+use codex_protocol::approvals::ExecApprovalRequestEvent;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -34,6 +39,7 @@ use codex_protocol::items::ReasoningItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::WebSearchItem;
+use codex_protocol::mcp::RequestId as McpRequestId;
 use codex_protocol::protocol::AgentMessageDeltaEvent;
 use codex_protocol::protocol::AgentReasoningDeltaEvent;
 use codex_protocol::protocol::AgentReasoningRawContentDeltaEvent;
@@ -47,6 +53,7 @@ use codex_protocol::protocol::RealtimeConversationClosedEvent;
 use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
 use codex_protocol::protocol::RealtimeConversationStartedEvent;
 use codex_protocol::protocol::RealtimeEvent;
+use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ThreadNameUpdatedEvent;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
@@ -55,6 +62,11 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::request_permissions::RequestPermissionProfile;
+use codex_protocol::request_permissions::RequestPermissionsEvent;
+use codex_protocol::request_user_input::RequestUserInputEvent;
+use codex_protocol::request_user_input::RequestUserInputQuestion;
+use codex_protocol::request_user_input::RequestUserInputQuestionOption;
 use serde_json::Value;
 
 impl App {
@@ -108,22 +120,12 @@ impl App {
                         server_notification_thread_events(notification)
                     {
                         for event in events {
-                            if self.primary_thread_id.is_none()
-                                || matches!(event.msg, EventMsg::SessionConfigured(_))
-                                    && self.primary_thread_id == Some(thread_id)
-                            {
-                                if let Err(err) = self.enqueue_primary_event(event).await {
-                                    tracing::warn!(
-                                        "failed to enqueue primary app-server server notification: {err}"
-                                    );
-                                }
-                            } else if let Err(err) =
-                                self.enqueue_thread_event(thread_id, event).await
-                            {
-                                tracing::warn!(
-                                    "failed to enqueue app-server server notification for {thread_id}: {err}"
-                                );
-                            }
+                            self.enqueue_app_server_thread_event(
+                                thread_id,
+                                event,
+                                "app-server server notification",
+                            )
+                            .await;
                         }
                     }
                 }
@@ -131,18 +133,8 @@ impl App {
             AppServerEvent::LegacyNotification(notification) => {
                 if let Some((thread_id, event)) = legacy_thread_event(notification.params) {
                     self.pending_app_server_requests.note_legacy_event(&event);
-                    if self.primary_thread_id.is_none()
-                        || matches!(event.msg, EventMsg::SessionConfigured(_))
-                            && self.primary_thread_id == Some(thread_id)
-                    {
-                        if let Err(err) = self.enqueue_primary_event(event).await {
-                            tracing::warn!("failed to enqueue primary app-server event: {err}");
-                        }
-                    } else if let Err(err) = self.enqueue_thread_event(thread_id, event).await {
-                        tracing::warn!(
-                            "failed to enqueue app-server thread event for {thread_id}: {err}"
-                        );
-                    }
+                    self.enqueue_app_server_thread_event(thread_id, event, "app-server event")
+                        .await;
                 }
             }
             AppServerEvent::ServerRequest(request) => {
@@ -166,6 +158,35 @@ impl App {
                         .await
                     {
                         tracing::warn!("{err}");
+                    }
+                } else if app_server_client.is_remote() {
+                    match server_request_thread_event(&request) {
+                        Ok((thread_id, event)) => {
+                            self.pending_app_server_requests.note_legacy_event(&event);
+                            self.enqueue_app_server_thread_event(
+                                thread_id,
+                                event,
+                                "app-server remote server request",
+                            )
+                            .await;
+                        }
+                        Err(message) => {
+                            tracing::warn!(
+                                request_id = ?request.id(),
+                                "{message}"
+                            );
+                            self.chat_widget.add_error_message(message.clone());
+                            if let Err(err) = self
+                                .reject_app_server_request(
+                                    app_server_client,
+                                    request.id().clone(),
+                                    message,
+                                )
+                                .await
+                            {
+                                tracing::warn!("{err}");
+                            }
+                        }
                     }
                 }
             }
@@ -195,6 +216,24 @@ impl App {
             .await
             .map_err(|err| format!("failed to reject app-server request: {err}"))
     }
+
+    async fn enqueue_app_server_thread_event(
+        &mut self,
+        thread_id: ThreadId,
+        event: Event,
+        context: &str,
+    ) {
+        if self.primary_thread_id.is_none()
+            || matches!(event.msg, EventMsg::SessionConfigured(_))
+                && self.primary_thread_id == Some(thread_id)
+        {
+            if let Err(err) = self.enqueue_primary_event(event).await {
+                tracing::warn!("failed to enqueue primary {context}: {err}");
+            }
+        } else if let Err(err) = self.enqueue_thread_event(thread_id, event).await {
+            tracing::warn!("failed to enqueue {context} for {thread_id}: {err}");
+        }
+    }
 }
 
 pub(super) fn thread_snapshot_events(thread: &Thread) -> Vec<Event> {
@@ -211,6 +250,180 @@ pub(super) fn thread_snapshot_events(thread: &Thread) -> Vec<Event> {
         .iter()
         .flat_map(|turn| turn_snapshot_events(thread_id, turn))
         .collect()
+}
+
+fn server_request_thread_event(request: &ServerRequest) -> Result<(ThreadId, Event), String> {
+    match request {
+        ServerRequest::CommandExecutionRequestApproval { params, .. } => Ok((
+            thread_id_from_remote_request("command execution approval", &params.thread_id)?,
+            Event {
+                id: String::new(),
+                msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+                    call_id: params.item_id.clone(),
+                    approval_id: params.approval_id.clone(),
+                    turn_id: params.turn_id.clone(),
+                    command: params
+                        .command
+                        .as_deref()
+                        .map(split_remote_command_for_approval)
+                        .unwrap_or_default(),
+                    cwd: params.cwd.clone().unwrap_or_default(),
+                    reason: params.reason.clone(),
+                    network_approval_context: params.network_approval_context.clone().map(
+                        |context| codex_protocol::protocol::NetworkApprovalContext {
+                            host: context.host,
+                            protocol: context.protocol.to_core(),
+                        },
+                    ),
+                    proposed_execpolicy_amendment: params
+                        .proposed_execpolicy_amendment
+                        .clone()
+                        .map(|amendment| amendment.into_core()),
+                    proposed_network_policy_amendments: params
+                        .proposed_network_policy_amendments
+                        .clone()
+                        .map(|amendments| {
+                            amendments
+                                .into_iter()
+                                .map(|amendment| amendment.into_core())
+                                .collect()
+                        }),
+                    additional_permissions: params.additional_permissions.clone().map(Into::into),
+                    skill_metadata: None,
+                    available_decisions: params.available_decisions.clone().map(|decisions| {
+                        decisions
+                            .into_iter()
+                            .map(command_approval_decision_to_review_decision)
+                            .collect()
+                    }),
+                    parsed_cmd: params
+                        .command_actions
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|action| action.into_core())
+                        .collect(),
+                }),
+            },
+        )),
+        ServerRequest::PermissionsRequestApproval { params, .. } => Ok((
+            thread_id_from_remote_request("permissions approval", &params.thread_id)?,
+            Event {
+                id: String::new(),
+                msg: EventMsg::RequestPermissions(RequestPermissionsEvent {
+                    call_id: params.item_id.clone(),
+                    turn_id: params.turn_id.clone(),
+                    reason: params.reason.clone(),
+                    permissions: RequestPermissionProfile::from(Into::<
+                        codex_protocol::models::PermissionProfile,
+                    >::into(
+                        params.permissions.clone()
+                    )),
+                }),
+            },
+        )),
+        ServerRequest::ToolRequestUserInput { params, .. } => Ok((
+            thread_id_from_remote_request("request_user_input", &params.thread_id)?,
+            Event {
+                id: String::new(),
+                msg: EventMsg::RequestUserInput(RequestUserInputEvent {
+                    call_id: params.item_id.clone(),
+                    turn_id: params.turn_id.clone(),
+                    questions: params
+                        .questions
+                        .iter()
+                        .map(|question| RequestUserInputQuestion {
+                            id: question.id.clone(),
+                            header: question.header.clone(),
+                            question: question.question.clone(),
+                            is_other: question.is_other,
+                            is_secret: question.is_secret,
+                            options: question.options.as_ref().map(|options| {
+                                options
+                                    .iter()
+                                    .map(|option| RequestUserInputQuestionOption {
+                                        label: option.label.clone(),
+                                        description: option.description.clone(),
+                                    })
+                                    .collect()
+                            }),
+                        })
+                        .collect(),
+                }),
+            },
+        )),
+        ServerRequest::McpServerElicitationRequest { request_id, params } => Ok((
+            thread_id_from_remote_request("MCP elicitation request", &params.thread_id)?,
+            Event {
+                id: String::new(),
+                msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
+                    turn_id: params.turn_id.clone(),
+                    server_name: params.server_name.clone(),
+                    id: app_server_request_id_to_mcp_request_id(request_id),
+                    request: serde_json::from_value(
+                        serde_json::to_value(&params.request).map_err(|err| {
+                            format!(
+                                "failed to encode remote MCP elicitation request for `{}`: {err}",
+                                params.server_name
+                            )
+                        })?,
+                    )
+                    .map_err(|err| {
+                        format!(
+                            "failed to decode remote MCP elicitation request for `{}`: {err}",
+                            params.server_name
+                        )
+                    })?,
+                }),
+            },
+        )),
+        ServerRequest::FileChangeRequestApproval { .. } => {
+            Err("Remote file change approvals are not available in app-server TUI yet.".to_string())
+        }
+        ServerRequest::DynamicToolCall { .. }
+        | ServerRequest::ChatgptAuthTokensRefresh { .. }
+        | ServerRequest::ApplyPatchApproval { .. }
+        | ServerRequest::ExecCommandApproval { .. } => {
+            Err("This app-server request is not available in app-server TUI yet.".to_string())
+        }
+    }
+}
+
+fn thread_id_from_remote_request(context: &str, thread_id: &str) -> Result<ThreadId, String> {
+    ThreadId::from_string(thread_id)
+        .map_err(|err| format!("failed to parse remote {context} thread id `{thread_id}`: {err}"))
+}
+
+fn split_remote_command_for_approval(command: &str) -> Vec<String> {
+    shlex::split(command).unwrap_or_else(|| vec![command.to_string()])
+}
+
+fn command_approval_decision_to_review_decision(
+    decision: CommandExecutionApprovalDecision,
+) -> ReviewDecision {
+    match decision {
+        CommandExecutionApprovalDecision::Accept => ReviewDecision::Approved,
+        CommandExecutionApprovalDecision::AcceptForSession => ReviewDecision::ApprovedForSession,
+        CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
+            execpolicy_amendment,
+        } => ReviewDecision::ApprovedExecpolicyAmendment {
+            proposed_execpolicy_amendment: execpolicy_amendment.into_core(),
+        },
+        CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
+            network_policy_amendment,
+        } => ReviewDecision::NetworkPolicyAmendment {
+            network_policy_amendment: network_policy_amendment.into_core(),
+        },
+        CommandExecutionApprovalDecision::Decline => ReviewDecision::Denied,
+        CommandExecutionApprovalDecision::Cancel => ReviewDecision::Abort,
+    }
+}
+
+fn app_server_request_id_to_mcp_request_id(request_id: &AppServerRequestId) -> McpRequestId {
+    match request_id {
+        AppServerRequestId::String(value) => McpRequestId::String(value.clone()),
+        AppServerRequestId::Integer(value) => McpRequestId::Integer(*value),
+    }
 }
 
 fn legacy_thread_event(params: Option<Value>) -> Option<(ThreadId, Event)> {
@@ -567,11 +780,17 @@ fn app_server_codex_error_info_to_core(
 #[cfg(test)]
 mod tests {
     use super::server_notification_thread_events;
+    use super::server_request_thread_event;
     use super::thread_snapshot_events;
     use codex_app_server_protocol::AgentMessageDeltaNotification;
+    use codex_app_server_protocol::CommandExecutionApprovalDecision;
+    use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
     use codex_app_server_protocol::ItemCompletedNotification;
+    use codex_app_server_protocol::PermissionsRequestApprovalParams;
     use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
+    use codex_app_server_protocol::RequestId as AppServerRequestId;
     use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ServerRequest;
     use codex_app_server_protocol::Thread;
     use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::ThreadStatus;
@@ -584,9 +803,12 @@ mod tests {
     use codex_protocol::items::TurnItem;
     use codex_protocol::models::MessagePhase;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::NetworkPolicyRuleAction;
+    use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
@@ -772,5 +994,135 @@ mod tests {
         };
         assert_eq!(turn_id.as_deref(), Some("turn-interrupted"));
         assert_eq!(*reason, TurnAbortReason::Interrupted);
+    }
+
+    #[test]
+    fn bridges_remote_command_approval_requests_into_exec_events() {
+        let thread_id = ThreadId::new();
+        let request = ServerRequest::CommandExecutionRequestApproval {
+            request_id: AppServerRequestId::String("req-1".to_string()),
+            params: CommandExecutionRequestApprovalParams {
+                thread_id: thread_id.to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+                approval_id: Some("approval-1".to_string()),
+                reason: Some("needs write access".to_string()),
+                network_approval_context: None,
+                command: Some("cargo build --release".to_string()),
+                cwd: Some(PathBuf::from("/tmp/rupro")),
+                command_actions: None,
+                additional_permissions: None,
+                skill_metadata: None,
+                proposed_execpolicy_amendment: None,
+                proposed_network_policy_amendments: Some(vec![
+                    codex_app_server_protocol::NetworkPolicyAmendment {
+                        host: "crates.io".to_string(),
+                        action: codex_app_server_protocol::NetworkPolicyRuleAction::Allow,
+                    },
+                ]),
+                available_decisions: Some(vec![
+                    CommandExecutionApprovalDecision::AcceptForSession,
+                    CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
+                        network_policy_amendment:
+                            codex_app_server_protocol::NetworkPolicyAmendment {
+                                host: "crates.io".to_string(),
+                                action: codex_app_server_protocol::NetworkPolicyRuleAction::Allow,
+                            },
+                    },
+                    CommandExecutionApprovalDecision::Cancel,
+                ]),
+            },
+        };
+
+        let (actual_thread_id, event) =
+            server_request_thread_event(&request).expect("request should bridge");
+
+        assert_eq!(actual_thread_id, thread_id);
+        let EventMsg::ExecApprovalRequest(request) = event.msg else {
+            panic!("expected bridged exec approval event");
+        };
+        assert_eq!(request.call_id, "item-1");
+        assert_eq!(request.approval_id.as_deref(), Some("approval-1"));
+        assert_eq!(request.turn_id, "turn-1");
+        assert_eq!(
+            request.command,
+            vec![
+                "cargo".to_string(),
+                "build".to_string(),
+                "--release".to_string()
+            ]
+        );
+        assert_eq!(request.cwd, PathBuf::from("/tmp/rupro"));
+        assert_eq!(request.reason.as_deref(), Some("needs write access"));
+        assert_eq!(
+            request.available_decisions,
+            Some(vec![
+                ReviewDecision::ApprovedForSession,
+                ReviewDecision::NetworkPolicyAmendment {
+                    network_policy_amendment: codex_protocol::protocol::NetworkPolicyAmendment {
+                        host: "crates.io".to_string(),
+                        action: NetworkPolicyRuleAction::Allow,
+                    },
+                },
+                ReviewDecision::Abort,
+            ])
+        );
+    }
+
+    #[test]
+    fn bridges_remote_permissions_requests_into_request_permissions_events() {
+        let thread_id = ThreadId::new();
+        let request = ServerRequest::PermissionsRequestApproval {
+            request_id: AppServerRequestId::String("req-2".to_string()),
+            params: PermissionsRequestApprovalParams {
+                thread_id: thread_id.to_string(),
+                turn_id: "turn-2".to_string(),
+                item_id: "perm-1".to_string(),
+                reason: Some("build needs Cargo target writes".to_string()),
+                permissions: codex_app_server_protocol::AdditionalPermissionProfile {
+                    network: Some(codex_app_server_protocol::AdditionalNetworkPermissions {
+                        enabled: Some(true),
+                    }),
+                    file_system: Some(codex_app_server_protocol::AdditionalFileSystemPermissions {
+                        read: Some(vec![
+                            AbsolutePathBuf::from_absolute_path("/tmp/rupro")
+                                .expect("absolute path"),
+                        ]),
+                        write: Some(vec![
+                            AbsolutePathBuf::from_absolute_path("/tmp/rupro/target")
+                                .expect("absolute path"),
+                        ]),
+                    }),
+                    macos: None,
+                },
+            },
+        };
+
+        let (actual_thread_id, event) =
+            server_request_thread_event(&request).expect("request should bridge");
+
+        assert_eq!(actual_thread_id, thread_id);
+        let EventMsg::RequestPermissions(request) = event.msg else {
+            panic!("expected bridged permissions event");
+        };
+        assert_eq!(request.call_id, "perm-1");
+        assert_eq!(request.turn_id, "turn-2");
+        assert_eq!(
+            request.reason.as_deref(),
+            Some("build needs Cargo target writes")
+        );
+        assert_eq!(
+            request.permissions.network.map(|network| network.enabled),
+            Some(Some(true))
+        );
+        assert_eq!(
+            request
+                .permissions
+                .file_system
+                .map(|file_system| file_system.write),
+            Some(Some(vec![
+                AbsolutePathBuf::from_absolute_path("/tmp/rupro/target").expect("absolute path"),
+            ]))
+        );
     }
 }

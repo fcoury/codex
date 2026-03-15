@@ -290,6 +290,10 @@ impl AppServerSession {
         }
     }
 
+    pub(crate) fn is_remote(&self) -> bool {
+        matches!(&self.client, AppServerClient::Remote(_))
+    }
+
     pub(crate) async fn thread_list(
         &mut self,
         params: ThreadListParams,
