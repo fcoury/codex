@@ -310,6 +310,14 @@ impl PendingInteractiveReplayState {
             || !self.request_permissions_call_ids.is_empty()
     }
 
+    pub(super) fn clear_exec_approval(&mut self, approval_id: &str) {
+        self.exec_approval_call_ids.remove(approval_id);
+        Self::remove_call_id_from_turn_map(
+            &mut self.exec_approval_call_ids_by_turn_id,
+            approval_id,
+        );
+    }
+
     fn clear_request_user_input_turn(&mut self, turn_id: &str) {
         if let Some(call_ids) = self.request_user_input_call_ids_by_turn_id.remove(turn_id) {
             for call_id in call_ids {
@@ -729,5 +737,35 @@ mod tests {
         });
 
         assert_eq!(store.has_pending_thread_approvals(), false);
+    }
+
+    #[test]
+    fn resolved_exec_approval_can_be_cleared_without_turn_id() {
+        let mut store = ThreadEventStore::new(8);
+        store.push_event(Event {
+            id: "ev-1".to_string(),
+            msg: EventMsg::ExecApprovalRequest(
+                codex_protocol::protocol::ExecApprovalRequestEvent {
+                    call_id: "call-1".to_string(),
+                    approval_id: Some("approval-1".to_string()),
+                    turn_id: String::new(),
+                    command: vec!["echo".to_string(), "hi".to_string()],
+                    cwd: PathBuf::from("/tmp"),
+                    reason: None,
+                    network_approval_context: None,
+                    proposed_execpolicy_amendment: None,
+                    proposed_network_policy_amendments: None,
+                    additional_permissions: None,
+                    skill_metadata: None,
+                    available_decisions: None,
+                    parsed_cmd: Vec::new(),
+                },
+            ),
+        });
+
+        store.clear_exec_approval_by_id("approval-1");
+
+        assert!(store.snapshot().events.is_empty());
+        assert!(!store.has_pending_thread_approvals());
     }
 }
