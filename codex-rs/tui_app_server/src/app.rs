@@ -424,6 +424,9 @@ impl ThreadEventStore {
             .has_pending_thread_approvals()
     }
 
+    /// Removes a pending exec approval from the interactive-replay state by
+    /// its approval ID. Called when the server resolves the approval
+    /// externally, so the prompt no longer replays on thread switch.
     fn clear_exec_approval_by_id(&mut self, approval_id: &str) {
         self.pending_interactive_replay
             .clear_exec_approval(approval_id);
@@ -2119,6 +2122,15 @@ impl App {
         self.restore_started_app_server_thread(started).await
     }
 
+    /// Hydrates the TUI from an `AppServerStartedThread`, replaying the
+    /// thread's historical turns into the event store so they appear in the
+    /// chat transcript.
+    ///
+    /// This is the single entry point for initial startup, resume, and fork
+    /// — all three produce an `AppServerStartedThread` and funnel through here.
+    /// The method pushes a `SessionConfigured` event followed by the snapshot
+    /// events, takes a store snapshot, activates the thread channel, and
+    /// replays the snapshot into the chat widget.
     async fn restore_started_app_server_thread(
         &mut self,
         started: AppServerStartedThread,

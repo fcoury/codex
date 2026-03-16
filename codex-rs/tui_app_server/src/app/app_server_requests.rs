@@ -1,3 +1,12 @@
+// Tracks in-flight app-server requests that await a TUI-side resolution.
+//
+// Each interactive request from the server (command approval, file-change
+// approval, permission grant, MCP elicitation, etc.) is registered here when
+// it arrives, keyed by its approval/call ID. When the user responds through
+// the TUI, `take_resolution` removes the entry and produces the serialized
+// JSON-RPC response to send back. `resolve_notification` handles the inverse:
+// the server resolves the request externally, so we just clean up.
+
 use std::collections::HashMap;
 
 use crate::app_command::AppCommand;
@@ -33,12 +42,23 @@ pub(super) struct UnsupportedAppServerRequest {
     pub(super) message: String,
 }
 
+/// Returned by `resolve_notification` when the server resolves an exec
+/// approval externally (e.g. the agent cancelled or another client approved).
+/// The caller uses the `thread_id` + `approval_id` to clear the corresponding
+/// pending approval prompt from the thread's interactive replay state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResolvedExecApproval {
     pub(super) thread_id: String,
     pub(super) approval_id: String,
 }
 
+/// Distinguishes which response format to use when resolving an exec approval.
+///
+/// The remote app-server has two protocol versions for command approvals:
+/// `LegacyV1` (`ExecCommandApprovalResponse`, wraps `ReviewDecision` directly)
+/// and `V2` (`CommandExecutionRequestApprovalResponse`, wraps
+/// `CommandExecutionApprovalDecision`). Sending the wrong shape causes the
+/// server to reject the response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ExecApprovalResponseKind {
     LegacyV1,
@@ -74,6 +94,13 @@ impl PendingAppServerRequests {
         self.mcp_legacy_requests.clear();
     }
 
+    /// Registers an incoming server request so we can later match it to a
+    /// user response. Returns `Some` if the request type is not supported and
+    /// should be rejected immediately.
+    ///
+    /// `allow_legacy_exec_approvals` gates whether the V1 `ExecCommandApproval`
+    /// variant is accepted. This is `true` only for remote connections, where
+    /// the server may use the older protocol.
     pub(super) fn note_server_request(
         &mut self,
         request: &ServerRequest,
@@ -337,6 +364,9 @@ impl PendingAppServerRequests {
         Ok(resolution)
     }
 
+    /// Removes all pending requests matching `request_id` (the server resolved
+    /// them externally). Returns the exec approvals that were cleared so the
+    /// caller can update the interactive-replay state and refresh the UI.
     pub(super) fn resolve_notification(
         &mut self,
         request_id: &AppServerRequestId,
