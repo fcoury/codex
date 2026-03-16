@@ -65,10 +65,14 @@ enum ExecApprovalResponseKind {
     V2,
 }
 
+/// Tracks a single in-flight exec approval so we can match the user's
+/// response to the correct request and serialize it in the right format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingExecApproval {
     request_id: AppServerRequestId,
     response_kind: ExecApprovalResponseKind,
+    /// Stored so `resolve_notification` can report which thread's
+    /// interactive-replay state needs to be cleaned up.
     thread_id: String,
 }
 

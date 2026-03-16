@@ -727,6 +727,12 @@ fn token_usage_from_app_server(
     }
 }
 
+/// Replays a single historical turn as the event sequence the TUI expects.
+///
+/// Produces `TurnStarted`, per-item events, then a terminal event
+/// (`TurnComplete` or `TurnAborted`) matching the turn's persisted status.
+/// In-progress turns emit no terminal event, so a subsequent live
+/// `TurnComplete` notification can close them naturally.
 fn turn_snapshot_events(thread_id: ThreadId, turn: &Turn) -> Vec<Event> {
     let mut events = vec![Event {
         id: String::new(),
@@ -783,6 +789,11 @@ fn turn_snapshot_events(thread_id: ThreadId, turn: &Turn) -> Vec<Event> {
     events
 }
 
+/// Converts a single thread item from a historical snapshot into events.
+///
+/// `CommandExecution` items get special treatment via
+/// `command_execution_snapshot_events` so the chat widget renders shell
+/// output correctly. All other item types emit a single `ItemCompleted`.
 fn thread_item_snapshot_events(
     thread_id: ThreadId,
     turn_id: String,
@@ -803,6 +814,10 @@ fn thread_item_snapshot_events(
     }])
 }
 
+/// Translates a live `ItemStarted` notification into core events.
+///
+/// `CommandExecution` items produce `ExecCommandBegin` (only when
+/// `InProgress`); other items produce `ItemStarted`.
 fn thread_item_started_events(
     thread_id: ThreadId,
     turn_id: String,
@@ -823,6 +838,10 @@ fn thread_item_started_events(
     }])
 }
 
+/// Translates a live `ItemCompleted` notification into core events.
+///
+/// `CommandExecution` items produce `ExecCommandEnd`; other items produce
+/// `ItemCompleted`.
 fn thread_item_completed_events(
     thread_id: ThreadId,
     turn_id: String,
@@ -843,6 +862,11 @@ fn thread_item_completed_events(
     }])
 }
 
+/// Produces `ExecCommandBegin` + `ExecCommandEnd` for a historical command.
+///
+/// In-progress commands emit only `Begin` (no `End`), so the chat widget
+/// shows them as still running. Completed/failed/declined commands emit both.
+/// Returns `None` for non-`CommandExecution` items.
 fn command_execution_snapshot_events(turn_id: &str, item: &ThreadItem) -> Option<Vec<Event>> {
     let begin = command_execution_begin_event(turn_id, item);
     let end = command_execution_end_event(turn_id, item);
@@ -855,6 +879,10 @@ fn command_execution_snapshot_events(turn_id: &str, item: &ThreadItem) -> Option
     }
 }
 
+/// Emits `ExecCommandBegin` only for in-progress `CommandExecution` items.
+///
+/// Completed commands should not re-emit a begin event during snapshot replay
+/// because the chat widget would interpret them as a new running process.
 fn command_execution_begin_event(turn_id: &str, item: &ThreadItem) -> Option<Event> {
     let ThreadItem::CommandExecution {
         id,
@@ -892,6 +920,11 @@ fn command_execution_begin_event(turn_id: &str, item: &ThreadItem) -> Option<Eve
     })
 }
 
+/// Emits `ExecCommandEnd` for terminal-state `CommandExecution` items.
+///
+/// `stdout` and `stderr` are left empty because the remote protocol only
+/// provides `aggregated_output`. The `formatted_output` field gets the
+/// same value so the chat widget has something to display.
 fn command_execution_end_event(turn_id: &str, item: &ThreadItem) -> Option<Event> {
     let ThreadItem::CommandExecution {
         id,
@@ -939,6 +972,9 @@ fn command_execution_end_event(turn_id: &str, item: &ThreadItem) -> Option<Event
     })
 }
 
+/// Maps `InProgress` to `Failed` because this function is only called for
+/// terminal-state items (the `InProgress` arm should be unreachable in
+/// practice, but defensive mapping avoids a panic).
 fn command_execution_status_to_core(status: &CommandExecutionStatus) -> ExecCommandStatus {
     match status {
         CommandExecutionStatus::Completed => ExecCommandStatus::Completed,
