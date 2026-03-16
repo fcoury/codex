@@ -1603,7 +1603,7 @@ mod tests {
                 turn_id: "turn-2".to_string(),
                 item_id: "perm-1".to_string(),
                 reason: Some("build needs Cargo target writes".to_string()),
-                permissions: codex_app_server_protocol::AdditionalPermissionProfile {
+                permissions: codex_app_server_protocol::RequestPermissionProfile {
                     network: Some(codex_app_server_protocol::AdditionalNetworkPermissions {
                         enabled: Some(true),
                     }),
@@ -1617,7 +1617,6 @@ mod tests {
                                 .expect("absolute path"),
                         ]),
                     }),
-                    macos: None,
                 },
             },
         };
