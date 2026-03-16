@@ -2122,11 +2122,20 @@ impl App {
         let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
         self.chat_widget = ChatWidget::new_with_app_event(init);
         self.reset_thread_event_state();
+        let snapshot_events = started
+            .thread_snapshot
+            .as_ref()
+            .map(app_server_adapter::thread_snapshot_events)
+            .unwrap_or_default();
         self.enqueue_primary_event(Event {
             id: String::new(),
             msg: EventMsg::SessionConfigured(started.session_configured),
         })
-        .await
+        .await?;
+        for event in snapshot_events {
+            self.enqueue_primary_event(event).await?;
+        }
+        Ok(())
     }
 
     fn fresh_session_config(&self) -> Config {
@@ -2318,7 +2327,7 @@ impl App {
         let enhanced_keys_supported = tui.enhanced_keys_supported();
         let wait_for_initial_session_configured =
             Self::should_wait_for_initial_session(&session_selection);
-        let (mut chat_widget, initial_session_configured) = match session_selection {
+        let (mut chat_widget, initial_started_thread) = match session_selection {
             SessionSelection::StartFresh | SessionSelection::Exit => {
                 let started = app_server.start_thread(&config).await?;
                 let startup_tooltip_override =
@@ -2347,10 +2356,7 @@ impl App {
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     session_telemetry: session_telemetry.clone(),
                 };
-                (
-                    ChatWidget::new_with_app_event(init),
-                    Some(started.session_configured),
-                )
+                (ChatWidget::new_with_app_event(init), Some(started))
             }
             SessionSelection::Resume(target_session) => {
                 let resumed = app_server
@@ -2383,10 +2389,7 @@ impl App {
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     session_telemetry: session_telemetry.clone(),
                 };
-                (
-                    ChatWidget::new_with_app_event(init),
-                    Some(resumed.session_configured),
-                )
+                (ChatWidget::new_with_app_event(init), Some(resumed))
             }
             SessionSelection::Fork(target_session) => {
                 session_telemetry.counter(
@@ -2424,10 +2427,7 @@ impl App {
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     session_telemetry: session_telemetry.clone(),
                 };
-                (
-                    ChatWidget::new_with_app_event(init),
-                    Some(forked.session_configured),
-                )
+                (ChatWidget::new_with_app_event(init), Some(forked))
             }
         };
 
@@ -2479,12 +2479,17 @@ impl App {
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
         };
-        if let Some(session_configured) = initial_session_configured {
+        if let Some(started) = initial_started_thread {
             app.enqueue_primary_event(Event {
                 id: String::new(),
-                msg: EventMsg::SessionConfigured(session_configured),
+                msg: EventMsg::SessionConfigured(started.session_configured),
             })
             .await?;
+            if let Some(thread) = started.thread_snapshot.as_ref() {
+                for event in app_server_adapter::thread_snapshot_events(thread) {
+                    app.enqueue_primary_event(event).await?;
+                }
+            }
         }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
@@ -7553,6 +7558,87 @@ guardian_approval = true
         assert_eq!(
             user_messages,
             vec!["first prompt".to_string(), "third prompt".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_snapshot_replay_preserves_command_execution_history() {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        let thread = codex_app_server_protocol::Thread {
+            id: thread_id.to_string(),
+            preview: "snapshot".to_string(),
+            ephemeral: false,
+            model_provider: "openai".to_string(),
+            created_at: 1,
+            updated_at: 2,
+            status: codex_app_server_protocol::ThreadStatus::Idle,
+            path: None,
+            cwd: PathBuf::from("/tmp/project"),
+            cli_version: "0.0.0".to_string(),
+            source: codex_protocol::protocol::SessionSource::Cli.into(),
+            agent_nickname: None,
+            agent_role: None,
+            git_info: None,
+            name: None,
+            turns: vec![codex_app_server_protocol::Turn {
+                id: "turn-1".to_string(),
+                items: vec![codex_app_server_protocol::ThreadItem::CommandExecution {
+                    id: "cmd-1".to_string(),
+                    command: "cargo test".to_string(),
+                    cwd: "/tmp/project".into(),
+                    aggregated_output: Some("ok".to_string()),
+                    exit_code: Some(0),
+                    duration_ms: Some(12),
+                    process_id: Some("42".to_string()),
+                    status: codex_app_server_protocol::CommandExecutionStatus::Completed,
+                    command_actions: Vec::new(),
+                }],
+                status: codex_app_server_protocol::TurnStatus::Completed,
+                error: None,
+            }],
+        };
+
+        app.enqueue_primary_event(Event {
+            id: String::new(),
+            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                session_id: thread_id,
+                forked_from_id: None,
+                thread_name: None,
+                model: "gpt-test".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                cwd: PathBuf::from("/tmp/project"),
+                reasoning_effort: None,
+                history_log_id: 0,
+                history_entry_count: 0,
+                initial_messages: None,
+                network_proxy: None,
+                rollout_path: Some(PathBuf::new()),
+            }),
+        })
+        .await
+        .expect("session configured should enqueue");
+
+        for event in app_server_adapter::thread_snapshot_events(&thread) {
+            app.enqueue_primary_event(event)
+                .await
+                .expect("snapshot event should enqueue");
+        }
+
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("primary thread channel should exist");
+        let snapshot = channel.store.lock().await.snapshot();
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| matches!(event.msg, EventMsg::ExecCommandEnd(_)))
         );
     }
 

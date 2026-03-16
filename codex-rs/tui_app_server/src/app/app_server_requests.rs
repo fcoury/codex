@@ -98,6 +98,20 @@ impl PendingAppServerRequests {
         self.mcp_legacy_requests.clear();
     }
 
+    pub(super) fn clear_request(&mut self, request_id: &AppServerRequestId) {
+        self.exec_approvals
+            .retain(|_, pending| &pending.request_id != request_id);
+        self.file_change_approvals
+            .retain(|_, pending| pending != request_id);
+        self.permissions_approvals
+            .retain(|_, pending| pending != request_id);
+        self.user_inputs.retain(|_, pending| pending != request_id);
+        self.mcp_pending_by_matcher
+            .retain(|_, pending| pending != request_id);
+        self.mcp_legacy_requests
+            .retain(|_, pending| pending != request_id);
+    }
+
     /// Registers an incoming server request so we can later match it to a
     /// user response. Returns `Some` if the request type is not supported and
     /// should be rejected immediately.
@@ -806,12 +820,13 @@ mod tests {
     #[test]
     fn resolve_notification_returns_resolved_legacy_exec_approval() {
         let mut pending = PendingAppServerRequests::default();
+        let thread_id = ThreadId::new();
         assert_eq!(
             pending.note_server_request(
                 &ServerRequest::ExecCommandApproval {
                     request_id: AppServerRequestId::Integer(101),
                     params: ExecCommandApprovalParams {
-                        conversation_id: ThreadId::new(),
+                        conversation_id: thread_id,
                         call_id: "call-1".to_string(),
                         approval_id: Some("approval-1".to_string()),
                         command: vec!["cargo".to_string(), "test".to_string()],
@@ -827,6 +842,7 @@ mod tests {
 
         let resolved = pending.resolve_notification(&AppServerRequestId::Integer(101));
         assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].thread_id, thread_id.to_string());
         assert_eq!(resolved[0].approval_id, "approval-1");
     }
 
