@@ -88,7 +88,6 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsEvent;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
@@ -392,11 +391,7 @@ fn server_request_thread_event(request: &ServerRequest) -> Result<(ThreadId, Eve
                     call_id: params.item_id.clone(),
                     turn_id: params.turn_id.clone(),
                     reason: params.reason.clone(),
-                    permissions: RequestPermissionProfile::from(Into::<
-                        codex_protocol::models::PermissionProfile,
-                    >::into(
-                        params.permissions.clone()
-                    )),
+                    permissions: params.permissions.clone().into(),
                 }),
             },
         )),
