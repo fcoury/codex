@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use crate::app_command::AppCommand;
 use crate::app_command::AppCommandView;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
+use codex_app_server_protocol::ExecCommandApprovalResponse;
 use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
 use codex_app_server_protocol::GrantedPermissionProfile;
@@ -31,9 +33,28 @@ pub(super) struct UnsupportedAppServerRequest {
     pub(super) message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedExecApproval {
+    pub(super) thread_id: String,
+    pub(super) approval_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExecApprovalResponseKind {
+    LegacyV1,
+    V2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingExecApproval {
+    request_id: AppServerRequestId,
+    response_kind: ExecApprovalResponseKind,
+    thread_id: String,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PendingAppServerRequests {
-    exec_approvals: HashMap<String, AppServerRequestId>,
+    exec_approvals: HashMap<String, PendingExecApproval>,
     file_change_approvals: HashMap<String, AppServerRequestId>,
     permissions_approvals: HashMap<String, AppServerRequestId>,
     user_inputs: HashMap<String, AppServerRequestId>,
@@ -56,6 +77,7 @@ impl PendingAppServerRequests {
     pub(super) fn note_server_request(
         &mut self,
         request: &ServerRequest,
+        allow_legacy_exec_approvals: bool,
     ) -> Option<UnsupportedAppServerRequest> {
         match request {
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
@@ -63,7 +85,14 @@ impl PendingAppServerRequests {
                     .approval_id
                     .clone()
                     .unwrap_or_else(|| params.item_id.clone());
-                self.exec_approvals.insert(approval_id, request_id.clone());
+                self.exec_approvals.insert(
+                    approval_id,
+                    PendingExecApproval {
+                        request_id: request_id.clone(),
+                        response_kind: ExecApprovalResponseKind::V2,
+                        thread_id: params.thread_id.clone(),
+                    },
+                );
                 None
             }
             ServerRequest::FileChangeRequestApproval { request_id, params } => {
@@ -115,12 +144,29 @@ impl PendingAppServerRequests {
                 })
             }
             ServerRequest::ExecCommandApproval { request_id, .. } => {
-                Some(UnsupportedAppServerRequest {
-                    request_id: request_id.clone(),
-                    message:
-                        "Legacy command approval requests are not available in app-server TUI yet."
+                if !allow_legacy_exec_approvals {
+                    Some(UnsupportedAppServerRequest {
+                        request_id: request_id.clone(),
+                        message: "Legacy command approval requests are not available in app-server TUI yet."
                             .to_string(),
-                })
+                    })
+                } else if let ServerRequest::ExecCommandApproval { params, .. } = request {
+                    let approval_id = params
+                        .approval_id
+                        .clone()
+                        .unwrap_or_else(|| params.call_id.clone());
+                    self.exec_approvals.insert(
+                        approval_id,
+                        PendingExecApproval {
+                            request_id: request_id.clone(),
+                            response_kind: ExecApprovalResponseKind::LegacyV1,
+                            thread_id: params.conversation_id.to_string(),
+                        },
+                    );
+                    None
+                } else {
+                    None
+                }
             }
         }
     }
@@ -158,15 +204,33 @@ impl PendingAppServerRequests {
             AppCommandView::ExecApproval { id, decision, .. } => self
                 .exec_approvals
                 .remove(id)
-                .map(|request_id| {
+                .map(|pending| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
-                        request_id,
-                        result: serde_json::to_value(CommandExecutionRequestApprovalResponse {
-                            decision: decision.clone().into(),
-                        })
-                        .map_err(|err| {
-                            format!("failed to serialize command execution approval response: {err}")
-                        })?,
+                        request_id: pending.request_id,
+                        result: match pending.response_kind {
+                            ExecApprovalResponseKind::LegacyV1 => {
+                                serde_json::to_value(ExecCommandApprovalResponse {
+                                    decision: decision.clone(),
+                                })
+                                .map_err(|err| {
+                                    format!(
+                                        "failed to serialize legacy command approval response: {err}"
+                                    )
+                                })?
+                            }
+                            ExecApprovalResponseKind::V2 => {
+                                serde_json::to_value(CommandExecutionRequestApprovalResponse {
+                                    decision: CommandExecutionApprovalDecision::from(
+                                        decision.clone(),
+                                    ),
+                                })
+                                .map_err(|err| {
+                                    format!(
+                                        "failed to serialize command execution approval response: {err}"
+                                    )
+                                })?
+                            }
+                        },
                     })
                 })
                 .transpose()?,
@@ -273,8 +337,22 @@ impl PendingAppServerRequests {
         Ok(resolution)
     }
 
-    pub(super) fn resolve_notification(&mut self, request_id: &AppServerRequestId) {
-        self.exec_approvals.retain(|_, value| value != request_id);
+    pub(super) fn resolve_notification(
+        &mut self,
+        request_id: &AppServerRequestId,
+    ) -> Vec<ResolvedExecApproval> {
+        let mut resolved_exec_approvals = Vec::new();
+        self.exec_approvals.retain(|approval_id, value| {
+            if &value.request_id == request_id {
+                resolved_exec_approvals.push(ResolvedExecApproval {
+                    thread_id: value.thread_id.clone(),
+                    approval_id: approval_id.clone(),
+                });
+                false
+            } else {
+                true
+            }
+        });
         self.file_change_approvals
             .retain(|_, value| value != request_id);
         self.permissions_approvals
@@ -284,6 +362,7 @@ impl PendingAppServerRequests {
             .retain(|_, value| value != request_id);
         self.mcp_legacy_requests
             .retain(|_, value| value != request_id);
+        resolved_exec_approvals
     }
 }
 
@@ -366,6 +445,8 @@ fn file_change_decision(decision: &ReviewDecision) -> Result<FileChangeApprovalD
 mod tests {
     use super::PendingAppServerRequests;
     use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
+    use codex_app_server_protocol::ExecCommandApprovalParams;
+    use codex_app_server_protocol::ExecCommandApprovalResponse;
     use codex_app_server_protocol::FileChangeRequestApprovalParams;
     use codex_app_server_protocol::McpElicitationObjectType;
     use codex_app_server_protocol::McpElicitationSchema;
@@ -379,6 +460,7 @@ mod tests {
     use codex_app_server_protocol::ToolRequestUserInputAnswer;
     use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_app_server_protocol::ToolRequestUserInputResponse;
+    use codex_protocol::ThreadId;
     use codex_protocol::approvals::ElicitationAction;
     use codex_protocol::approvals::ElicitationRequest;
     use codex_protocol::approvals::ElicitationRequestEvent;
@@ -415,7 +497,7 @@ mod tests {
             },
         };
 
-        assert_eq!(pending.note_server_request(&request), None);
+        assert_eq!(pending.note_server_request(&request, false), None);
 
         let resolution = pending
             .take_resolution(&Op::ExecApproval {
@@ -435,31 +517,37 @@ mod tests {
         let mut pending = PendingAppServerRequests::default();
 
         assert_eq!(
-            pending.note_server_request(&ServerRequest::PermissionsRequestApproval {
-                request_id: AppServerRequestId::Integer(7),
-                params: PermissionsRequestApprovalParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "perm-1".to_string(),
-                    reason: None,
-                    permissions: serde_json::from_value(json!({
-                        "network": { "enabled": null }
-                    }))
-                    .expect("valid permissions"),
+            pending.note_server_request(
+                &ServerRequest::PermissionsRequestApproval {
+                    request_id: AppServerRequestId::Integer(7),
+                    params: PermissionsRequestApprovalParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        item_id: "perm-1".to_string(),
+                        reason: None,
+                        permissions: serde_json::from_value(json!({
+                            "network": { "enabled": null }
+                        }))
+                        .expect("valid permissions"),
+                    },
                 },
-            }),
+                false
+            ),
             None
         );
         assert_eq!(
-            pending.note_server_request(&ServerRequest::ToolRequestUserInput {
-                request_id: AppServerRequestId::Integer(8),
-                params: ToolRequestUserInputParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-2".to_string(),
-                    item_id: "tool-1".to_string(),
-                    questions: Vec::new(),
+            pending.note_server_request(
+                &ServerRequest::ToolRequestUserInput {
+                    request_id: AppServerRequestId::Integer(8),
+                    params: ToolRequestUserInputParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-2".to_string(),
+                        item_id: "tool-1".to_string(),
+                        questions: Vec::new(),
+                    },
                 },
-            }),
+                false
+            ),
             None
         );
 
@@ -542,24 +630,27 @@ mod tests {
         });
 
         assert_eq!(
-            pending.note_server_request(&ServerRequest::McpServerElicitationRequest {
-                request_id: AppServerRequestId::Integer(12),
-                params: McpServerElicitationRequestParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: Some("turn-1".to_string()),
-                    server_name: "example".to_string(),
-                    request: McpServerElicitationRequest::Form {
-                        meta: None,
-                        message: "Need input".to_string(),
-                        requested_schema: McpElicitationSchema {
-                            schema_uri: None,
-                            type_: McpElicitationObjectType::Object,
-                            properties: BTreeMap::new(),
-                            required: None,
+            pending.note_server_request(
+                &ServerRequest::McpServerElicitationRequest {
+                    request_id: AppServerRequestId::Integer(12),
+                    params: McpServerElicitationRequestParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: Some("turn-1".to_string()),
+                        server_name: "example".to_string(),
+                        request: McpServerElicitationRequest::Form {
+                            meta: None,
+                            message: "Need input".to_string(),
+                            requested_schema: McpElicitationSchema {
+                                schema_uri: None,
+                                type_: McpElicitationObjectType::Object,
+                                properties: BTreeMap::new(),
+                                required: None,
+                            },
                         },
                     },
                 },
-            }),
+                false
+            ),
             None
         );
 
@@ -589,16 +680,19 @@ mod tests {
     fn rejects_dynamic_tool_calls_as_unsupported() {
         let mut pending = PendingAppServerRequests::default();
         let unsupported = pending
-            .note_server_request(&ServerRequest::DynamicToolCall {
-                request_id: AppServerRequestId::Integer(99),
-                params: codex_app_server_protocol::DynamicToolCallParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    call_id: "tool-1".to_string(),
-                    tool: "tool".to_string(),
-                    arguments: json!({}),
+            .note_server_request(
+                &ServerRequest::DynamicToolCall {
+                    request_id: AppServerRequestId::Integer(99),
+                    params: codex_app_server_protocol::DynamicToolCallParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        call_id: "tool-1".to_string(),
+                        tool: "tool".to_string(),
+                        arguments: json!({}),
+                    },
                 },
-            })
+                false,
+            )
             .expect("dynamic tool calls should be rejected");
 
         assert_eq!(unsupported.request_id, AppServerRequestId::Integer(99));
@@ -609,19 +703,118 @@ mod tests {
     }
 
     #[test]
+    fn resolves_legacy_command_approval_requests_when_allowed() {
+        let mut pending = PendingAppServerRequests::default();
+        assert_eq!(
+            pending.note_server_request(
+                &ServerRequest::ExecCommandApproval {
+                    request_id: AppServerRequestId::Integer(100),
+                    params: ExecCommandApprovalParams {
+                        conversation_id: ThreadId::new(),
+                        call_id: "call-1".to_string(),
+                        approval_id: Some("approval-1".to_string()),
+                        command: vec!["cargo".to_string(), "test".to_string()],
+                        cwd: "/tmp/project".into(),
+                        reason: Some("legacy flow".to_string()),
+                        parsed_cmd: Vec::new(),
+                    },
+                },
+                true
+            ),
+            None
+        );
+
+        let resolution = pending
+            .take_resolution(&Op::ExecApproval {
+                id: "approval-1".to_string(),
+                turn_id: None,
+                decision: ReviewDecision::ApprovedForSession,
+            })
+            .expect("resolution should serialize")
+            .expect("request should be pending");
+
+        assert_eq!(resolution.request_id, AppServerRequestId::Integer(100));
+        assert_eq!(
+            serde_json::from_value::<ExecCommandApprovalResponse>(resolution.result)
+                .expect("legacy response should decode"),
+            ExecCommandApprovalResponse {
+                decision: ReviewDecision::ApprovedForSession,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_command_approval_requests_when_not_allowed() {
+        let mut pending = PendingAppServerRequests::default();
+        let unsupported = pending
+            .note_server_request(
+                &ServerRequest::ExecCommandApproval {
+                    request_id: AppServerRequestId::Integer(100),
+                    params: ExecCommandApprovalParams {
+                        conversation_id: ThreadId::new(),
+                        call_id: "call-1".to_string(),
+                        approval_id: Some("approval-1".to_string()),
+                        command: vec!["cargo".to_string(), "test".to_string()],
+                        cwd: "/tmp/project".into(),
+                        reason: Some("legacy flow".to_string()),
+                        parsed_cmd: Vec::new(),
+                    },
+                },
+                false,
+            )
+            .expect("legacy command approvals should be rejected");
+
+        assert_eq!(unsupported.request_id, AppServerRequestId::Integer(100));
+        assert_eq!(
+            unsupported.message,
+            "Legacy command approval requests are not available in app-server TUI yet."
+        );
+    }
+
+    #[test]
+    fn resolve_notification_returns_resolved_legacy_exec_approval() {
+        let mut pending = PendingAppServerRequests::default();
+        assert_eq!(
+            pending.note_server_request(
+                &ServerRequest::ExecCommandApproval {
+                    request_id: AppServerRequestId::Integer(101),
+                    params: ExecCommandApprovalParams {
+                        conversation_id: ThreadId::new(),
+                        call_id: "call-1".to_string(),
+                        approval_id: Some("approval-1".to_string()),
+                        command: vec!["cargo".to_string(), "test".to_string()],
+                        cwd: "/tmp/project".into(),
+                        reason: None,
+                        parsed_cmd: Vec::new(),
+                    },
+                },
+                true
+            ),
+            None
+        );
+
+        let resolved = pending.resolve_notification(&AppServerRequestId::Integer(101));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].approval_id, "approval-1");
+    }
+
+    #[test]
     fn rejects_invalid_patch_decisions_for_file_change_requests() {
         let mut pending = PendingAppServerRequests::default();
         assert_eq!(
-            pending.note_server_request(&ServerRequest::FileChangeRequestApproval {
-                request_id: AppServerRequestId::Integer(13),
-                params: FileChangeRequestApprovalParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "patch-1".to_string(),
-                    reason: None,
-                    grant_root: None,
+            pending.note_server_request(
+                &ServerRequest::FileChangeRequestApproval {
+                    request_id: AppServerRequestId::Integer(13),
+                    params: FileChangeRequestApprovalParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        item_id: "patch-1".to_string(),
+                        reason: None,
+                        grant_root: None,
+                    },
                 },
-            }),
+                false
+            ),
             None
         );
 

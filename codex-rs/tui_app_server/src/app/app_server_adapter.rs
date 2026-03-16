@@ -93,8 +93,28 @@ impl App {
             }
             AppServerEvent::ServerNotification(notification) => match notification {
                 ServerNotification::ServerRequestResolved(notification) => {
-                    self.pending_app_server_requests
+                    let resolved = self
+                        .pending_app_server_requests
                         .resolve_notification(&notification.request_id);
+                    if !resolved.is_empty() {
+                        for resolved_exec_approval in resolved {
+                            let Ok(thread_id) =
+                                ThreadId::from_string(&resolved_exec_approval.thread_id)
+                            else {
+                                tracing::warn!(
+                                    thread_id = resolved_exec_approval.thread_id,
+                                    "ignoring resolved exec approval for invalid thread id"
+                                );
+                                continue;
+                            };
+                            if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+                                let mut store = channel.store.lock().await;
+                                store
+                                    .clear_exec_approval_by_id(&resolved_exec_approval.approval_id);
+                            }
+                        }
+                        self.refresh_pending_thread_approvals().await;
+                    }
                 }
                 ServerNotification::AccountRateLimitsUpdated(notification) => {
                     self.chat_widget.on_rate_limit_snapshot(Some(
@@ -139,7 +159,7 @@ impl App {
             AppServerEvent::ServerRequest(request) => {
                 if let Some(unsupported) = self
                     .pending_app_server_requests
-                    .note_server_request(&request)
+                    .note_server_request(&request, app_server_client.is_remote())
                 {
                     tracing::warn!(
                         request_id = ?unsupported.request_id,
@@ -277,14 +297,14 @@ fn server_request_thread_event(request: &ServerRequest) -> Result<(ThreadId, Eve
                     proposed_execpolicy_amendment: params
                         .proposed_execpolicy_amendment
                         .clone()
-                        .map(|amendment| amendment.into_core()),
+                        .map(codex_app_server_protocol::ExecPolicyAmendment::into_core),
                     proposed_network_policy_amendments: params
                         .proposed_network_policy_amendments
                         .clone()
                         .map(|amendments| {
                             amendments
                                 .into_iter()
-                                .map(|amendment| amendment.into_core())
+                                .map(codex_app_server_protocol::NetworkPolicyAmendment::into_core)
                                 .collect()
                         }),
                     additional_permissions: params.additional_permissions.clone().map(Into::into),
@@ -300,8 +320,29 @@ fn server_request_thread_event(request: &ServerRequest) -> Result<(ThreadId, Eve
                         .clone()
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|action| action.into_core())
+                        .map(codex_app_server_protocol::CommandAction::into_core)
                         .collect(),
+                }),
+            },
+        )),
+        ServerRequest::ExecCommandApproval { params, .. } => Ok((
+            params.conversation_id,
+            Event {
+                id: String::new(),
+                msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+                    call_id: params.call_id.clone(),
+                    approval_id: params.approval_id.clone(),
+                    turn_id: String::new(),
+                    command: params.command.clone(),
+                    cwd: params.cwd.clone(),
+                    reason: params.reason.clone(),
+                    network_approval_context: None,
+                    proposed_execpolicy_amendment: None,
+                    proposed_network_policy_amendments: None,
+                    additional_permissions: None,
+                    skill_metadata: None,
+                    available_decisions: None,
+                    parsed_cmd: params.parsed_cmd.clone(),
                 }),
             },
         )),
@@ -381,8 +422,7 @@ fn server_request_thread_event(request: &ServerRequest) -> Result<(ThreadId, Eve
         }
         ServerRequest::DynamicToolCall { .. }
         | ServerRequest::ChatgptAuthTokensRefresh { .. }
-        | ServerRequest::ApplyPatchApproval { .. }
-        | ServerRequest::ExecCommandApproval { .. } => {
+        | ServerRequest::ApplyPatchApproval { .. } => {
             Err("This app-server request is not available in app-server TUI yet.".to_string())
         }
     }
@@ -802,7 +842,7 @@ fn command_execution_begin_event(turn_id: &str, item: &ThreadItem) -> Option<Eve
             parsed_cmd: command_actions
                 .clone()
                 .into_iter()
-                .map(|action| action.into_core())
+                .map(codex_app_server_protocol::CommandAction::into_core)
                 .collect(),
             source: ExecCommandSource::Agent,
             interaction_input: None,
@@ -842,7 +882,7 @@ fn command_execution_end_event(turn_id: &str, item: &ThreadItem) -> Option<Event
             parsed_cmd: command_actions
                 .clone()
                 .into_iter()
-                .map(|action| action.into_core())
+                .map(codex_app_server_protocol::CommandAction::into_core)
                 .collect(),
             source: ExecCommandSource::Agent,
             interaction_input: None,
@@ -960,6 +1000,7 @@ mod tests {
     use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
     use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
     use codex_app_server_protocol::CommandExecutionStatus;
+    use codex_app_server_protocol::ExecCommandApprovalParams;
     use codex_app_server_protocol::ItemCompletedNotification;
     use codex_app_server_protocol::ItemStartedNotification;
     use codex_app_server_protocol::PermissionsRequestApprovalParams;
@@ -974,6 +1015,7 @@ mod tests {
     use codex_app_server_protocol::TurnCompletedNotification;
     use codex_app_server_protocol::TurnStatus;
     use codex_protocol::ThreadId;
+    use codex_protocol::approvals::ExecApprovalRequestEvent;
     use codex_protocol::items::AgentMessageContent;
     use codex_protocol::items::AgentMessageItem;
     use codex_protocol::items::TurnItem;
@@ -1224,7 +1266,7 @@ mod tests {
             server_notification_thread_events(ServerNotification::CommandExecutionOutputDelta(
                 CommandExecutionOutputDeltaNotification {
                     thread_id: thread_id.clone(),
-                    turn_id: turn_id.clone(),
+                    turn_id,
                     item_id: "cmd-1".to_string(),
                     delta: "Compiling".to_string(),
                 },
@@ -1388,6 +1430,61 @@ mod tests {
                 },
                 ReviewDecision::Abort,
             ])
+        );
+    }
+
+    #[test]
+    fn bridges_remote_legacy_command_approval_requests_into_exec_events() {
+        let thread_id = ThreadId::new();
+        let request = ServerRequest::ExecCommandApproval {
+            request_id: AppServerRequestId::String("req-legacy-1".to_string()),
+            params: ExecCommandApprovalParams {
+                conversation_id: thread_id,
+                call_id: "item-1".to_string(),
+                approval_id: Some("approval-1".to_string()),
+                command: vec![
+                    "cargo".to_string(),
+                    "build".to_string(),
+                    "--release".to_string(),
+                ],
+                cwd: PathBuf::from("/tmp/rupro"),
+                reason: Some("needs write access".to_string()),
+                parsed_cmd: vec![ParsedCommand::Unknown {
+                    cmd: "cargo build --release".to_string(),
+                }],
+            },
+        };
+
+        let (actual_thread_id, event) =
+            server_request_thread_event(&request).expect("request should bridge");
+
+        assert_eq!(actual_thread_id, thread_id);
+        let EventMsg::ExecApprovalRequest(request) = event.msg else {
+            panic!("expected bridged exec approval event");
+        };
+        assert_eq!(request.call_id, "item-1");
+        assert_eq!(request.approval_id.as_deref(), Some("approval-1"));
+        assert_eq!(request.turn_id, "");
+        assert_eq!(
+            request.command,
+            vec![
+                "cargo".to_string(),
+                "build".to_string(),
+                "--release".to_string()
+            ]
+        );
+        assert_eq!(request.cwd, PathBuf::from("/tmp/rupro"));
+        assert_eq!(request.reason.as_deref(), Some("needs write access"));
+        assert_eq!(request.available_decisions, None);
+        assert_eq!(
+            request.effective_available_decisions(),
+            ExecApprovalRequestEvent::default_available_decisions(None, None, None, None)
+        );
+        assert_eq!(
+            request.parsed_cmd,
+            vec![ParsedCommand::Unknown {
+                cmd: "cargo build --release".to_string(),
+            }]
         );
     }
 

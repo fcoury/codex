@@ -424,6 +424,11 @@ impl ThreadEventStore {
             .has_pending_thread_approvals()
     }
 
+    fn clear_exec_approval_by_id(&mut self, approval_id: &str) {
+        self.pending_interactive_replay
+            .clear_exec_approval(approval_id);
+    }
+
     fn active_turn_id(&self) -> Option<&str> {
         self.active_turn_id.as_deref()
     }
