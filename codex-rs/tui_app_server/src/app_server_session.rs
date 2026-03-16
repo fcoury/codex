@@ -123,6 +123,12 @@ impl ThreadParamsMode {
     }
 }
 
+/// The result of starting, resuming, or forking a thread on the app-server.
+///
+/// Carries both the full `Thread` snapshot (including historical turns) and the
+/// `SessionConfigured` event derived from the server's response. The `thread`
+/// field is used during `restore_started_app_server_thread` to replay prior
+/// conversation history into the TUI's event store.
 pub(crate) struct AppServerStartedThread {
     pub(crate) session_configured: SessionConfiguredEvent,
 }
@@ -321,6 +327,11 @@ impl AppServerSession {
         }
     }
 
+    /// Returns `true` when connected to a remote app-server via WebSocket.
+    ///
+    /// Used to gate behavior that only applies to remote connections: accepting
+    /// legacy V1 exec approvals, and bridging `ServerRequest` variants into
+    /// core events that the TUI can display.
     pub(crate) fn is_remote(&self) -> bool {
         matches!(&self.client, AppServerClient::Remote(_))
     }

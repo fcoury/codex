@@ -310,6 +310,12 @@ impl PendingInteractiveReplayState {
             || !self.request_permissions_call_ids.is_empty()
     }
 
+    /// Removes a single exec approval by its approval ID, regardless of turn.
+    ///
+    /// Used when the server resolves an approval externally (e.g. the agent
+    /// cancelled or another client responded). Legacy V1 approvals may not
+    /// have a turn ID, so this searches both the flat set and all turn-indexed
+    /// entries.
     pub(super) fn clear_exec_approval(&mut self, approval_id: &str) {
         self.exec_approval_call_ids.remove(approval_id);
         Self::remove_call_id_from_turn_map(

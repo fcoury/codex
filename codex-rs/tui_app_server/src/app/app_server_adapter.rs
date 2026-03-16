@@ -9,6 +9,24 @@ main `app.rs` orchestration path.
 
 As more TUI flows move onto the app-server surface directly, this adapter
 should shrink and eventually disappear.
+
+## Remote server support
+
+When the TUI connects to a **remote** app-server (via WebSocket), additional
+translation paths are needed that do not apply to the local in-process server:
+
+- **Thread snapshot replay** (`thread_snapshot_events`): converts a `Thread`'s
+  historical turns into a sequence of core `Event`s so the chat widget can
+  display prior conversation history after resume or fork.
+- **Server request bridging** (`server_request_thread_event`): translates
+  interactive approval requests (`CommandExecutionRequestApproval`,
+  `ExecCommandApproval`, `PermissionsRequestApproval`, etc.) from the remote
+  protocol into the core `Event` types the TUI already knows how to render.
+- **Command execution lifecycle** (`thread_item_started_events`,
+  `thread_item_completed_events`): maps `CommandExecution` thread items into
+  `ExecCommandBegin`/`ExecCommandEnd` events rather than generic
+  `ItemStarted`/`ItemCompleted`, so the chat widget renders shell output
+  correctly.
 */
 
 use super::App;
@@ -250,6 +268,12 @@ impl App {
             .map_err(|err| format!("failed to reject app-server request: {err}"))
     }
 
+    /// Routes an app-server event to the correct channel.
+    ///
+    /// `SessionConfigured` events for the primary thread go through the primary
+    /// event path; all other events go through the per-thread channel. The
+    /// `context` string is included in warning logs on failure so the caller
+    /// can identify which code path produced the event.
     async fn enqueue_app_server_thread_event(
         &mut self,
         thread_id: ThreadId,
@@ -269,6 +293,13 @@ impl App {
     }
 }
 
+/// Converts a remote `Thread` snapshot into a flat sequence of core events.
+///
+/// Each turn becomes `TurnStarted` → item events → `TurnComplete` (or
+/// `TurnAborted`). Non-command items emit `ItemCompleted`; command-execution
+/// items emit `ExecCommandBegin` + `ExecCommandEnd` so the chat widget
+/// renders them with shell output styling. In-progress commands emit only
+/// `ExecCommandBegin` (no end event).
 pub(super) fn thread_snapshot_events(thread: &Thread) -> Vec<Event> {
     let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
         tracing::warn!(
@@ -285,6 +316,13 @@ pub(super) fn thread_snapshot_events(thread: &Thread) -> Vec<Event> {
         .collect()
 }
 
+/// Translates a remote `ServerRequest` into a `(ThreadId, Event)` pair.
+///
+/// This handles the interactive approval requests that the remote app-server
+/// sends when the agent needs user confirmation: command execution (both V2
+/// and legacy V1), permission escalation, user input, and MCP elicitation.
+/// Returns `Err` with a human-readable message for request types that the TUI
+/// cannot handle yet (file-change approvals, dynamic tool calls, etc.).
 fn server_request_thread_event(request: &ServerRequest) -> Result<(ThreadId, Event), String> {
     match request {
         ServerRequest::CommandExecutionRequestApproval { params, .. } => Ok((
@@ -447,6 +485,10 @@ fn thread_id_from_remote_request(context: &str, thread_id: &str) -> Result<Threa
         .map_err(|err| format!("failed to parse remote {context} thread id `{thread_id}`: {err}"))
 }
 
+/// Tokenizes a remote command string into `Vec<String>` for the TUI's
+/// approval dialog, which expects pre-split arguments. Falls back to
+/// wrapping the entire string as a single element if `shlex` cannot parse it
+/// (e.g. unbalanced quotes).
 fn split_remote_command_for_approval(command: &str) -> Vec<String> {
     shlex::split(command).unwrap_or_else(|| vec![command.to_string()])
 }
