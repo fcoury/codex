@@ -296,9 +296,9 @@ impl App {
 ///
 /// Each turn becomes `TurnStarted` → item events → `TurnComplete` (or
 /// `TurnAborted`). Non-command items emit `ItemCompleted`; command-execution
-/// items emit `ExecCommandBegin` + `ExecCommandEnd` so the chat widget
-/// renders them with shell output styling. In-progress commands emit only
-/// `ExecCommandBegin` (no end event).
+/// items are translated by `command_execution_snapshot_events` so the chat
+/// widget renders them with shell output styling. In-progress commands emit
+/// `ExecCommandBegin`; terminal commands emit `ExecCommandEnd`.
 pub(super) fn thread_snapshot_events(thread: &Thread) -> Vec<Event> {
     let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
         tracing::warn!(
@@ -889,11 +889,11 @@ fn thread_item_completed_events(
     }])
 }
 
-/// Produces `ExecCommandBegin` + `ExecCommandEnd` for a historical command.
+/// Produces command execution events for a historical command.
 ///
 /// In-progress commands emit only `Begin` (no `End`), so the chat widget
-/// shows them as still running. Completed/failed/declined commands emit both.
-/// Returns `None` for non-`CommandExecution` items.
+/// shows them as still running. Completed/failed/declined commands emit only
+/// `End`. Returns `None` for non-`CommandExecution` items.
 fn command_execution_snapshot_events(turn_id: &str, item: &ThreadItem) -> Option<Vec<Event>> {
     let begin = command_execution_begin_event(turn_id, item);
     let end = command_execution_end_event(turn_id, item);

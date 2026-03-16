@@ -174,14 +174,14 @@ impl PendingAppServerRequests {
                             .to_string(),
                 })
             }
-            ServerRequest::ExecCommandApproval { request_id, .. } => {
+            ServerRequest::ExecCommandApproval { request_id, params } => {
                 if !allow_legacy_exec_approvals {
                     Some(UnsupportedAppServerRequest {
                         request_id: request_id.clone(),
                         message: "Legacy command approval requests are not available in app-server TUI yet."
                             .to_string(),
                     })
-                } else if let ServerRequest::ExecCommandApproval { params, .. } = request {
+                } else {
                     let approval_id = params
                         .approval_id
                         .clone()
@@ -194,8 +194,6 @@ impl PendingAppServerRequests {
                             thread_id: params.conversation_id.to_string(),
                         },
                     );
-                    None
-                } else {
                     None
                 }
             }

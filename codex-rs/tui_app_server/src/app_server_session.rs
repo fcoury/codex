@@ -125,10 +125,10 @@ impl ThreadParamsMode {
 
 /// The result of starting, resuming, or forking a thread on the app-server.
 ///
-/// Carries both the full `Thread` snapshot (including historical turns) and the
-/// `SessionConfigured` event derived from the server's response. The `thread`
-/// field is used during `restore_started_app_server_thread` to replay prior
-/// conversation history into the TUI's event store.
+/// Carries the `SessionConfigured` event derived from the server's response.
+/// Historical messages, when available on resume or fork, are converted into
+/// `initial_messages` on that event before the TUI replays them into the chat
+/// widget.
 pub(crate) struct AppServerStartedThread {
     pub(crate) session_configured: SessionConfiguredEvent,
 }
