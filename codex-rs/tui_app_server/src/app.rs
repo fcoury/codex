@@ -2244,7 +2244,10 @@ impl App {
         let thread_id = started.session_configured.session_id;
         self.primary_thread_id = Some(thread_id);
         self.primary_session_configured = Some(started.session_configured);
-        self.upsert_agent_picker_thread(thread_id, None, None, false);
+        self.upsert_agent_picker_thread(
+            thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
+            /*is_closed*/ false,
+        );
         self.ensure_thread_channel(thread_id);
         self.activate_thread_channel(thread_id).await;
         if let Some(channel) = self.thread_event_channels.get(&thread_id) {
