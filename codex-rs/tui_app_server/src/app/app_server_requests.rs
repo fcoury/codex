@@ -43,14 +43,28 @@ pub(super) struct UnsupportedAppServerRequest {
     pub(super) message: String,
 }
 
-/// Returned by `resolve_notification` when the server resolves an exec
-/// approval externally (e.g. the agent cancelled or another client approved).
-/// The caller uses the `thread_id` + `approval_id` to clear the corresponding
-/// pending approval prompt from the thread's interactive replay state.
+/// Returned by `resolve_notification` when the server resolves a request
+/// externally. The caller uses the included identifiers to clear the
+/// corresponding pending prompt from the thread's interactive replay state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ResolvedExecApproval {
-    pub(super) thread_id: String,
-    pub(super) approval_id: String,
+pub(super) enum ResolvedAppServerRequest {
+    ExecApproval {
+        thread_id: String,
+        approval_id: String,
+    },
+    PermissionsRequest {
+        thread_id: String,
+        call_id: String,
+    },
+    UserInput {
+        thread_id: String,
+        call_id: String,
+    },
+    Elicitation {
+        thread_id: String,
+        server_name: String,
+        request_id: McpRequestId,
+    },
 }
 
 /// Distinguishes which response format to use when resolving an exec approval.
@@ -77,15 +91,35 @@ struct PendingExecApproval {
     thread_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingThreadRequest {
+    request_id: AppServerRequestId,
+    thread_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingUserInputRequest {
+    request_id: AppServerRequestId,
+    thread_id: String,
+    call_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingMcpRequest {
+    thread_id: String,
+    server_name: String,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PendingAppServerRequests {
     exec_approvals: HashMap<String, PendingExecApproval>,
     file_change_approvals: HashMap<String, AppServerRequestId>,
-    permissions_approvals: HashMap<String, AppServerRequestId>,
-    user_inputs: HashMap<String, AppServerRequestId>,
+    permissions_approvals: HashMap<String, PendingThreadRequest>,
+    user_inputs: HashMap<String, PendingUserInputRequest>,
     mcp_pending_by_matcher: HashMap<McpServerMatcher, AppServerRequestId>,
     mcp_legacy_by_matcher: HashMap<McpServerMatcher, McpLegacyRequestKey>,
     mcp_legacy_requests: HashMap<McpLegacyRequestKey, AppServerRequestId>,
+    mcp_requests: HashMap<AppServerRequestId, PendingMcpRequest>,
     mcp_rollback_matchers: HashSet<McpServerMatcher>,
 }
 
@@ -98,6 +132,7 @@ impl PendingAppServerRequests {
         self.mcp_pending_by_matcher.clear();
         self.mcp_legacy_by_matcher.clear();
         self.mcp_legacy_requests.clear();
+        self.mcp_requests.clear();
         self.mcp_rollback_matchers.clear();
     }
 
@@ -145,18 +180,36 @@ impl PendingAppServerRequests {
                 None
             }
             ServerRequest::PermissionsRequestApproval { request_id, params } => {
-                self.permissions_approvals
-                    .insert(params.item_id.clone(), request_id.clone());
+                self.permissions_approvals.insert(
+                    params.item_id.clone(),
+                    PendingThreadRequest {
+                        request_id: request_id.clone(),
+                        thread_id: params.thread_id.clone(),
+                    },
+                );
                 None
             }
             ServerRequest::ToolRequestUserInput { request_id, params } => {
-                self.user_inputs
-                    .insert(params.turn_id.clone(), request_id.clone());
+                self.user_inputs.insert(
+                    params.turn_id.clone(),
+                    PendingUserInputRequest {
+                        request_id: request_id.clone(),
+                        thread_id: params.thread_id.clone(),
+                        call_id: params.item_id.clone(),
+                    },
+                );
                 None
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
                 let matcher = McpServerMatcher::from_v2(params);
                 self.mcp_rollback_matchers.remove(&matcher);
+                self.mcp_requests.insert(
+                    request_id.clone(),
+                    PendingMcpRequest {
+                        thread_id: params.thread_id.clone(),
+                        server_name: params.server_name.clone(),
+                    },
+                );
                 if let Some(legacy_key) = self.mcp_legacy_by_matcher.remove(&matcher) {
                     self.mcp_legacy_requests
                         .insert(legacy_key, request_id.clone());
@@ -299,9 +352,9 @@ impl PendingAppServerRequests {
             AppCommandView::RequestPermissionsResponse { id, response } => self
                 .permissions_approvals
                 .remove(id)
-                .map(|request_id| {
+                .map(|pending| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
-                        request_id,
+                        request_id: pending.request_id,
                         result: serde_json::to_value(PermissionsRequestApprovalResponse {
                             permissions: serde_json::from_value::<GrantedPermissionProfile>(
                                 serde_json::to_value(&response.permissions).map_err(|err| {
@@ -322,9 +375,9 @@ impl PendingAppServerRequests {
             AppCommandView::UserInputAnswer { id, response } => self
                 .user_inputs
                 .remove(id)
-                .map(|request_id| {
+                .map(|pending| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
-                        request_id,
+                        request_id: pending.request_id,
                         result: serde_json::to_value(
                             serde_json::from_value::<ToolRequestUserInputResponse>(
                                 serde_json::to_value(response).map_err(|err| {
@@ -356,6 +409,7 @@ impl PendingAppServerRequests {
                     request_id: request_id.clone(),
                 })
                 .map(|request_id| {
+                    self.mcp_requests.remove(&request_id);
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
                         request_id,
                         result: serde_json::to_value(McpServerElicitationRequestResponse {
@@ -385,25 +439,25 @@ impl PendingAppServerRequests {
     }
 
     /// Removes all pending requests matching `request_id` (the server resolved
-    /// them externally). Returns the exec approvals that were cleared so the
-    /// caller can update the interactive-replay state and refresh the UI.
+    /// them externally). Returns the prompt identifiers that were cleared so
+    /// the caller can update the interactive-replay state and refresh the UI.
     pub(super) fn resolve_notification(
         &mut self,
         request_id: &AppServerRequestId,
-    ) -> Vec<ResolvedExecApproval> {
-        let resolved_exec_approvals = self.remove_exec_approvals(request_id);
-        self.remove_non_exec_requests(request_id);
-        resolved_exec_approvals
+    ) -> Vec<ResolvedAppServerRequest> {
+        let mut resolved_requests = self.remove_exec_approvals(request_id);
+        resolved_requests.extend(self.remove_non_exec_requests(request_id));
+        resolved_requests
     }
 
     fn remove_exec_approvals(
         &mut self,
         request_id: &AppServerRequestId,
-    ) -> Vec<ResolvedExecApproval> {
+    ) -> Vec<ResolvedAppServerRequest> {
         let mut resolved_exec_approvals = Vec::new();
         self.exec_approvals.retain(|approval_id, value| {
             if &value.request_id == request_id {
-                resolved_exec_approvals.push(ResolvedExecApproval {
+                resolved_exec_approvals.push(ResolvedAppServerRequest::ExecApproval {
                     thread_id: value.thread_id.clone(),
                     approval_id: approval_id.clone(),
                 });
@@ -415,7 +469,11 @@ impl PendingAppServerRequests {
         resolved_exec_approvals
     }
 
-    fn remove_non_exec_requests(&mut self, request_id: &AppServerRequestId) {
+    fn remove_non_exec_requests(
+        &mut self,
+        request_id: &AppServerRequestId,
+    ) -> Vec<ResolvedAppServerRequest> {
+        let mut resolved_requests = Vec::new();
         let rollback_matchers: Vec<McpServerMatcher> = self
             .mcp_pending_by_matcher
             .iter()
@@ -423,17 +481,44 @@ impl PendingAppServerRequests {
             .collect();
         self.file_change_approvals
             .retain(|_, value| value != request_id);
-        self.permissions_approvals
-            .retain(|_, value| value != request_id);
-        self.user_inputs.retain(|_, value| value != request_id);
+        self.permissions_approvals.retain(|call_id, value| {
+            if &value.request_id == request_id {
+                resolved_requests.push(ResolvedAppServerRequest::PermissionsRequest {
+                    thread_id: value.thread_id.clone(),
+                    call_id: call_id.clone(),
+                });
+                false
+            } else {
+                true
+            }
+        });
+        self.user_inputs.retain(|_, value| {
+            if &value.request_id == request_id {
+                resolved_requests.push(ResolvedAppServerRequest::UserInput {
+                    thread_id: value.thread_id.clone(),
+                    call_id: value.call_id.clone(),
+                });
+                false
+            } else {
+                true
+            }
+        });
         self.mcp_pending_by_matcher
             .retain(|_, value| value != request_id);
+        if let Some(value) = self.mcp_requests.remove(request_id) {
+            resolved_requests.push(ResolvedAppServerRequest::Elicitation {
+                thread_id: value.thread_id,
+                server_name: value.server_name,
+                request_id: app_server_request_id_to_mcp_request_id(request_id),
+            });
+        }
         self.mcp_legacy_requests
             .retain(|_, value| value != request_id);
         for matcher in rollback_matchers {
             self.mcp_legacy_by_matcher.remove(&matcher);
             self.mcp_rollback_matchers.insert(matcher);
         }
+        resolved_requests
     }
 }
 
@@ -491,6 +576,13 @@ impl McpServerMatcher {
     }
 }
 
+fn app_server_request_id_to_mcp_request_id(request_id: &AppServerRequestId) -> McpRequestId {
+    match request_id {
+        AppServerRequestId::String(value) => McpRequestId::String(value.clone()),
+        AppServerRequestId::Integer(value) => McpRequestId::Integer(*value),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct McpLegacyRequestKey {
     server_name: String,
@@ -515,6 +607,7 @@ fn file_change_decision(decision: &ReviewDecision) -> Result<FileChangeApprovalD
 #[cfg(test)]
 mod tests {
     use super::PendingAppServerRequests;
+    use super::ResolvedAppServerRequest;
     use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
     use codex_app_server_protocol::ExecCommandApprovalParams;
     use codex_app_server_protocol::ExecCommandApprovalResponse;
@@ -926,8 +1019,99 @@ mod tests {
 
         let resolved = pending.resolve_notification(&AppServerRequestId::Integer(101));
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].thread_id, thread_id.to_string());
-        assert_eq!(resolved[0].approval_id, "approval-1");
+        assert_eq!(
+            resolved[0],
+            ResolvedAppServerRequest::ExecApproval {
+                thread_id: thread_id.to_string(),
+                approval_id: "approval-1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_notification_returns_non_exec_prompt_cleanup_keys() {
+        let mut pending = PendingAppServerRequests::default();
+        assert_eq!(
+            pending.note_server_request(
+                &ServerRequest::PermissionsRequestApproval {
+                    request_id: AppServerRequestId::Integer(201),
+                    params: PermissionsRequestApprovalParams {
+                        thread_id: "thread-perm".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        item_id: "perm-1".to_string(),
+                        reason: None,
+                        permissions: codex_app_server_protocol::RequestPermissionProfile {
+                            network: None,
+                            file_system: None,
+                        },
+                    },
+                },
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            pending.note_server_request(
+                &ServerRequest::ToolRequestUserInput {
+                    request_id: AppServerRequestId::Integer(202),
+                    params: codex_app_server_protocol::ToolRequestUserInputParams {
+                        thread_id: "thread-input".to_string(),
+                        turn_id: "turn-2".to_string(),
+                        item_id: "input-1".to_string(),
+                        questions: Vec::new(),
+                    },
+                },
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            pending.note_server_request(
+                &ServerRequest::McpServerElicitationRequest {
+                    request_id: AppServerRequestId::Integer(203),
+                    params: McpServerElicitationRequestParams {
+                        thread_id: "thread-mcp".to_string(),
+                        turn_id: Some("turn-3".to_string()),
+                        server_name: "server-1".to_string(),
+                        request: codex_app_server_protocol::McpServerElicitationRequest::Form {
+                            meta: None,
+                            message: "Confirm".to_string(),
+                            requested_schema: codex_app_server_protocol::McpElicitationSchema {
+                                schema_uri: None,
+                                type_: codex_app_server_protocol::McpElicitationObjectType::Object,
+                                properties: Default::default(),
+                                required: None,
+                            },
+                        },
+                    },
+                },
+                false,
+            ),
+            None
+        );
+
+        assert_eq!(
+            pending.resolve_notification(&AppServerRequestId::Integer(201)),
+            vec![ResolvedAppServerRequest::PermissionsRequest {
+                thread_id: "thread-perm".to_string(),
+                call_id: "perm-1".to_string(),
+            }]
+        );
+        assert_eq!(
+            pending.resolve_notification(&AppServerRequestId::Integer(202)),
+            vec![ResolvedAppServerRequest::UserInput {
+                thread_id: "thread-input".to_string(),
+                call_id: "input-1".to_string(),
+            }]
+        );
+        assert_eq!(
+            pending.resolve_notification(&AppServerRequestId::Integer(203)),
+            vec![ResolvedAppServerRequest::Elicitation {
+                thread_id: "thread-mcp".to_string(),
+                server_name: "server-1".to_string(),
+                request_id: McpRequestId::Integer(203),
+            }]
+        );
     }
 
     #[test]

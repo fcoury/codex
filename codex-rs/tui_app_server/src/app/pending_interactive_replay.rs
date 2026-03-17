@@ -324,6 +324,34 @@ impl PendingInteractiveReplayState {
         );
     }
 
+    pub(super) fn clear_request_permissions(&mut self, call_id: &str) {
+        self.request_permissions_call_ids.remove(call_id);
+        Self::remove_call_id_from_turn_map(
+            &mut self.request_permissions_call_ids_by_turn_id,
+            call_id,
+        );
+    }
+
+    pub(super) fn clear_request_user_input(&mut self, call_id: &str) {
+        self.request_user_input_call_ids.remove(call_id);
+        Self::remove_call_id_from_turn_map(
+            &mut self.request_user_input_call_ids_by_turn_id,
+            call_id,
+        );
+    }
+
+    pub(super) fn clear_elicitation_request(
+        &mut self,
+        server_name: &str,
+        request_id: &codex_protocol::mcp::RequestId,
+    ) {
+        self.elicitation_requests
+            .remove(&ElicitationRequestKey::new(
+                server_name.to_string(),
+                request_id.clone(),
+            ));
+    }
+
     fn clear_request_user_input_turn(&mut self, turn_id: &str) {
         if let Some(call_ids) = self.request_user_input_call_ids_by_turn_id.remove(turn_id) {
             for call_id in call_ids {
@@ -770,6 +798,82 @@ mod tests {
         });
 
         store.clear_exec_approval_by_id("approval-1");
+
+        assert!(store.snapshot().events.is_empty());
+        assert!(!store.has_pending_thread_approvals());
+    }
+
+    #[test]
+    fn resolved_permissions_request_can_be_cleared_by_call_id() {
+        let mut store = ThreadEventStore::new(8);
+        store.push_event(Event {
+            id: "ev-1".to_string(),
+            msg: EventMsg::RequestPermissions(
+                codex_protocol::request_permissions::RequestPermissionsEvent {
+                    call_id: "perm-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    reason: None,
+                    permissions: codex_protocol::request_permissions::RequestPermissionProfile {
+                        network: None,
+                        file_system: None,
+                    },
+                },
+            ),
+        });
+
+        store
+            .pending_interactive_replay
+            .clear_request_permissions("perm-1");
+
+        assert!(store.snapshot().events.is_empty());
+        assert!(!store.has_pending_thread_approvals());
+    }
+
+    #[test]
+    fn resolved_request_user_input_can_be_cleared_by_call_id() {
+        let mut store = ThreadEventStore::new(8);
+        store.push_event(Event {
+            id: "ev-1".to_string(),
+            msg: EventMsg::RequestUserInput(
+                codex_protocol::request_user_input::RequestUserInputEvent {
+                    call_id: "input-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    questions: Vec::new(),
+                },
+            ),
+        });
+
+        store
+            .pending_interactive_replay
+            .clear_request_user_input("input-1");
+
+        assert!(store.snapshot().events.is_empty());
+    }
+
+    #[test]
+    fn resolved_elicitation_can_be_cleared_by_request_key() {
+        let mut store = ThreadEventStore::new(8);
+        let request_id = codex_protocol::mcp::RequestId::String("request-1".to_string());
+        store.push_event(Event {
+            id: "ev-1".to_string(),
+            msg: EventMsg::ElicitationRequest(codex_protocol::approvals::ElicitationRequestEvent {
+                turn_id: Some("turn-1".to_string()),
+                server_name: "server-1".to_string(),
+                id: request_id.clone(),
+                request: codex_protocol::approvals::ElicitationRequest::Form {
+                    meta: None,
+                    message: "Please confirm".to_string(),
+                    requested_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                },
+            }),
+        });
+
+        store
+            .pending_interactive_replay
+            .clear_elicitation_request("server-1", &request_id);
 
         assert!(store.snapshot().events.is_empty());
         assert!(!store.has_pending_thread_approvals());

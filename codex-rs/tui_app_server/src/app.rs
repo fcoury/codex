@@ -434,6 +434,25 @@ impl ThreadEventStore {
             .clear_exec_approval(approval_id);
     }
 
+    fn clear_request_permissions_by_id(&mut self, call_id: &str) {
+        self.pending_interactive_replay
+            .clear_request_permissions(call_id);
+    }
+
+    fn clear_request_user_input_by_id(&mut self, call_id: &str) {
+        self.pending_interactive_replay
+            .clear_request_user_input(call_id);
+    }
+
+    fn clear_elicitation_request(
+        &mut self,
+        server_name: &str,
+        request_id: &codex_protocol::mcp::RequestId,
+    ) {
+        self.pending_interactive_replay
+            .clear_elicitation_request(server_name, request_id);
+    }
+
     fn active_turn_id(&self) -> Option<&str> {
         self.active_turn_id.as_deref()
     }
