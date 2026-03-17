@@ -27,6 +27,7 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::ThreadId;
+use codex_protocol::approvals::ExecApprovalRequestEvent;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -163,6 +164,71 @@ impl App {
                     .await;
                     return;
                 }
+                if app_server_client.is_remote()
+                    && let ServerRequest::ExecCommandApproval { .. } = request {
+                        match legacy_exec_approval_thread_event(&request) {
+                            Ok((thread_id, event)) => {
+                                if let Some(unsupported) = self
+                                    .pending_app_server_requests
+                                    .note_server_request(&request)
+                                {
+                                    tracing::warn!(
+                                        request_id = ?unsupported.request_id,
+                                        message = unsupported.message,
+                                        "rejecting unsupported app-server request"
+                                    );
+                                    self.chat_widget
+                                        .add_error_message(unsupported.message.clone());
+                                    if let Err(err) = self
+                                        .reject_app_server_request(
+                                            app_server_client,
+                                            unsupported.request_id,
+                                            unsupported.message,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!("{err}");
+                                    }
+                                    return;
+                                }
+
+                                if self.primary_thread_id.is_none()
+                                    || matches!(event.msg, EventMsg::SessionConfigured(_))
+                                        && self.primary_thread_id == Some(thread_id)
+                                {
+                                    if let Err(err) = self.enqueue_primary_event(event).await {
+                                        tracing::warn!(
+                                            "failed to enqueue primary app-server server request: {err}"
+                                        );
+                                    }
+                                } else if let Err(err) =
+                                    self.enqueue_thread_event(thread_id, event).await
+                                {
+                                    tracing::warn!(
+                                        "failed to enqueue app-server server request for {thread_id}: {err}"
+                                    );
+                                }
+                            }
+                            Err(message) => {
+                                tracing::warn!(
+                                    request_id = ?request.id(),
+                                    "{message}"
+                                );
+                                self.chat_widget.add_error_message(message.clone());
+                                if let Err(err) = self
+                                    .reject_app_server_request(
+                                        app_server_client,
+                                        request.id().clone(),
+                                        message,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!("{err}");
+                                }
+                            }
+                        }
+                        return;
+                    }
                 if let Some(unsupported) = self
                     .pending_app_server_requests
                     .note_server_request(&request)
@@ -276,6 +342,34 @@ impl App {
             .await
             .map_err(|err| format!("failed to reject app-server request: {err}"))
     }
+}
+
+fn legacy_exec_approval_thread_event(request: &ServerRequest) -> Result<(ThreadId, Event), String> {
+    let ServerRequest::ExecCommandApproval { params, .. } = request else {
+        return Err("expected legacy exec command approval".to_string());
+    };
+
+    Ok((
+        params.conversation_id,
+        Event {
+            id: String::new(),
+            msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+                call_id: params.call_id.clone(),
+                approval_id: params.approval_id.clone(),
+                turn_id: String::new(),
+                command: params.command.clone(),
+                cwd: params.cwd.clone(),
+                reason: params.reason.clone(),
+                network_approval_context: None,
+                proposed_execpolicy_amendment: None,
+                proposed_network_policy_amendments: None,
+                additional_permissions: None,
+                skill_metadata: None,
+                available_decisions: None,
+                parsed_cmd: params.parsed_cmd.clone(),
+            }),
+        },
+    ))
 }
 
 fn resolve_chatgpt_auth_tokens_refresh_response(
@@ -857,14 +951,18 @@ fn app_server_codex_error_info_to_core(
 
 #[cfg(test)]
 mod tests {
+    use super::legacy_exec_approval_thread_event;
     use super::server_notification_thread_events;
     use super::thread_snapshot_events;
     use super::turn_snapshot_events;
     use codex_app_server_protocol::AgentMessageDeltaNotification;
     use codex_app_server_protocol::CodexErrorInfo;
+    use codex_app_server_protocol::ExecCommandApprovalParams;
     use codex_app_server_protocol::ItemCompletedNotification;
     use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
+    use codex_app_server_protocol::RequestId as AppServerRequestId;
     use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ServerRequest;
     use codex_app_server_protocol::Thread;
     use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::ThreadStatus;
@@ -1246,5 +1344,25 @@ mod tests {
         };
         assert_eq!(raw_reasoning.text, "hidden chain");
         assert!(matches!(events[3].msg, EventMsg::TurnComplete(_)));
+    }
+
+    #[test]
+    fn bridges_legacy_remote_exec_approval_requests() {
+        let request = ServerRequest::ExecCommandApproval {
+            request_id: AppServerRequestId::Integer(8),
+            params: ExecCommandApprovalParams {
+                conversation_id: ThreadId::new(),
+                call_id: "call-2".to_string(),
+                approval_id: Some("approval-2".to_string()),
+                command: vec!["pwd".to_string()],
+                cwd: "/tmp/project".into(),
+                reason: Some("Need shell".to_string()),
+                parsed_cmd: Vec::new(),
+            },
+        };
+
+        let (_, event) =
+            legacy_exec_approval_thread_event(&request).expect("request should bridge");
+        assert!(matches!(event.msg, EventMsg::ExecApprovalRequest(_)));
     }
 }
