@@ -165,70 +165,71 @@ impl App {
                     return;
                 }
                 if app_server_client.is_remote()
-                    && let ServerRequest::ExecCommandApproval { .. } = request {
-                        match legacy_exec_approval_thread_event(&request) {
-                            Ok((thread_id, event)) => {
-                                if let Some(unsupported) = self
-                                    .pending_app_server_requests
-                                    .note_server_request(&request)
-                                {
-                                    tracing::warn!(
-                                        request_id = ?unsupported.request_id,
-                                        message = unsupported.message,
-                                        "rejecting unsupported app-server request"
-                                    );
-                                    self.chat_widget
-                                        .add_error_message(unsupported.message.clone());
-                                    if let Err(err) = self
-                                        .reject_app_server_request(
-                                            app_server_client,
-                                            unsupported.request_id,
-                                            unsupported.message,
-                                        )
-                                        .await
-                                    {
-                                        tracing::warn!("{err}");
-                                    }
-                                    return;
-                                }
-
-                                if self.primary_thread_id.is_none()
-                                    || matches!(event.msg, EventMsg::SessionConfigured(_))
-                                        && self.primary_thread_id == Some(thread_id)
-                                {
-                                    if let Err(err) = self.enqueue_primary_event(event).await {
-                                        tracing::warn!(
-                                            "failed to enqueue primary app-server server request: {err}"
-                                        );
-                                    }
-                                } else if let Err(err) =
-                                    self.enqueue_thread_event(thread_id, event).await
-                                {
-                                    tracing::warn!(
-                                        "failed to enqueue app-server server request for {thread_id}: {err}"
-                                    );
-                                }
-                            }
-                            Err(message) => {
+                    && let ServerRequest::ExecCommandApproval { .. } = request
+                {
+                    match legacy_exec_approval_thread_event(&request) {
+                        Ok((thread_id, event)) => {
+                            if let Some(unsupported) = self
+                                .pending_app_server_requests
+                                .note_server_request(&request)
+                            {
                                 tracing::warn!(
-                                    request_id = ?request.id(),
-                                    "{message}"
+                                    request_id = ?unsupported.request_id,
+                                    message = unsupported.message,
+                                    "rejecting unsupported app-server request"
                                 );
-                                self.chat_widget.add_error_message(message.clone());
+                                self.chat_widget
+                                    .add_error_message(unsupported.message.clone());
                                 if let Err(err) = self
                                     .reject_app_server_request(
                                         app_server_client,
-                                        request.id().clone(),
-                                        message,
+                                        unsupported.request_id,
+                                        unsupported.message,
                                     )
                                     .await
                                 {
                                     tracing::warn!("{err}");
                                 }
+                                return;
+                            }
+
+                            if self.primary_thread_id.is_none()
+                                || matches!(event.msg, EventMsg::SessionConfigured(_))
+                                    && self.primary_thread_id == Some(thread_id)
+                            {
+                                if let Err(err) = self.enqueue_primary_event(event).await {
+                                    tracing::warn!(
+                                        "failed to enqueue primary app-server server request: {err}"
+                                    );
+                                }
+                            } else if let Err(err) =
+                                self.enqueue_thread_event(thread_id, event).await
+                            {
+                                tracing::warn!(
+                                    "failed to enqueue app-server server request for {thread_id}: {err}"
+                                );
                             }
                         }
-                        return;
+                        Err(message) => {
+                            tracing::warn!(
+                                request_id = ?request.id(),
+                                "{message}"
+                            );
+                            self.chat_widget.add_error_message(message.clone());
+                            if let Err(err) = self
+                                .reject_app_server_request(
+                                    app_server_client,
+                                    request.id().clone(),
+                                    message,
+                                )
+                                .await
+                            {
+                                tracing::warn!("{err}");
+                            }
+                        }
                     }
+                    return;
+                }
                 if let Some(unsupported) = self
                     .pending_app_server_requests
                     .note_server_request(&request)
