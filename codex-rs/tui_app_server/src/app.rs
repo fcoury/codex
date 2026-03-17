@@ -2135,7 +2135,12 @@ impl App {
         let snapshot_events = started
             .thread_snapshot
             .as_ref()
-            .map(app_server_adapter::thread_snapshot_events)
+            .map(|thread| {
+                app_server_adapter::thread_snapshot_events(
+                    thread,
+                    self.config.show_raw_agent_reasoning,
+                )
+            })
             .unwrap_or_default();
         self.enqueue_primary_event(Event {
             id: String::new(),
@@ -7625,7 +7630,9 @@ guardian_approval = true
         .await
         .expect("session configured should enqueue");
 
-        for event in app_server_adapter::thread_snapshot_events(&thread) {
+        for event in
+            app_server_adapter::thread_snapshot_events(&thread, app.config.show_raw_agent_reasoning)
+        {
             app.enqueue_primary_event(event)
                 .await
                 .expect("snapshot event should enqueue");

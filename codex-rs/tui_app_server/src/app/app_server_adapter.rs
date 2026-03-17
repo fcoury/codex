@@ -349,7 +349,10 @@ impl App {
 /// renders today: command execution items emit exec events, legacy-rendered
 /// items emit their legacy events, and item-driven transcript entries emit
 /// `ItemCompleted`.
-pub(super) fn thread_snapshot_events(thread: &Thread) -> Vec<Event> {
+pub(super) fn thread_snapshot_events(
+    thread: &Thread,
+    show_raw_agent_reasoning: bool,
+) -> Vec<Event> {
     let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
         tracing::warn!(
             thread_id = %thread.id,
@@ -361,7 +364,7 @@ pub(super) fn thread_snapshot_events(thread: &Thread) -> Vec<Event> {
     thread
         .turns
         .iter()
-        .flat_map(|turn| turn_snapshot_events(thread_id, turn))
+        .flat_map(|turn| turn_snapshot_events(thread_id, turn, show_raw_agent_reasoning))
         .collect()
 }
 
@@ -808,7 +811,11 @@ fn token_usage_from_app_server(
 /// (`TurnComplete` or `TurnAborted`) matching the turn's persisted status.
 /// In-progress turns emit no terminal event, so a subsequent live
 /// `TurnComplete` notification can close them naturally.
-fn turn_snapshot_events(thread_id: ThreadId, turn: &Turn) -> Vec<Event> {
+fn turn_snapshot_events(
+    thread_id: ThreadId,
+    turn: &Turn,
+    show_raw_agent_reasoning: bool,
+) -> Vec<Event> {
     let mut events = vec![Event {
         id: String::new(),
         msg: EventMsg::TurnStarted(TurnStartedEvent {
@@ -819,7 +826,13 @@ fn turn_snapshot_events(thread_id: ThreadId, turn: &Turn) -> Vec<Event> {
     }];
 
     events.extend(turn.items.iter().flat_map(|item| {
-        thread_item_snapshot_events(thread_id, turn.id.clone(), item.clone()).unwrap_or_default()
+        thread_item_snapshot_events(
+            thread_id,
+            turn.id.clone(),
+            item.clone(),
+            show_raw_agent_reasoning,
+        )
+        .unwrap_or_default()
     }));
 
     match turn.status {
@@ -869,12 +882,13 @@ fn turn_snapshot_events(thread_id: ThreadId, turn: &Turn) -> Vec<Event> {
 /// `CommandExecution` items get special treatment via
 /// `command_execution_snapshot_events` so the chat widget renders shell
 /// output correctly. Snapshot items that the chat widget still renders via
-/// legacy events reuse `TurnItem::as_legacy_events(false)`. Remaining
-/// item-driven transcript entries emit a single `ItemCompleted`.
+/// legacy events reuse `TurnItem::as_legacy_events(show_raw_agent_reasoning)`.
+/// Remaining item-driven transcript entries emit a single `ItemCompleted`.
 fn thread_item_snapshot_events(
     thread_id: ThreadId,
     turn_id: String,
     item: ThreadItem,
+    show_raw_agent_reasoning: bool,
 ) -> Option<Vec<Event>> {
     if let Some(events) = command_execution_snapshot_events(&turn_id, &item) {
         return Some(events);
@@ -882,18 +896,19 @@ fn thread_item_snapshot_events(
 
     let item = thread_item_to_core(item)?;
     let events = match &item {
-        TurnItem::Reasoning(_)
+        TurnItem::UserMessage(_)
+        | TurnItem::Reasoning(_)
         | TurnItem::WebSearch(_)
         | TurnItem::ImageGeneration(_)
         | TurnItem::ContextCompaction(_) => item
-            .as_legacy_events(/*show_raw_agent_reasoning*/ false)
+            .as_legacy_events(show_raw_agent_reasoning)
             .into_iter()
             .map(|msg| Event {
                 id: String::new(),
                 msg,
             })
             .collect(),
-        TurnItem::UserMessage(_) | TurnItem::AgentMessage(_) | TurnItem::Plan(_) => {
+        TurnItem::AgentMessage(_) | TurnItem::Plan(_) => {
             vec![Event {
                 id: String::new(),
                 msg: EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -1342,82 +1357,92 @@ mod tests {
     #[test]
     fn bridges_thread_snapshot_turns_for_resume_restore() {
         let thread_id = ThreadId::new();
-        let events = thread_snapshot_events(&Thread {
-            id: thread_id.to_string(),
-            preview: "hello".to_string(),
-            ephemeral: false,
-            model_provider: "openai".to_string(),
-            created_at: 0,
-            updated_at: 0,
-            status: ThreadStatus::Idle,
-            path: None,
-            cwd: PathBuf::from("/tmp/project"),
-            cli_version: "test".to_string(),
-            source: SessionSource::Cli.into(),
-            agent_nickname: None,
-            agent_role: None,
-            git_info: None,
-            name: Some("restore".to_string()),
-            turns: vec![
-                Turn {
-                    id: "turn-complete".to_string(),
-                    items: vec![
-                        ThreadItem::UserMessage {
-                            id: "user-1".to_string(),
-                            content: vec![codex_app_server_protocol::UserInput::Text {
-                                text: "hello".to_string(),
-                                text_elements: Vec::new(),
-                            }],
-                        },
-                        ThreadItem::Reasoning {
-                            id: "reasoning-1".to_string(),
-                            summary: vec!["thinking".to_string()],
-                            content: vec!["hidden".to_string()],
-                        },
-                        ThreadItem::WebSearch {
-                            id: "search-1".to_string(),
-                            query: "codex".to_string(),
-                            action: Some(codex_app_server_protocol::WebSearchAction::Search {
-                                query: Some("codex".to_string()),
-                                queries: Some(vec!["codex".to_string()]),
-                            }),
-                        },
-                        ThreadItem::ImageGeneration {
-                            id: "image-1".to_string(),
-                            status: "completed".to_string(),
-                            revised_prompt: Some("diagram".to_string()),
-                            result: "file://image.png".to_string(),
-                        },
-                        ThreadItem::ContextCompaction {
-                            id: "compact-1".to_string(),
-                        },
-                        ThreadItem::AgentMessage {
-                            id: "assistant-1".to_string(),
-                            text: "hi".to_string(),
-                            phase: Some(MessagePhase::FinalAnswer),
-                        },
-                    ],
-                    status: TurnStatus::Completed,
-                    error: None,
-                },
-                Turn {
-                    id: "turn-interrupted".to_string(),
-                    items: Vec::new(),
-                    status: TurnStatus::Interrupted,
-                    error: None,
-                },
-            ],
-        });
+        let events = thread_snapshot_events(
+            &Thread {
+                id: thread_id.to_string(),
+                preview: "hello".to_string(),
+                ephemeral: false,
+                model_provider: "openai".to_string(),
+                created_at: 0,
+                updated_at: 0,
+                status: ThreadStatus::Idle,
+                path: None,
+                cwd: PathBuf::from("/tmp/project"),
+                cli_version: "test".to_string(),
+                source: SessionSource::Cli.into(),
+                agent_nickname: None,
+                agent_role: None,
+                git_info: None,
+                name: Some("restore".to_string()),
+                turns: vec![
+                    Turn {
+                        id: "turn-complete".to_string(),
+                        items: vec![
+                            ThreadItem::UserMessage {
+                                id: "user-1".to_string(),
+                                content: vec![codex_app_server_protocol::UserInput::Text {
+                                    text: "hello".to_string(),
+                                    text_elements: Vec::new(),
+                                }],
+                            },
+                            ThreadItem::Reasoning {
+                                id: "reasoning-1".to_string(),
+                                summary: vec!["thinking".to_string()],
+                                content: vec!["hidden".to_string()],
+                            },
+                            ThreadItem::WebSearch {
+                                id: "search-1".to_string(),
+                                query: "codex".to_string(),
+                                action: Some(codex_app_server_protocol::WebSearchAction::Search {
+                                    query: Some("codex".to_string()),
+                                    queries: Some(vec!["codex".to_string()]),
+                                }),
+                            },
+                            ThreadItem::ImageGeneration {
+                                id: "image-1".to_string(),
+                                status: "completed".to_string(),
+                                revised_prompt: Some("diagram".to_string()),
+                                result: "file://image.png".to_string(),
+                            },
+                            ThreadItem::ContextCompaction {
+                                id: "compact-1".to_string(),
+                            },
+                            ThreadItem::AgentMessage {
+                                id: "assistant-1".to_string(),
+                                text: "hi".to_string(),
+                                phase: Some(MessagePhase::FinalAnswer),
+                            },
+                        ],
+                        status: TurnStatus::Completed,
+                        error: None,
+                    },
+                    Turn {
+                        id: "turn-interrupted".to_string(),
+                        items: Vec::new(),
+                        status: TurnStatus::Interrupted,
+                        error: None,
+                    },
+                ],
+            },
+            /*show_raw_agent_reasoning*/ true,
+        );
 
-        assert_eq!(events.len(), 10);
+        assert_eq!(events.len(), 11);
         assert!(matches!(events[0].msg, EventMsg::TurnStarted(_)));
-        assert!(matches!(events[1].msg, EventMsg::ItemCompleted(_)));
+        let EventMsg::UserMessage(user_message) = &events[1].msg else {
+            panic!("expected user message replay");
+        };
+        assert_eq!(user_message.message, "hello");
         assert!(matches!(events[2].msg, EventMsg::AgentReasoning(_)));
+        let EventMsg::AgentReasoningRawContent(raw_reasoning) = &events[3].msg else {
+            panic!("expected raw reasoning replay");
+        };
+        assert_eq!(raw_reasoning.text, "hidden");
         let EventMsg::WebSearchEnd(WebSearchEndEvent {
             call_id,
             query,
             action,
-        }) = &events[3].msg
+        }) = &events[4].msg
         else {
             panic!("expected web search replay");
         };
@@ -1436,7 +1461,7 @@ mod tests {
             revised_prompt,
             result,
             saved_path,
-        }) = &events[4].msg
+        }) = &events[5].msg
         else {
             panic!("expected image generation replay");
         };
@@ -1446,13 +1471,13 @@ mod tests {
         assert_eq!(result, "file://image.png");
         assert_eq!(*saved_path, None);
         assert!(matches!(
-            events[5].msg,
+            events[6].msg,
             EventMsg::ContextCompacted(ContextCompactedEvent {})
         ));
-        assert!(matches!(events[6].msg, EventMsg::ItemCompleted(_)));
-        assert!(matches!(events[7].msg, EventMsg::TurnComplete(_)));
-        assert!(matches!(events[8].msg, EventMsg::TurnStarted(_)));
-        let EventMsg::TurnAborted(TurnAbortedEvent { turn_id, reason }) = &events[9].msg else {
+        assert!(matches!(events[7].msg, EventMsg::ItemCompleted(_)));
+        assert!(matches!(events[8].msg, EventMsg::TurnComplete(_)));
+        assert!(matches!(events[9].msg, EventMsg::TurnStarted(_)));
+        let EventMsg::TurnAborted(TurnAbortedEvent { turn_id, reason }) = &events[10].msg else {
             panic!("expected interrupted turn replay");
         };
         assert_eq!(turn_id.as_deref(), Some("turn-interrupted"));
@@ -1560,41 +1585,44 @@ mod tests {
     #[test]
     fn bridges_command_execution_snapshot_for_resume_restore() {
         let thread_id = ThreadId::new();
-        let events = thread_snapshot_events(&Thread {
-            id: thread_id.to_string(),
-            preview: "exec".to_string(),
-            ephemeral: false,
-            model_provider: "openai".to_string(),
-            created_at: 0,
-            updated_at: 0,
-            status: ThreadStatus::Idle,
-            path: None,
-            cwd: PathBuf::from("/tmp/project"),
-            cli_version: "test".to_string(),
-            source: SessionSource::Cli.into(),
-            agent_nickname: None,
-            agent_role: None,
-            git_info: None,
-            name: Some("restore".to_string()),
-            turns: vec![Turn {
-                id: "turn-exec".to_string(),
-                items: vec![ThreadItem::CommandExecution {
-                    id: "cmd-restore".to_string(),
-                    command: "cargo test".to_string(),
-                    cwd: PathBuf::from("/tmp/project"),
-                    process_id: Some("proc-restore".to_string()),
-                    status: CommandExecutionStatus::Completed,
-                    command_actions: vec![CommandAction::Unknown {
+        let events = thread_snapshot_events(
+            &Thread {
+                id: thread_id.to_string(),
+                preview: "exec".to_string(),
+                ephemeral: false,
+                model_provider: "openai".to_string(),
+                created_at: 0,
+                updated_at: 0,
+                status: ThreadStatus::Idle,
+                path: None,
+                cwd: PathBuf::from("/tmp/project"),
+                cli_version: "test".to_string(),
+                source: SessionSource::Cli.into(),
+                agent_nickname: None,
+                agent_role: None,
+                git_info: None,
+                name: Some("restore".to_string()),
+                turns: vec![Turn {
+                    id: "turn-exec".to_string(),
+                    items: vec![ThreadItem::CommandExecution {
+                        id: "cmd-restore".to_string(),
                         command: "cargo test".to_string(),
+                        cwd: PathBuf::from("/tmp/project"),
+                        process_id: Some("proc-restore".to_string()),
+                        status: CommandExecutionStatus::Completed,
+                        command_actions: vec![CommandAction::Unknown {
+                            command: "cargo test".to_string(),
+                        }],
+                        aggregated_output: Some("test result: ok".to_string()),
+                        exit_code: Some(0),
+                        duration_ms: Some(1000),
                     }],
-                    aggregated_output: Some("test result: ok".to_string()),
-                    exit_code: Some(0),
-                    duration_ms: Some(1000),
+                    status: TurnStatus::Completed,
+                    error: None,
                 }],
-                status: TurnStatus::Completed,
-                error: None,
-            }],
-        });
+            },
+            /*show_raw_agent_reasoning*/ false,
+        );
 
         assert_eq!(events.len(), 3);
         assert!(matches!(events[0].msg, EventMsg::TurnStarted(_)));
