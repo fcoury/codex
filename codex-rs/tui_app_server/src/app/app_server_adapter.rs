@@ -345,10 +345,10 @@ impl App {
 /// Converts a remote `Thread` snapshot into a flat sequence of core events.
 ///
 /// Each turn becomes `TurnStarted` → item events → `TurnComplete` (or
-/// `TurnAborted`). Non-command items emit `ItemCompleted`; command-execution
-/// items are translated by `command_execution_snapshot_events` so the chat
-/// widget renders them with shell output styling. In-progress commands emit
-/// `ExecCommandBegin`; terminal commands emit `ExecCommandEnd`.
+/// `TurnAborted`). Snapshot items reuse the event shape the chat widget still
+/// renders today: command execution items emit exec events, legacy-rendered
+/// items emit their legacy events, and item-driven transcript entries emit
+/// `ItemCompleted`.
 pub(super) fn thread_snapshot_events(thread: &Thread) -> Vec<Event> {
     let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
         tracing::warn!(
@@ -868,7 +868,9 @@ fn turn_snapshot_events(thread_id: ThreadId, turn: &Turn) -> Vec<Event> {
 ///
 /// `CommandExecution` items get special treatment via
 /// `command_execution_snapshot_events` so the chat widget renders shell
-/// output correctly. All other item types emit a single `ItemCompleted`.
+/// output correctly. Snapshot items that the chat widget still renders via
+/// legacy events reuse `TurnItem::as_legacy_events(false)`. Remaining
+/// item-driven transcript entries emit a single `ItemCompleted`.
 fn thread_item_snapshot_events(
     thread_id: ThreadId,
     turn_id: String,
@@ -879,14 +881,30 @@ fn thread_item_snapshot_events(
     }
 
     let item = thread_item_to_core(item)?;
-    Some(vec![Event {
-        id: String::new(),
-        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
-            thread_id,
-            turn_id,
-            item,
-        }),
-    }])
+    let events = match &item {
+        TurnItem::Reasoning(_)
+        | TurnItem::WebSearch(_)
+        | TurnItem::ImageGeneration(_)
+        | TurnItem::ContextCompaction(_) => item
+            .as_legacy_events(/*show_raw_agent_reasoning*/ false)
+            .into_iter()
+            .map(|msg| Event {
+                id: String::new(),
+                msg,
+            })
+            .collect(),
+        TurnItem::UserMessage(_) | TurnItem::AgentMessage(_) | TurnItem::Plan(_) => {
+            vec![Event {
+                id: String::new(),
+                msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+                    thread_id,
+                    turn_id,
+                    item,
+                }),
+            }]
+        }
+    };
+    Some(events)
 }
 
 /// Translates a live `ItemStarted` notification into core events.
@@ -1181,15 +1199,19 @@ mod tests {
     use codex_protocol::items::AgentMessageItem;
     use codex_protocol::items::TurnItem;
     use codex_protocol::models::MessagePhase;
+    use codex_protocol::models::WebSearchAction;
     use codex_protocol::parse_command::ParsedCommand;
+    use codex_protocol::protocol::ContextCompactedEvent;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ExecCommandStatus;
     use codex_protocol::protocol::ExecOutputStream;
+    use codex_protocol::protocol::ImageGenerationEndEvent;
     use codex_protocol::protocol::NetworkPolicyRuleAction;
     use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
+    use codex_protocol::protocol::WebSearchEndEvent;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
@@ -1347,6 +1369,28 @@ mod tests {
                                 text_elements: Vec::new(),
                             }],
                         },
+                        ThreadItem::Reasoning {
+                            id: "reasoning-1".to_string(),
+                            summary: vec!["thinking".to_string()],
+                            content: vec!["hidden".to_string()],
+                        },
+                        ThreadItem::WebSearch {
+                            id: "search-1".to_string(),
+                            query: "codex".to_string(),
+                            action: Some(codex_app_server_protocol::WebSearchAction::Search {
+                                query: Some("codex".to_string()),
+                                queries: Some(vec!["codex".to_string()]),
+                            }),
+                        },
+                        ThreadItem::ImageGeneration {
+                            id: "image-1".to_string(),
+                            status: "completed".to_string(),
+                            revised_prompt: Some("diagram".to_string()),
+                            result: "file://image.png".to_string(),
+                        },
+                        ThreadItem::ContextCompaction {
+                            id: "compact-1".to_string(),
+                        },
                         ThreadItem::AgentMessage {
                             id: "assistant-1".to_string(),
                             text: "hi".to_string(),
@@ -1365,13 +1409,50 @@ mod tests {
             ],
         });
 
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 10);
         assert!(matches!(events[0].msg, EventMsg::TurnStarted(_)));
         assert!(matches!(events[1].msg, EventMsg::ItemCompleted(_)));
-        assert!(matches!(events[2].msg, EventMsg::ItemCompleted(_)));
-        assert!(matches!(events[3].msg, EventMsg::TurnComplete(_)));
-        assert!(matches!(events[4].msg, EventMsg::TurnStarted(_)));
-        let EventMsg::TurnAborted(TurnAbortedEvent { turn_id, reason }) = &events[5].msg else {
+        assert!(matches!(events[2].msg, EventMsg::AgentReasoning(_)));
+        let EventMsg::WebSearchEnd(WebSearchEndEvent {
+            call_id,
+            query,
+            action,
+        }) = &events[3].msg
+        else {
+            panic!("expected web search replay");
+        };
+        assert_eq!(call_id, "search-1");
+        assert_eq!(query, "codex");
+        assert_eq!(
+            *action,
+            WebSearchAction::Search {
+                query: Some("codex".to_string()),
+                queries: Some(vec!["codex".to_string()]),
+            }
+        );
+        let EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
+            call_id,
+            status,
+            revised_prompt,
+            result,
+            saved_path,
+        }) = &events[4].msg
+        else {
+            panic!("expected image generation replay");
+        };
+        assert_eq!(call_id, "image-1");
+        assert_eq!(status, "completed");
+        assert_eq!(revised_prompt.as_deref(), Some("diagram"));
+        assert_eq!(result, "file://image.png");
+        assert_eq!(*saved_path, None);
+        assert!(matches!(
+            events[5].msg,
+            EventMsg::ContextCompacted(ContextCompactedEvent {})
+        ));
+        assert!(matches!(events[6].msg, EventMsg::ItemCompleted(_)));
+        assert!(matches!(events[7].msg, EventMsg::TurnComplete(_)));
+        assert!(matches!(events[8].msg, EventMsg::TurnStarted(_)));
+        let EventMsg::TurnAborted(TurnAbortedEvent { turn_id, reason }) = &events[9].msg else {
             panic!("expected interrupted turn replay");
         };
         assert_eq!(turn_id.as_deref(), Some("turn-interrupted"));
