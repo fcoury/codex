@@ -19,7 +19,9 @@ use crate::app_server_session::status_account_display_from_auth_mode;
 use crate::local_chatgpt_auth::load_local_chatgpt_auth;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::ChatgptAuthTokensRefreshParams;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread;
@@ -27,6 +29,9 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::ThreadId;
+use codex_protocol::approvals::ElicitationRequest;
+use codex_protocol::approvals::ElicitationRequestEvent;
+use codex_protocol::approvals::ExecApprovalRequestEvent;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -37,6 +42,7 @@ use codex_protocol::items::ReasoningItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::WebSearchItem;
+use codex_protocol::mcp::RequestId as McpRequestId;
 use codex_protocol::protocol::AgentMessageDeltaEvent;
 use codex_protocol::protocol::AgentReasoningDeltaEvent;
 use codex_protocol::protocol::AgentReasoningRawContentDeltaEvent;
@@ -50,6 +56,7 @@ use codex_protocol::protocol::RealtimeConversationClosedEvent;
 use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
 use codex_protocol::protocol::RealtimeConversationStartedEvent;
 use codex_protocol::protocol::RealtimeEvent;
+use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ThreadNameUpdatedEvent;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
@@ -58,6 +65,10 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::request_permissions::RequestPermissionsEvent;
+use codex_protocol::request_user_input::RequestUserInputEvent;
+use codex_protocol::request_user_input::RequestUserInputQuestion;
+use codex_protocol::request_user_input::RequestUserInputQuestionOption;
 use serde_json::Value;
 
 impl App {
@@ -163,7 +174,68 @@ impl App {
                     .await;
                     return;
                 }
-                if let Some(unsupported) = self
+                if app_server_client.is_remote() {
+                    match server_request_thread_event(&request) {
+                        Ok((thread_id, event)) => {
+                            if let Some(unsupported) = self
+                                .pending_app_server_requests
+                                .note_server_request(&request)
+                            {
+                                tracing::warn!(
+                                    request_id = ?unsupported.request_id,
+                                    message = unsupported.message,
+                                    "rejecting unsupported app-server request"
+                                );
+                                self.chat_widget
+                                    .add_error_message(unsupported.message.clone());
+                                if let Err(err) = self
+                                    .reject_app_server_request(
+                                        app_server_client,
+                                        unsupported.request_id,
+                                        unsupported.message,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!("{err}");
+                                }
+                                return;
+                            }
+                            if self.primary_thread_id.is_none()
+                                || matches!(event.msg, EventMsg::SessionConfigured(_))
+                                    && self.primary_thread_id == Some(thread_id)
+                            {
+                                if let Err(err) = self.enqueue_primary_event(event).await {
+                                    tracing::warn!(
+                                        "failed to enqueue primary app-server server request: {err}"
+                                    );
+                                }
+                            } else if let Err(err) =
+                                self.enqueue_thread_event(thread_id, event).await
+                            {
+                                tracing::warn!(
+                                    "failed to enqueue app-server server request for {thread_id}: {err}"
+                                );
+                            }
+                        }
+                        Err(message) => {
+                            tracing::warn!(
+                                request_id = ?request.id(),
+                                "{message}"
+                            );
+                            self.chat_widget.add_error_message(message.clone());
+                            if let Err(err) = self
+                                .reject_app_server_request(
+                                    app_server_client,
+                                    request.id().clone(),
+                                    message,
+                                )
+                                .await
+                            {
+                                tracing::warn!("{err}");
+                            }
+                        }
+                    }
+                } else if let Some(unsupported) = self
                     .pending_app_server_requests
                     .note_server_request(&request)
                 {
@@ -275,6 +347,198 @@ impl App {
             )
             .await
             .map_err(|err| format!("failed to reject app-server request: {err}"))
+    }
+}
+
+fn server_request_thread_event(request: &ServerRequest) -> Result<(ThreadId, Event), String> {
+    match request {
+        ServerRequest::CommandExecutionRequestApproval { params, .. } => Ok((
+            thread_id_from_remote_request("command execution approval", &params.thread_id)?,
+            Event {
+                id: String::new(),
+                msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+                    call_id: params.item_id.clone(),
+                    approval_id: params.approval_id.clone(),
+                    turn_id: params.turn_id.clone(),
+                    command: params
+                        .command
+                        .as_deref()
+                        .map(split_remote_command_for_approval)
+                        .unwrap_or_default(),
+                    cwd: params.cwd.clone().unwrap_or_default(),
+                    reason: params.reason.clone(),
+                    network_approval_context: params.network_approval_context.clone().map(
+                        |context| codex_protocol::protocol::NetworkApprovalContext {
+                            host: context.host,
+                            protocol: context.protocol.to_core(),
+                        },
+                    ),
+                    proposed_execpolicy_amendment: params
+                        .proposed_execpolicy_amendment
+                        .clone()
+                        .map(codex_app_server_protocol::ExecPolicyAmendment::into_core),
+                    proposed_network_policy_amendments: params
+                        .proposed_network_policy_amendments
+                        .clone()
+                        .map(|amendments| {
+                            amendments
+                                .into_iter()
+                                .map(codex_app_server_protocol::NetworkPolicyAmendment::into_core)
+                                .collect()
+                        }),
+                    additional_permissions: params.additional_permissions.clone().map(Into::into),
+                    skill_metadata: None,
+                    available_decisions: params.available_decisions.clone().map(|decisions| {
+                        decisions
+                            .into_iter()
+                            .map(command_approval_decision_to_review_decision)
+                            .collect()
+                    }),
+                    parsed_cmd: params
+                        .command_actions
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(codex_app_server_protocol::CommandAction::into_core)
+                        .collect(),
+                }),
+            },
+        )),
+        ServerRequest::PermissionsRequestApproval { params, .. } => Ok((
+            thread_id_from_remote_request("permissions approval", &params.thread_id)?,
+            Event {
+                id: String::new(),
+                msg: EventMsg::RequestPermissions(RequestPermissionsEvent {
+                    call_id: params.item_id.clone(),
+                    turn_id: params.turn_id.clone(),
+                    reason: params.reason.clone(),
+                    permissions: params.permissions.clone().into(),
+                }),
+            },
+        )),
+        ServerRequest::ToolRequestUserInput { params, .. } => Ok((
+            thread_id_from_remote_request("request_user_input", &params.thread_id)?,
+            Event {
+                id: String::new(),
+                msg: EventMsg::RequestUserInput(RequestUserInputEvent {
+                    call_id: params.item_id.clone(),
+                    turn_id: params.turn_id.clone(),
+                    questions: params
+                        .questions
+                        .iter()
+                        .map(|question| RequestUserInputQuestion {
+                            id: question.id.clone(),
+                            header: question.header.clone(),
+                            question: question.question.clone(),
+                            is_other: question.is_other,
+                            is_secret: question.is_secret,
+                            options: question.options.as_ref().map(|options| {
+                                options
+                                    .iter()
+                                    .map(|option| RequestUserInputQuestionOption {
+                                        label: option.label.clone(),
+                                        description: option.description.clone(),
+                                    })
+                                    .collect()
+                            }),
+                        })
+                        .collect(),
+                }),
+            },
+        )),
+        ServerRequest::McpServerElicitationRequest { request_id, params } => Ok((
+            thread_id_from_remote_request("MCP elicitation request", &params.thread_id)?,
+            Event {
+                id: String::new(),
+                msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
+                    turn_id: params.turn_id.clone(),
+                    server_name: params.server_name.clone(),
+                    id: app_server_request_id_to_mcp_request_id(request_id),
+                    request: app_server_elicitation_request_to_core(
+                        &params.server_name,
+                        &params.request,
+                    )?,
+                }),
+            },
+        )),
+        ServerRequest::FileChangeRequestApproval { .. } => {
+            Err("Remote file change approvals are not available in app-server TUI yet.".to_string())
+        }
+        ServerRequest::DynamicToolCall { .. }
+        | ServerRequest::ExecCommandApproval { .. }
+        | ServerRequest::ChatgptAuthTokensRefresh { .. }
+        | ServerRequest::ApplyPatchApproval { .. } => {
+            Err("This app-server request is not available in app-server TUI yet.".to_string())
+        }
+    }
+}
+
+fn thread_id_from_remote_request(context: &str, thread_id: &str) -> Result<ThreadId, String> {
+    ThreadId::from_string(thread_id)
+        .map_err(|err| format!("failed to parse remote {context} thread id `{thread_id}`: {err}"))
+}
+
+fn split_remote_command_for_approval(command: &str) -> Vec<String> {
+    shlex::split(command).unwrap_or_else(|| vec![command.to_string()])
+}
+
+fn command_approval_decision_to_review_decision(
+    decision: CommandExecutionApprovalDecision,
+) -> ReviewDecision {
+    match decision {
+        CommandExecutionApprovalDecision::Accept => ReviewDecision::Approved,
+        CommandExecutionApprovalDecision::AcceptForSession => ReviewDecision::ApprovedForSession,
+        CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
+            execpolicy_amendment,
+        } => ReviewDecision::ApprovedExecpolicyAmendment {
+            proposed_execpolicy_amendment: execpolicy_amendment.into_core(),
+        },
+        CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
+            network_policy_amendment,
+        } => ReviewDecision::NetworkPolicyAmendment {
+            network_policy_amendment: network_policy_amendment.into_core(),
+        },
+        CommandExecutionApprovalDecision::Decline => ReviewDecision::Denied,
+        CommandExecutionApprovalDecision::Cancel => ReviewDecision::Abort,
+    }
+}
+
+fn app_server_request_id_to_mcp_request_id(request_id: &AppServerRequestId) -> McpRequestId {
+    match request_id {
+        AppServerRequestId::String(value) => McpRequestId::String(value.clone()),
+        AppServerRequestId::Integer(value) => McpRequestId::Integer(*value),
+    }
+}
+
+fn app_server_elicitation_request_to_core(
+    server_name: &str,
+    request: &codex_app_server_protocol::McpServerElicitationRequest,
+) -> Result<ElicitationRequest, String> {
+    match request {
+        codex_app_server_protocol::McpServerElicitationRequest::Form {
+            meta,
+            message,
+            requested_schema,
+        } => Ok(ElicitationRequest::Form {
+            meta: meta.clone(),
+            message: message.clone(),
+            requested_schema: serde_json::to_value(requested_schema).map_err(|err| {
+                format!(
+                    "failed to encode remote MCP elicitation request for `{server_name}`: {err}"
+                )
+            })?,
+        }),
+        codex_app_server_protocol::McpServerElicitationRequest::Url {
+            meta,
+            message,
+            url,
+            elicitation_id,
+        } => Ok(ElicitationRequest::Url {
+            meta: meta.clone(),
+            message: message.clone(),
+            url: url.clone(),
+            elicitation_id: elicitation_id.clone(),
+        }),
     }
 }
 
@@ -858,16 +1122,26 @@ fn app_server_codex_error_info_to_core(
 #[cfg(test)]
 mod tests {
     use super::server_notification_thread_events;
+    use super::server_request_thread_event;
     use super::thread_snapshot_events;
     use super::turn_snapshot_events;
     use codex_app_server_protocol::AgentMessageDeltaNotification;
     use codex_app_server_protocol::CodexErrorInfo;
+    use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
     use codex_app_server_protocol::ItemCompletedNotification;
+    use codex_app_server_protocol::McpElicitationObjectType;
+    use codex_app_server_protocol::McpElicitationSchema;
+    use codex_app_server_protocol::McpServerElicitationRequest;
+    use codex_app_server_protocol::McpServerElicitationRequestParams;
+    use codex_app_server_protocol::PermissionsRequestApprovalParams;
     use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
+    use codex_app_server_protocol::RequestId as AppServerRequestId;
     use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ServerRequest;
     use codex_app_server_protocol::Thread;
     use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::ThreadStatus;
+    use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnCompletedNotification;
     use codex_app_server_protocol::TurnError;
@@ -882,6 +1156,7 @@ mod tests {
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
     use pretty_assertions::assert_eq;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     #[test]
@@ -1246,5 +1521,87 @@ mod tests {
         };
         assert_eq!(raw_reasoning.text, "hidden chain");
         assert!(matches!(events[3].msg, EventMsg::TurnComplete(_)));
+    }
+
+    #[test]
+    fn bridges_remote_server_requests_into_core_events() {
+        let thread_id = ThreadId::new();
+
+        let (_, exec_approval) =
+            server_request_thread_event(&ServerRequest::CommandExecutionRequestApproval {
+                request_id: AppServerRequestId::Integer(7),
+                params: CommandExecutionRequestApprovalParams {
+                    thread_id: thread_id.to_string(),
+                    turn_id: "turn-1".to_string(),
+                    item_id: "call-1".to_string(),
+                    approval_id: Some("approval-1".to_string()),
+                    reason: Some("Need shell".to_string()),
+                    network_approval_context: None,
+                    command: Some("pwd".to_string()),
+                    cwd: Some("/tmp/project".into()),
+                    command_actions: None,
+                    additional_permissions: None,
+                    skill_metadata: None,
+                    proposed_execpolicy_amendment: None,
+                    proposed_network_policy_amendments: None,
+                    available_decisions: None,
+                },
+            })
+            .expect("request should bridge");
+        assert!(matches!(
+            exec_approval.msg,
+            EventMsg::ExecApprovalRequest(_)
+        ));
+
+        let (_, permissions) =
+            server_request_thread_event(&ServerRequest::PermissionsRequestApproval {
+                request_id: AppServerRequestId::Integer(8),
+                params: PermissionsRequestApprovalParams {
+                    thread_id: thread_id.to_string(),
+                    turn_id: "turn-2".to_string(),
+                    item_id: "perm-1".to_string(),
+                    reason: Some("Need network".to_string()),
+                    permissions: serde_json::from_value(serde_json::json!({
+                        "network": { "enabled": null }
+                    }))
+                    .expect("valid permissions"),
+                },
+            })
+            .expect("request should bridge");
+        assert!(matches!(permissions.msg, EventMsg::RequestPermissions(_)));
+
+        let (_, user_input) = server_request_thread_event(&ServerRequest::ToolRequestUserInput {
+            request_id: AppServerRequestId::Integer(9),
+            params: ToolRequestUserInputParams {
+                thread_id: thread_id.to_string(),
+                turn_id: "turn-3".to_string(),
+                item_id: "input-1".to_string(),
+                questions: Vec::new(),
+            },
+        })
+        .expect("request should bridge");
+        assert!(matches!(user_input.msg, EventMsg::RequestUserInput(_)));
+
+        let (_, elicitation) =
+            server_request_thread_event(&ServerRequest::McpServerElicitationRequest {
+                request_id: AppServerRequestId::Integer(10),
+                params: McpServerElicitationRequestParams {
+                    thread_id: thread_id.to_string(),
+                    turn_id: Some("turn-4".to_string()),
+                    server_name: "example".to_string(),
+                    request: McpServerElicitationRequest::Form {
+                        meta: None,
+                        message: "Need input".to_string(),
+                        requested_schema: McpElicitationSchema {
+                            schema_uri: None,
+                            type_: McpElicitationObjectType::Object,
+                            properties: BTreeMap::new(),
+                            required: None,
+                        },
+                    },
+                },
+            })
+            .expect("request should bridge");
+        assert!(matches!(elicitation.msg, EventMsg::ElicitationRequest(_)));
     }
 }
