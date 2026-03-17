@@ -90,6 +90,7 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::mcp::RequestId;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::parse_command::ParsedCommand;
@@ -1762,12 +1763,14 @@ impl ChatWidget {
         }
         // If there is a queued user message, send exactly one now to begin the next turn.
         self.maybe_send_next_queued_input();
-        // Emit a notification when the turn completes (suppressed if focused).
-        self.notify(Notification::AgentTurnComplete {
-            response: last_agent_message.unwrap_or_default(),
-        });
+        if !from_replay {
+            // Emit a notification when the turn completes (suppressed if focused).
+            self.notify(Notification::AgentTurnComplete {
+                response: last_agent_message.unwrap_or_default(),
+            });
 
-        self.maybe_show_pending_rate_limit_prompt();
+            self.maybe_show_pending_rate_limit_prompt();
+        }
     }
 
     fn maybe_prompt_plan_implementation(&mut self) {
@@ -3347,6 +3350,12 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn remove_exec_approval(&mut self, approval_id: &str) {
+        if self.bottom_pane.remove_exec_approval(approval_id) {
+            self.request_redraw();
+        }
+    }
+
     pub(crate) fn push_mcp_server_elicitation_request(
         &mut self,
         request: McpServerElicitationFormRequest,
@@ -3354,6 +3363,15 @@ impl ChatWidget {
         self.bottom_pane
             .push_mcp_server_elicitation_request(request);
         self.request_redraw();
+    }
+
+    pub(crate) fn remove_mcp_elicitation(&mut self, server_name: &str, request_id: &RequestId) {
+        if self
+            .bottom_pane
+            .remove_mcp_elicitation(server_name, request_id)
+        {
+            self.request_redraw();
+        }
     }
 
     pub(crate) fn handle_request_user_input_now(&mut self, ev: RequestUserInputEvent) {
@@ -3364,6 +3382,12 @@ impl ChatWidget {
         });
         self.bottom_pane.push_user_input_request(ev);
         self.request_redraw();
+    }
+
+    pub(crate) fn remove_request_user_input(&mut self, call_id: &str) {
+        if self.bottom_pane.remove_request_user_input(call_id) {
+            self.request_redraw();
+        }
     }
 
     pub(crate) fn handle_request_permissions_now(&mut self, ev: RequestPermissionsEvent) {
@@ -3378,6 +3402,12 @@ impl ChatWidget {
         self.bottom_pane
             .push_approval_request(request, &self.config.features);
         self.request_redraw();
+    }
+
+    pub(crate) fn remove_request_permissions(&mut self, call_id: &str) {
+        if self.bottom_pane.remove_request_permissions(call_id) {
+            self.request_redraw();
+        }
     }
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
@@ -8656,6 +8686,11 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn has_active_view(&self) -> bool {
         self.bottom_pane.has_active_view()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_notification(&self) -> bool {
+        self.pending_notification.is_some()
     }
 
     pub(crate) fn show_esc_backtrack_hint(&mut self) {

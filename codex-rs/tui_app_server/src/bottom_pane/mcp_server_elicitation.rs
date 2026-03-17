@@ -1590,6 +1590,28 @@ impl BottomPaneView for McpServerElicitationOverlay {
         self.queue.push_back(request);
         None
     }
+
+    fn remove_mcp_elicitation(&mut self, server_name: &str, request_id: &McpRequestId) -> bool {
+        let queue_len = self.queue.len();
+        self.queue.retain(|request| {
+            request.server_name != server_name || request.request_id != *request_id
+        });
+        let removed_from_queue = self.queue.len() != queue_len;
+
+        let removed_current =
+            self.request.server_name == server_name && self.request.request_id == *request_id;
+        if removed_current {
+            if let Some(next) = self.queue.pop_front() {
+                self.request = next;
+                self.reset_for_request();
+                self.restore_current_draft();
+            } else {
+                self.done = true;
+            }
+        }
+
+        removed_from_queue || removed_current
+    }
 }
 
 fn wrap_footer_tips(width: u16, tips: Vec<FooterTip>) -> Vec<Vec<FooterTip>> {

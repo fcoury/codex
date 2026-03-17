@@ -133,6 +133,22 @@ impl ApprovalOverlay {
         self.queue.push(req);
     }
 
+    fn remove_request<F>(&mut self, predicate: F) -> bool
+    where
+        F: Fn(&ApprovalRequest) -> bool,
+    {
+        let queue_len = self.queue.len();
+        self.queue.retain(|request| !predicate(request));
+        let removed_from_queue = self.queue.len() != queue_len;
+
+        let removed_current = self.current_request.as_ref().is_some_and(&predicate);
+        if removed_current {
+            self.advance_queue();
+        }
+
+        removed_from_queue || removed_current
+    }
+
     fn set_current(&mut self, request: ApprovalRequest) {
         self.current_complete = false;
         let header = build_header(&request);
@@ -464,6 +480,34 @@ impl BottomPaneView for ApprovalOverlay {
     ) -> Option<ApprovalRequest> {
         self.enqueue_request(request);
         None
+    }
+
+    fn remove_exec_approval(&mut self, approval_id: &str) -> bool {
+        self.remove_request(
+            |request| matches!(request, ApprovalRequest::Exec { id, .. } if id == approval_id),
+        )
+    }
+
+    fn remove_request_permissions(&mut self, call_id: &str) -> bool {
+        self.remove_request(|request| {
+            matches!(
+                request,
+                ApprovalRequest::Permissions { call_id: id, .. } if id == call_id
+            )
+        })
+    }
+
+    fn remove_mcp_elicitation(&mut self, server_name: &str, request_id: &RequestId) -> bool {
+        self.remove_request(|request| {
+            matches!(
+                request,
+                ApprovalRequest::McpElicitation {
+                    server_name: name,
+                    request_id: id,
+                    ..
+                } if name == server_name && id == request_id
+            )
+        })
     }
 }
 

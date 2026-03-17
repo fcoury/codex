@@ -868,6 +868,45 @@ impl BottomPane {
         !self.view_stack.is_empty()
     }
 
+    fn mutate_active_view<F>(&mut self, mut mutate: F) -> bool
+    where
+        F: FnMut(&mut dyn BottomPaneView) -> bool,
+    {
+        let Some(view) = self.view_stack.last_mut() else {
+            return false;
+        };
+        let changed = mutate(view.as_mut());
+        if !changed {
+            return false;
+        }
+        if view.is_complete() {
+            self.view_stack.pop();
+            self.on_active_view_complete();
+        }
+        self.request_redraw();
+        true
+    }
+
+    pub(crate) fn remove_exec_approval(&mut self, approval_id: &str) -> bool {
+        self.mutate_active_view(|view| view.remove_exec_approval(approval_id))
+    }
+
+    pub(crate) fn remove_request_permissions(&mut self, call_id: &str) -> bool {
+        self.mutate_active_view(|view| view.remove_request_permissions(call_id))
+    }
+
+    pub(crate) fn remove_request_user_input(&mut self, call_id: &str) -> bool {
+        self.mutate_active_view(|view| view.remove_request_user_input(call_id))
+    }
+
+    pub(crate) fn remove_mcp_elicitation(
+        &mut self,
+        server_name: &str,
+        request_id: &codex_protocol::mcp::RequestId,
+    ) -> bool {
+        self.mutate_active_view(|view| view.remove_mcp_elicitation(server_name, request_id))
+    }
+
     /// Return true when the pane is in the regular composer state without any
     /// overlays or popups and not running a task. This is the safe context to
     /// use Esc-Esc for backtracking from the main view.

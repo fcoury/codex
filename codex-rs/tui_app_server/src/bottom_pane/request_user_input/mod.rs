@@ -1273,6 +1273,26 @@ impl BottomPaneView for RequestUserInputOverlay {
         self.queue.push_back(request);
         None
     }
+
+    fn remove_request_user_input(&mut self, call_id: &str) -> bool {
+        let queue_len = self.queue.len();
+        self.queue.retain(|request| request.call_id != call_id);
+        let removed_from_queue = self.queue.len() != queue_len;
+
+        let removed_current = self.request.call_id == call_id;
+        if removed_current {
+            if let Some(next) = self.queue.pop_front() {
+                self.request = next;
+                self.reset_for_request();
+                self.ensure_focus_available();
+                self.restore_current_draft();
+            } else {
+                self.done = true;
+            }
+        }
+
+        removed_from_queue || removed_current
+    }
 }
 
 #[cfg(test)]

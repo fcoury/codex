@@ -1,6 +1,7 @@
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::render::renderable::Renderable;
+use codex_protocol::mcp::RequestId;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use crossterm::event::KeyEvent;
 
@@ -86,5 +87,21 @@ pub(crate) trait BottomPaneView: Renderable {
         request: McpServerElicitationFormRequest,
     ) -> Option<McpServerElicitationFormRequest> {
         Some(request)
+    }
+
+    fn remove_exec_approval(&mut self, _approval_id: &str) -> bool {
+        false
+    }
+
+    fn remove_request_permissions(&mut self, _call_id: &str) -> bool {
+        false
+    }
+
+    fn remove_request_user_input(&mut self, _call_id: &str) -> bool {
+        false
+    }
+
+    fn remove_mcp_elicitation(&mut self, _server_name: &str, _request_id: &RequestId) -> bool {
+        false
     }
 }

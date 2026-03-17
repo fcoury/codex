@@ -30,7 +30,6 @@ translation paths are needed that do not apply to the local in-process server:
 */
 
 use super::App;
-use super::app_server_requests::ResolvedAppServerRequest;
 use crate::app_event::AppEvent;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::app_server_rate_limit_snapshot_to_core;
@@ -123,43 +122,8 @@ impl App {
                         .resolve_notification(&notification.request_id);
                     if !resolved.is_empty() {
                         for resolved_request in resolved {
-                            let thread_id_str = match &resolved_request {
-                                ResolvedAppServerRequest::ExecApproval { thread_id, .. }
-                                | ResolvedAppServerRequest::PermissionsRequest {
-                                    thread_id, ..
-                                }
-                                | ResolvedAppServerRequest::UserInput { thread_id, .. }
-                                | ResolvedAppServerRequest::Elicitation { thread_id, .. } => {
-                                    thread_id
-                                }
-                            };
-                            let Ok(thread_id) = ThreadId::from_string(thread_id_str) else {
-                                tracing::warn!(
-                                    thread_id = thread_id_str,
-                                    "ignoring externally resolved request for invalid thread id"
-                                );
-                                continue;
-                            };
-                            if let Some(channel) = self.thread_event_channels.get(&thread_id) {
-                                let mut store = channel.store.lock().await;
-                                match &resolved_request {
-                                    ResolvedAppServerRequest::ExecApproval {
-                                        approval_id, ..
-                                    } => store.clear_exec_approval_by_id(approval_id),
-                                    ResolvedAppServerRequest::PermissionsRequest {
-                                        call_id,
-                                        ..
-                                    } => store.clear_request_permissions_by_id(call_id),
-                                    ResolvedAppServerRequest::UserInput { call_id, .. } => {
-                                        store.clear_request_user_input_by_id(call_id)
-                                    }
-                                    ResolvedAppServerRequest::Elicitation {
-                                        server_name,
-                                        request_id,
-                                        ..
-                                    } => store.clear_elicitation_request(server_name, request_id),
-                                }
-                            }
+                            self.clear_resolved_app_server_request(&resolved_request)
+                                .await;
                         }
                         self.refresh_pending_thread_approvals().await;
                     }

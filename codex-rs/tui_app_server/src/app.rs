@@ -1,3 +1,4 @@
+use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_backtrack::BacktrackState;
 use crate::app_command::AppCommand;
 use crate::app_command::AppCommandView;
@@ -1816,6 +1817,66 @@ impl App {
         self.chat_widget.set_pending_thread_approvals(threads);
     }
 
+    async fn clear_resolved_app_server_request(
+        &mut self,
+        resolved_request: &ResolvedAppServerRequest,
+    ) {
+        let thread_id_str = match resolved_request {
+            ResolvedAppServerRequest::ExecApproval { thread_id, .. }
+            | ResolvedAppServerRequest::PermissionsRequest { thread_id, .. }
+            | ResolvedAppServerRequest::UserInput { thread_id, .. }
+            | ResolvedAppServerRequest::Elicitation { thread_id, .. } => thread_id,
+        };
+        let Ok(thread_id) = ThreadId::from_string(thread_id_str) else {
+            tracing::warn!(
+                thread_id = thread_id_str,
+                "ignoring externally resolved request for invalid thread id"
+            );
+            return;
+        };
+
+        if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            match resolved_request {
+                ResolvedAppServerRequest::ExecApproval { approval_id, .. } => {
+                    store.clear_exec_approval_by_id(approval_id)
+                }
+                ResolvedAppServerRequest::PermissionsRequest { call_id, .. } => {
+                    store.clear_request_permissions_by_id(call_id)
+                }
+                ResolvedAppServerRequest::UserInput { call_id, .. } => {
+                    store.clear_request_user_input_by_id(call_id)
+                }
+                ResolvedAppServerRequest::Elicitation {
+                    server_name,
+                    request_id,
+                    ..
+                } => store.clear_elicitation_request(server_name, request_id),
+            }
+        }
+
+        if self.active_thread_id == Some(thread_id) {
+            match resolved_request {
+                ResolvedAppServerRequest::ExecApproval { approval_id, .. } => {
+                    self.chat_widget.remove_exec_approval(approval_id)
+                }
+                ResolvedAppServerRequest::PermissionsRequest { call_id, .. } => {
+                    self.chat_widget.remove_request_permissions(call_id)
+                }
+                ResolvedAppServerRequest::UserInput { call_id, .. } => {
+                    self.chat_widget.remove_request_user_input(call_id)
+                }
+                ResolvedAppServerRequest::Elicitation {
+                    server_name,
+                    request_id,
+                    ..
+                } => self
+                    .chat_widget
+                    .remove_mcp_elicitation(server_name, request_id),
+            }
+        }
+    }
+
     async fn enqueue_thread_event(&mut self, thread_id: ThreadId, event: Event) -> Result<()> {
         let refresh_pending_thread_approvals =
             ThreadEventStore::event_can_change_pending_thread_approvals(&event);
@@ -2166,9 +2227,36 @@ impl App {
             msg: EventMsg::SessionConfigured(started.session_configured),
         })
         .await?;
-        for event in snapshot_events {
-            self.enqueue_primary_event(event).await?;
+        self.replay_started_thread_snapshot(snapshot_events).await?;
+        Ok(())
+    }
+
+    async fn replay_started_thread_snapshot(&mut self, snapshot_events: Vec<Event>) -> Result<()> {
+        let Some(thread_id) = self.primary_thread_id else {
+            return Ok(());
+        };
+        let Some(channel) = self.thread_event_channels.get(&thread_id) else {
+            return Ok(());
+        };
+        let refresh_pending_thread_approvals = snapshot_events
+            .iter()
+            .any(ThreadEventStore::event_can_change_pending_thread_approvals);
+
+        {
+            let mut store = channel.store.lock().await;
+            for event in &snapshot_events {
+                store.push_event(event.clone());
+            }
         }
+
+        for event in snapshot_events {
+            self.handle_codex_event_replay(event);
+        }
+
+        if refresh_pending_thread_approvals {
+            self.refresh_pending_thread_approvals().await;
+        }
+
         Ok(())
     }
 
@@ -4463,6 +4551,7 @@ mod tests {
     use crate::app_backtrack::BacktrackSelection;
     use crate::app_backtrack::BacktrackState;
     use crate::app_backtrack::user_count;
+    use crate::app_server_session::AppServerStartedThread;
     use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
     use crate::chatwidget::tests::set_chatgpt_auth;
     use crate::file_search::FileSearchManager;
@@ -4482,6 +4571,7 @@ mod tests {
     use codex_protocol::config_types::CollaborationModeMask;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
+    use codex_protocol::mcp::RequestId as McpRequestId;
     use codex_protocol::openai_models::ModelAvailabilityNux;
     use codex_protocol::protocol::AgentMessageDeltaEvent;
     use codex_protocol::protocol::AskForApproval;
@@ -4496,6 +4586,8 @@ mod tests {
     use codex_protocol::protocol::TurnCompleteEvent;
     use codex_protocol::protocol::TurnStartedEvent;
     use codex_protocol::protocol::UserMessageEvent;
+    use codex_protocol::request_permissions::RequestPermissionProfile;
+    use codex_protocol::request_user_input::RequestUserInputEvent;
     use codex_protocol::user_input::TextElement;
     use codex_protocol::user_input::UserInput;
     use crossterm::event::KeyModifiers;
@@ -7668,6 +7760,115 @@ guardian_approval = true
                 .iter()
                 .any(|event| matches!(event.msg, EventMsg::ExecCommandEnd(_)))
         );
+    }
+
+    #[tokio::test]
+    async fn startup_snapshot_replay_does_not_raise_historical_turn_notifications() {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        let started = AppServerStartedThread {
+            session_configured: SessionConfiguredEvent {
+                session_id: thread_id,
+                forked_from_id: None,
+                thread_name: None,
+                model: "gpt-test".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                cwd: PathBuf::from("/tmp/project"),
+                reasoning_effort: None,
+                history_log_id: 0,
+                history_entry_count: 0,
+                initial_messages: None,
+                network_proxy: None,
+                rollout_path: Some(PathBuf::new()),
+            },
+            thread_snapshot: Some(codex_app_server_protocol::Thread {
+                id: thread_id.to_string(),
+                preview: "snapshot".to_string(),
+                ephemeral: false,
+                model_provider: "openai".to_string(),
+                created_at: 1,
+                updated_at: 2,
+                status: codex_app_server_protocol::ThreadStatus::Idle,
+                path: None,
+                cwd: PathBuf::from("/tmp/project"),
+                cli_version: "0.0.0".to_string(),
+                source: SessionSource::Cli.into(),
+                agent_nickname: None,
+                agent_role: None,
+                git_info: None,
+                name: None,
+                turns: vec![codex_app_server_protocol::Turn {
+                    id: "turn-1".to_string(),
+                    items: Vec::new(),
+                    status: codex_app_server_protocol::TurnStatus::Completed,
+                    error: None,
+                }],
+            }),
+        };
+
+        app.enqueue_started_thread(started)
+            .await
+            .expect("started thread should enqueue");
+
+        assert_eq!(app.chat_widget.has_pending_notification(), false);
+    }
+
+    #[tokio::test]
+    async fn externally_resolved_active_prompts_are_removed_from_visible_overlays() {
+        let mut app = make_test_app().await;
+        let thread_id = ThreadId::new();
+        app.active_thread_id = Some(thread_id);
+
+        app.chat_widget
+            .push_approval_request(ApprovalRequest::Permissions {
+                thread_id,
+                thread_label: None,
+                call_id: "perm-1".to_string(),
+                reason: None,
+                permissions: RequestPermissionProfile::default(),
+            });
+        assert_eq!(app.chat_widget.has_active_view(), true);
+        app.clear_resolved_app_server_request(&ResolvedAppServerRequest::PermissionsRequest {
+            thread_id: thread_id.to_string(),
+            call_id: "perm-1".to_string(),
+        })
+        .await;
+        assert_eq!(app.chat_widget.has_active_view(), false);
+
+        app.chat_widget
+            .handle_request_user_input_now(RequestUserInputEvent {
+                call_id: "input-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                questions: Vec::new(),
+            });
+        assert_eq!(app.chat_widget.has_active_view(), true);
+        app.clear_resolved_app_server_request(&ResolvedAppServerRequest::UserInput {
+            thread_id: thread_id.to_string(),
+            call_id: "input-1".to_string(),
+        })
+        .await;
+        assert_eq!(app.chat_widget.has_active_view(), false);
+
+        app.chat_widget
+            .push_approval_request(ApprovalRequest::McpElicitation {
+                thread_id,
+                thread_label: None,
+                server_name: "server-1".to_string(),
+                request_id: McpRequestId::Integer(1),
+                message: "Confirm".to_string(),
+            });
+        assert_eq!(app.chat_widget.has_active_view(), true);
+        app.clear_resolved_app_server_request(&ResolvedAppServerRequest::Elicitation {
+            thread_id: thread_id.to_string(),
+            server_name: "server-1".to_string(),
+            request_id: McpRequestId::Integer(1),
+        })
+        .await;
+        assert_eq!(app.chat_widget.has_active_view(), false);
     }
 
     #[tokio::test]
