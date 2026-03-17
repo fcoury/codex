@@ -104,17 +104,8 @@ impl PendingAppServerRequests {
     /// event into a thread channel — without this, the entry would linger
     /// and the TUI would try to resolve a request the user never saw.
     pub(super) fn clear_request(&mut self, request_id: &AppServerRequestId) {
-        self.exec_approvals
-            .retain(|_, pending| &pending.request_id != request_id);
-        self.file_change_approvals
-            .retain(|_, pending| pending != request_id);
-        self.permissions_approvals
-            .retain(|_, pending| pending != request_id);
-        self.user_inputs.retain(|_, pending| pending != request_id);
-        self.mcp_pending_by_matcher
-            .retain(|_, pending| pending != request_id);
-        self.mcp_legacy_requests
-            .retain(|_, pending| pending != request_id);
+        self.remove_exec_approvals(request_id);
+        self.remove_non_exec_requests(request_id);
     }
 
     /// Registers an incoming server request so we can later match it to a
@@ -392,6 +383,15 @@ impl PendingAppServerRequests {
         &mut self,
         request_id: &AppServerRequestId,
     ) -> Vec<ResolvedExecApproval> {
+        let resolved_exec_approvals = self.remove_exec_approvals(request_id);
+        self.remove_non_exec_requests(request_id);
+        resolved_exec_approvals
+    }
+
+    fn remove_exec_approvals(
+        &mut self,
+        request_id: &AppServerRequestId,
+    ) -> Vec<ResolvedExecApproval> {
         let mut resolved_exec_approvals = Vec::new();
         self.exec_approvals.retain(|approval_id, value| {
             if &value.request_id == request_id {
@@ -404,6 +404,10 @@ impl PendingAppServerRequests {
                 true
             }
         });
+        resolved_exec_approvals
+    }
+
+    fn remove_non_exec_requests(&mut self, request_id: &AppServerRequestId) {
         self.file_change_approvals
             .retain(|_, value| value != request_id);
         self.permissions_approvals
@@ -413,7 +417,6 @@ impl PendingAppServerRequests {
             .retain(|_, value| value != request_id);
         self.mcp_legacy_requests
             .retain(|_, value| value != request_id);
-        resolved_exec_approvals
     }
 }
 

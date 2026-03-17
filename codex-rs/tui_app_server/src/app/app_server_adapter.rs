@@ -660,22 +660,20 @@ fn server_notification_thread_events(
                 }),
             }],
         )),
-        ServerNotification::ItemStarted(notification) => Some((
-            ThreadId::from_string(&notification.thread_id).ok()?,
-            thread_item_started_events(
-                ThreadId::from_string(&notification.thread_id).ok()?,
-                notification.turn_id,
-                notification.item,
-            )?,
-        )),
-        ServerNotification::ItemCompleted(notification) => Some((
-            ThreadId::from_string(&notification.thread_id).ok()?,
-            thread_item_completed_events(
-                ThreadId::from_string(&notification.thread_id).ok()?,
-                notification.turn_id,
-                notification.item,
-            )?,
-        )),
+        ServerNotification::ItemStarted(notification) => {
+            let thread_id = ThreadId::from_string(&notification.thread_id).ok()?;
+            Some((
+                thread_id,
+                thread_item_started_events(thread_id, notification.turn_id, notification.item)?,
+            ))
+        }
+        ServerNotification::ItemCompleted(notification) => {
+            let thread_id = ThreadId::from_string(&notification.thread_id).ok()?;
+            Some((
+                thread_id,
+                thread_item_completed_events(thread_id, notification.turn_id, notification.item)?,
+            ))
+        }
         ServerNotification::AgentMessageDelta(notification) => Some((
             ThreadId::from_string(&notification.thread_id).ok()?,
             vec![Event {

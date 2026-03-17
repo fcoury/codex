@@ -2128,6 +2128,10 @@ impl App {
         let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
         self.chat_widget = ChatWidget::new_with_app_event(init);
         self.reset_thread_event_state();
+        self.enqueue_started_thread(started).await
+    }
+
+    async fn enqueue_started_thread(&mut self, started: AppServerStartedThread) -> Result<()> {
         let snapshot_events = started
             .thread_snapshot
             .as_ref()
@@ -2486,16 +2490,7 @@ impl App {
             pending_app_server_requests: PendingAppServerRequests::default(),
         };
         if let Some(started) = initial_started_thread {
-            app.enqueue_primary_event(Event {
-                id: String::new(),
-                msg: EventMsg::SessionConfigured(started.session_configured),
-            })
-            .await?;
-            if let Some(thread) = started.thread_snapshot.as_ref() {
-                for event in app_server_adapter::thread_snapshot_events(thread) {
-                    app.enqueue_primary_event(event).await?;
-                }
-            }
+            app.enqueue_started_thread(started).await?;
         }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.

@@ -271,7 +271,6 @@ impl AppServerSession {
         config: Config,
         thread_id: ThreadId,
     ) -> Result<AppServerStartedThread> {
-        let show_raw_agent_reasoning = config.show_raw_agent_reasoning;
         let request_id = self.next_request_id();
         let response: ThreadResumeResponse = self
             .client
@@ -285,7 +284,8 @@ impl AppServerSession {
             })
             .await
             .wrap_err("thread/resume failed during TUI bootstrap")?;
-        started_thread_from_resume_response(&response, show_raw_agent_reasoning)
+        let _ = config;
+        started_thread_from_resume_response(&response)
     }
 
     pub(crate) async fn fork_thread(
@@ -293,7 +293,6 @@ impl AppServerSession {
         config: Config,
         thread_id: ThreadId,
     ) -> Result<AppServerStartedThread> {
-        let show_raw_agent_reasoning = config.show_raw_agent_reasoning;
         let request_id = self.next_request_id();
         let response: ThreadForkResponse = self
             .client
@@ -307,7 +306,8 @@ impl AppServerSession {
             })
             .await
             .wrap_err("thread/fork failed during TUI bootstrap")?;
-        started_thread_from_fork_response(&response, show_raw_agent_reasoning)
+        let _ = config;
+        started_thread_from_fork_response(&response)
     }
 
     fn thread_params_mode(&self) -> ThreadParamsMode {
@@ -853,7 +853,6 @@ fn started_thread_from_start_response(
 
 fn started_thread_from_resume_response(
     response: &ThreadResumeResponse,
-    _show_raw_agent_reasoning: bool,
 ) -> Result<AppServerStartedThread> {
     let session_configured = session_configured_from_thread_resume_response(response)
         .map_err(color_eyre::eyre::Report::msg)?;
@@ -865,7 +864,6 @@ fn started_thread_from_resume_response(
 
 fn started_thread_from_fork_response(
     response: &ThreadForkResponse,
-    _show_raw_agent_reasoning: bool,
 ) -> Result<AppServerStartedThread> {
     let session_configured = session_configured_from_thread_fork_response(response)
         .map_err(color_eyre::eyre::Report::msg)?;
@@ -1135,8 +1133,7 @@ mod tests {
         };
 
         let started =
-            started_thread_from_resume_response(&response, /*show_raw_agent_reasoning*/ false)
-                .expect("resume response should map");
+            started_thread_from_resume_response(&response).expect("resume response should map");
         assert_eq!(started.thread_snapshot, Some(response.thread.clone()));
         assert!(started.session_configured.initial_messages.is_none());
     }
