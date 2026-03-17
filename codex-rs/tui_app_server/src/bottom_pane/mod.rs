@@ -868,19 +868,35 @@ impl BottomPane {
         !self.view_stack.is_empty()
     }
 
-    fn mutate_active_view<F>(&mut self, mut mutate: F) -> bool
+    fn mutate_views<F>(&mut self, mut mutate: F) -> bool
     where
         F: FnMut(&mut dyn BottomPaneView) -> bool,
     {
-        let Some(view) = self.view_stack.last_mut() else {
+        if self.view_stack.is_empty() {
             return false;
-        };
-        let changed = mutate(view.as_mut());
+        }
+
+        let mut changed = false;
+        let mut removed_top_view = false;
+        let mut index = self.view_stack.len();
+        while index > 0 {
+            index -= 1;
+            let view = &mut self.view_stack[index];
+            if !mutate(view.as_mut()) {
+                continue;
+            }
+            changed = true;
+            if !view.is_complete() {
+                continue;
+            }
+            removed_top_view |= index == self.view_stack.len() - 1;
+            self.view_stack.remove(index);
+        }
+
         if !changed {
             return false;
         }
-        if view.is_complete() {
-            self.view_stack.pop();
+        if removed_top_view {
             self.on_active_view_complete();
         }
         self.request_redraw();
@@ -888,15 +904,15 @@ impl BottomPane {
     }
 
     pub(crate) fn remove_exec_approval(&mut self, approval_id: &str) -> bool {
-        self.mutate_active_view(|view| view.remove_exec_approval(approval_id))
+        self.mutate_views(|view| view.remove_exec_approval(approval_id))
     }
 
     pub(crate) fn remove_request_permissions(&mut self, call_id: &str) -> bool {
-        self.mutate_active_view(|view| view.remove_request_permissions(call_id))
+        self.mutate_views(|view| view.remove_request_permissions(call_id))
     }
 
     pub(crate) fn remove_request_user_input(&mut self, call_id: &str) -> bool {
-        self.mutate_active_view(|view| view.remove_request_user_input(call_id))
+        self.mutate_views(|view| view.remove_request_user_input(call_id))
     }
 
     pub(crate) fn remove_mcp_elicitation(
@@ -904,7 +920,7 @@ impl BottomPane {
         server_name: &str,
         request_id: &codex_protocol::mcp::RequestId,
     ) -> bool {
-        self.mutate_active_view(|view| view.remove_mcp_elicitation(server_name, request_id))
+        self.mutate_views(|view| view.remove_mcp_elicitation(server_name, request_id))
     }
 
     /// Return true when the pane is in the regular composer state without any
@@ -1275,8 +1291,10 @@ mod tests {
     use crate::app_event::AppEvent;
     use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
     use crate::status_indicator_widget::StatusDetailsCapitalization;
+    use codex_protocol::ThreadId;
     use codex_protocol::protocol::Op;
     use codex_protocol::protocol::SkillScope;
+    use codex_protocol::request_permissions::RequestPermissionProfile;
     use crossterm::event::KeyEventKind;
     use crossterm::event::KeyModifiers;
     use insta::assert_snapshot;
@@ -2000,5 +2018,45 @@ mod tests {
         ));
 
         assert_eq!(handle_calls.get(), 1);
+    }
+
+    #[test]
+    fn resolved_requests_are_removed_from_buried_modal_layers() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let features = Features::with_defaults();
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: false,
+            animations_enabled: true,
+            skills: Some(Vec::new()),
+        });
+
+        pane.push_approval_request(
+            ApprovalRequest::Permissions {
+                thread_id: ThreadId::new(),
+                thread_label: None,
+                call_id: "perm-1".to_string(),
+                reason: None,
+                permissions: RequestPermissionProfile::default(),
+            },
+            &features,
+        );
+        pane.push_user_input_request(RequestUserInputEvent {
+            call_id: "input-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            questions: Vec::new(),
+        });
+
+        assert_eq!(pane.view_stack.len(), 2);
+        assert_eq!(pane.remove_request_permissions("perm-1"), true);
+        assert_eq!(pane.view_stack.len(), 1);
+        assert_eq!(pane.has_active_view(), true);
+        assert_eq!(pane.remove_request_user_input("input-1"), true);
+        assert_eq!(pane.has_active_view(), false);
     }
 }

@@ -1855,25 +1855,23 @@ impl App {
             }
         }
 
-        if self.active_thread_id == Some(thread_id) {
-            match resolved_request {
-                ResolvedAppServerRequest::ExecApproval { approval_id, .. } => {
-                    self.chat_widget.remove_exec_approval(approval_id)
-                }
-                ResolvedAppServerRequest::PermissionsRequest { call_id, .. } => {
-                    self.chat_widget.remove_request_permissions(call_id)
-                }
-                ResolvedAppServerRequest::UserInput { call_id, .. } => {
-                    self.chat_widget.remove_request_user_input(call_id)
-                }
-                ResolvedAppServerRequest::Elicitation {
-                    server_name,
-                    request_id,
-                    ..
-                } => self
-                    .chat_widget
-                    .remove_mcp_elicitation(server_name, request_id),
+        match resolved_request {
+            ResolvedAppServerRequest::ExecApproval { approval_id, .. } => {
+                self.chat_widget.remove_exec_approval(approval_id)
             }
+            ResolvedAppServerRequest::PermissionsRequest { call_id, .. } => {
+                self.chat_widget.remove_request_permissions(call_id)
+            }
+            ResolvedAppServerRequest::UserInput { call_id, .. } => {
+                self.chat_widget.remove_request_user_input(call_id)
+            }
+            ResolvedAppServerRequest::Elicitation {
+                server_name,
+                request_id,
+                ..
+            } => self
+                .chat_widget
+                .remove_mcp_elicitation(server_name, request_id),
         }
     }
 
@@ -7915,6 +7913,61 @@ guardian_approval = true
         assert_eq!(app.chat_widget.has_active_view(), true);
         app.clear_resolved_app_server_request(&ResolvedAppServerRequest::Elicitation {
             thread_id: thread_id.to_string(),
+            server_name: "server-1".to_string(),
+            request_id: McpRequestId::Integer(1),
+        })
+        .await;
+        assert_eq!(app.chat_widget.has_active_view(), false);
+    }
+
+    #[tokio::test]
+    async fn externally_resolved_inactive_thread_prompts_are_removed_from_visible_overlays() {
+        let mut app = make_test_app().await;
+        let active_thread_id = ThreadId::new();
+        let background_thread_id = ThreadId::new();
+        app.active_thread_id = Some(active_thread_id);
+
+        app.chat_widget
+            .push_approval_request(ApprovalRequest::Permissions {
+                thread_id: background_thread_id,
+                thread_label: None,
+                call_id: "perm-1".to_string(),
+                reason: None,
+                permissions: RequestPermissionProfile::default(),
+            });
+        assert_eq!(app.chat_widget.has_active_view(), true);
+        app.clear_resolved_app_server_request(&ResolvedAppServerRequest::PermissionsRequest {
+            thread_id: background_thread_id.to_string(),
+            call_id: "perm-1".to_string(),
+        })
+        .await;
+        assert_eq!(app.chat_widget.has_active_view(), false);
+
+        app.chat_widget
+            .handle_request_user_input_now(RequestUserInputEvent {
+                call_id: "input-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                questions: Vec::new(),
+            });
+        assert_eq!(app.chat_widget.has_active_view(), true);
+        app.clear_resolved_app_server_request(&ResolvedAppServerRequest::UserInput {
+            thread_id: background_thread_id.to_string(),
+            call_id: "input-1".to_string(),
+        })
+        .await;
+        assert_eq!(app.chat_widget.has_active_view(), false);
+
+        app.chat_widget
+            .push_approval_request(ApprovalRequest::McpElicitation {
+                thread_id: background_thread_id,
+                thread_label: None,
+                server_name: "server-1".to_string(),
+                request_id: McpRequestId::Integer(1),
+                message: "Confirm".to_string(),
+            });
+        assert_eq!(app.chat_widget.has_active_view(), true);
+        app.clear_resolved_app_server_request(&ResolvedAppServerRequest::Elicitation {
+            thread_id: background_thread_id.to_string(),
             server_name: "server-1".to_string(),
             request_id: McpRequestId::Integer(1),
         })
