@@ -2524,7 +2524,8 @@ impl App {
         tui.frame_requester().schedule_frame();
 
         let mut listen_for_app_server_events = true;
-        let mut waiting_for_initial_session_configured = wait_for_initial_session_configured;
+        let mut waiting_for_initial_session_configured =
+            wait_for_initial_session_configured && app.primary_thread_id.is_none();
 
         #[cfg(not(debug_assertions))]
         let pre_loop_exit_reason = if let Some(latest_version) = upgrade_version {
