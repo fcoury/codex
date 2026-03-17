@@ -2212,6 +2212,10 @@ impl App {
     }
 
     async fn enqueue_started_thread(&mut self, started: AppServerStartedThread) -> Result<()> {
+        let session_event = Event {
+            id: String::new(),
+            msg: EventMsg::SessionConfigured(started.session_configured.clone()),
+        };
         let snapshot_events = started
             .thread_snapshot
             .as_ref()
@@ -2222,11 +2226,22 @@ impl App {
                 )
             })
             .unwrap_or_default();
-        self.enqueue_primary_event(Event {
-            id: String::new(),
-            msg: EventMsg::SessionConfigured(started.session_configured),
-        })
-        .await?;
+        let thread_id = started.session_configured.session_id;
+        self.primary_thread_id = Some(thread_id);
+        self.primary_session_configured = Some(started.session_configured);
+        self.upsert_agent_picker_thread(thread_id, None, None, false);
+        self.ensure_thread_channel(thread_id);
+        self.activate_thread_channel(thread_id).await;
+        if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.push_event(session_event.clone());
+        }
+        self.handle_codex_event_replay(session_event);
+
+        let pending = std::mem::take(&mut self.pending_primary_events);
+        for pending_event in pending {
+            self.enqueue_thread_event(thread_id, pending_event).await?;
+        }
         self.replay_started_thread_snapshot(snapshot_events).await?;
         Ok(())
     }
@@ -7815,6 +7830,42 @@ guardian_approval = true
             .expect("started thread should enqueue");
 
         assert_eq!(app.chat_widget.has_pending_notification(), false);
+    }
+
+    #[tokio::test]
+    async fn enqueue_started_thread_applies_session_configured_immediately() {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        let cwd = PathBuf::from("/tmp/project");
+        let started = AppServerStartedThread {
+            session_configured: SessionConfiguredEvent {
+                session_id: thread_id,
+                forked_from_id: None,
+                thread_name: Some("resumed".to_string()),
+                model: "gpt-test".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                cwd: cwd.clone(),
+                reasoning_effort: None,
+                history_log_id: 0,
+                history_entry_count: 0,
+                initial_messages: None,
+                network_proxy: None,
+                rollout_path: Some(PathBuf::new()),
+            },
+            thread_snapshot: None,
+        };
+
+        app.enqueue_started_thread(started)
+            .await
+            .expect("started thread should enqueue");
+
+        assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
+        assert_eq!(app.chat_widget.thread_name(), Some("resumed".to_string()));
+        assert_eq!(app.chat_widget.config_ref().cwd, cwd);
     }
 
     #[tokio::test]
