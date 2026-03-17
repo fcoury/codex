@@ -1158,8 +1158,6 @@ fn thread_item_to_core(item: ThreadItem) -> Option<TurnItem> {
 }
 
 /// Maps an app-server web-search action to its core equivalent.
-///
-/// Returns `None` for `Other`, which has no core representation.
 fn app_server_web_search_action_to_core(
     action: codex_app_server_protocol::WebSearchAction,
 ) -> Option<codex_protocol::models::WebSearchAction> {
@@ -1173,7 +1171,9 @@ fn app_server_web_search_action_to_core(
         codex_app_server_protocol::WebSearchAction::FindInPage { url, pattern } => {
             Some(codex_protocol::models::WebSearchAction::FindInPage { url, pattern })
         }
-        codex_app_server_protocol::WebSearchAction::Other => None,
+        codex_app_server_protocol::WebSearchAction::Other => {
+            Some(codex_protocol::models::WebSearchAction::Other)
+        }
     }
 }
 
@@ -1398,6 +1398,11 @@ mod tests {
                                     queries: Some(vec!["codex".to_string()]),
                                 }),
                             },
+                            ThreadItem::WebSearch {
+                                id: "search-2".to_string(),
+                                query: "mystery".to_string(),
+                                action: Some(codex_app_server_protocol::WebSearchAction::Other),
+                            },
                             ThreadItem::ImageGeneration {
                                 id: "image-1".to_string(),
                                 status: "completed".to_string(),
@@ -1427,7 +1432,7 @@ mod tests {
             /*show_raw_agent_reasoning*/ true,
         );
 
-        assert_eq!(events.len(), 11);
+        assert_eq!(events.len(), 12);
         assert!(matches!(events[0].msg, EventMsg::TurnStarted(_)));
         let EventMsg::UserMessage(user_message) = &events[1].msg else {
             panic!("expected user message replay");
@@ -1455,13 +1460,24 @@ mod tests {
                 queries: Some(vec!["codex".to_string()]),
             }
         );
+        let EventMsg::WebSearchEnd(WebSearchEndEvent {
+            call_id,
+            query,
+            action,
+        }) = &events[5].msg
+        else {
+            panic!("expected web search other replay");
+        };
+        assert_eq!(call_id, "search-2");
+        assert_eq!(query, "mystery");
+        assert_eq!(*action, WebSearchAction::Other);
         let EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
             call_id,
             status,
             revised_prompt,
             result,
             saved_path,
-        }) = &events[5].msg
+        }) = &events[6].msg
         else {
             panic!("expected image generation replay");
         };
@@ -1471,13 +1487,13 @@ mod tests {
         assert_eq!(result, "file://image.png");
         assert_eq!(*saved_path, None);
         assert!(matches!(
-            events[6].msg,
+            events[7].msg,
             EventMsg::ContextCompacted(ContextCompactedEvent {})
         ));
-        assert!(matches!(events[7].msg, EventMsg::ItemCompleted(_)));
-        assert!(matches!(events[8].msg, EventMsg::TurnComplete(_)));
-        assert!(matches!(events[9].msg, EventMsg::TurnStarted(_)));
-        let EventMsg::TurnAborted(TurnAbortedEvent { turn_id, reason }) = &events[10].msg else {
+        assert!(matches!(events[8].msg, EventMsg::ItemCompleted(_)));
+        assert!(matches!(events[9].msg, EventMsg::TurnComplete(_)));
+        assert!(matches!(events[10].msg, EventMsg::TurnStarted(_)));
+        let EventMsg::TurnAborted(TurnAbortedEvent { turn_id, reason }) = &events[11].msg else {
             panic!("expected interrupted turn replay");
         };
         assert_eq!(turn_id.as_deref(), Some("turn-interrupted"));
