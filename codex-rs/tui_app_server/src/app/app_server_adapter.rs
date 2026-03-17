@@ -187,13 +187,19 @@ impl App {
             },
             AppServerEvent::LegacyNotification(notification) => {
                 if let Some((thread_id, event)) = legacy_thread_event(notification.params) {
-                    self.pending_app_server_requests.note_legacy_event(&event);
                     if legacy_event_is_shadowed_by_server_notification(&event.msg) {
                         return;
                     }
-                    let _ = self
-                        .enqueue_app_server_thread_event(thread_id, event, "app-server event")
+                    let enqueue_result = self
+                        .enqueue_app_server_thread_event(
+                            thread_id,
+                            event.clone(),
+                            "app-server event",
+                        )
                         .await;
+                    if enqueue_result.is_ok() {
+                        self.pending_app_server_requests.note_legacy_event(&event);
+                    }
                 }
             }
             AppServerEvent::ServerRequest(request) => {

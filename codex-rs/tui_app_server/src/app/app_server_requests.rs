@@ -8,6 +8,7 @@
 // the server resolves the request externally, so we just clean up.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::app_command::AppCommand;
 use crate::app_command::AppCommandView;
@@ -85,6 +86,7 @@ pub(super) struct PendingAppServerRequests {
     mcp_pending_by_matcher: HashMap<McpServerMatcher, AppServerRequestId>,
     mcp_legacy_by_matcher: HashMap<McpServerMatcher, McpLegacyRequestKey>,
     mcp_legacy_requests: HashMap<McpLegacyRequestKey, AppServerRequestId>,
+    mcp_rollback_matchers: HashSet<McpServerMatcher>,
 }
 
 impl PendingAppServerRequests {
@@ -96,6 +98,7 @@ impl PendingAppServerRequests {
         self.mcp_pending_by_matcher.clear();
         self.mcp_legacy_by_matcher.clear();
         self.mcp_legacy_requests.clear();
+        self.mcp_rollback_matchers.clear();
     }
 
     /// Removes all pending entries that were registered under `request_id`.
@@ -153,6 +156,7 @@ impl PendingAppServerRequests {
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
                 let matcher = McpServerMatcher::from_v2(params);
+                self.mcp_rollback_matchers.remove(&matcher);
                 if let Some(legacy_key) = self.mcp_legacy_by_matcher.remove(&matcher) {
                     self.mcp_legacy_requests
                         .insert(legacy_key, request_id.clone());
@@ -224,6 +228,10 @@ impl PendingAppServerRequests {
             server_name: request.server_name.clone(),
             request_id: request.id.clone(),
         };
+        if self.mcp_rollback_matchers.remove(&matcher) {
+            self.mcp_legacy_by_matcher.remove(&matcher);
+            return;
+        }
         if let Some(request_id) = self.mcp_pending_by_matcher.remove(&matcher) {
             self.mcp_legacy_requests.insert(legacy_key, request_id);
         } else {
@@ -408,6 +416,11 @@ impl PendingAppServerRequests {
     }
 
     fn remove_non_exec_requests(&mut self, request_id: &AppServerRequestId) {
+        let rollback_matchers: Vec<McpServerMatcher> = self
+            .mcp_pending_by_matcher
+            .iter()
+            .filter_map(|(matcher, value)| (value == request_id).then_some(matcher.clone()))
+            .collect();
         self.file_change_approvals
             .retain(|_, value| value != request_id);
         self.permissions_approvals
@@ -417,6 +430,10 @@ impl PendingAppServerRequests {
             .retain(|_, value| value != request_id);
         self.mcp_legacy_requests
             .retain(|_, value| value != request_id);
+        for matcher in rollback_matchers {
+            self.mcp_legacy_by_matcher.remove(&matcher);
+            self.mcp_rollback_matchers.insert(matcher);
+        }
     }
 }
 
@@ -728,6 +745,65 @@ mod tests {
                 "_meta": { "source": "tui" }
             })
         );
+    }
+
+    #[test]
+    fn clear_request_prevents_late_legacy_mcp_orphans() {
+        let mut pending = PendingAppServerRequests::default();
+        assert_eq!(
+            pending.note_server_request(
+                &ServerRequest::McpServerElicitationRequest {
+                    request_id: AppServerRequestId::Integer(12),
+                    params: McpServerElicitationRequestParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: Some("turn-1".to_string()),
+                        server_name: "example".to_string(),
+                        request: McpServerElicitationRequest::Form {
+                            message: "Need approval".to_string(),
+                            requested_schema: McpElicitationSchema {
+                                schema_uri: None,
+                                type_: McpElicitationObjectType::Object,
+                                properties: BTreeMap::new(),
+                                required: None,
+                            },
+                            meta: None,
+                        },
+                    },
+                },
+                false
+            ),
+            None
+        );
+        pending.clear_request(&AppServerRequestId::Integer(12));
+
+        pending.note_legacy_event(&Event {
+            id: String::new(),
+            msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
+                turn_id: Some("turn-1".to_string()),
+                server_name: "example".to_string(),
+                id: McpRequestId::String("mcp-1".to_string()),
+                request: ElicitationRequest::Form {
+                    message: "Need approval".to_string(),
+                    requested_schema: json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                    meta: None,
+                },
+            }),
+        });
+
+        let resolution = pending
+            .take_resolution(&Op::ResolveElicitation {
+                server_name: "example".to_string(),
+                request_id: McpRequestId::String("mcp-1".to_string()),
+                decision: ElicitationAction::Accept,
+                content: Some(json!({ "answer": "yes" })),
+                meta: None,
+            })
+            .expect("elicitation response should serialize");
+
+        assert_eq!(resolution, None);
     }
 
     #[test]

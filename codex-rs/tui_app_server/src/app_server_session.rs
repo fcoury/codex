@@ -1083,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_response_restores_initial_messages_from_turn_items() {
+    fn resume_response_preserves_thread_snapshot_for_replay() {
         let thread_id = ThreadId::new();
         let response = ThreadResumeResponse {
             thread: codex_app_server_protocol::Thread {
