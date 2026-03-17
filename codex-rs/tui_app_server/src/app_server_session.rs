@@ -117,6 +117,11 @@ impl ThreadParamsMode {
 /// Carries the `SessionConfigured` event derived from the server's response.
 /// Resume/fork responses also preserve the raw thread snapshot so the TUI can
 /// replay remote-only history items such as command execution events.
+///
+/// Callers must enqueue `session_configured` first, then iterate
+/// `app_server_adapter::thread_snapshot_events` over `thread_snapshot` (if
+/// present) and enqueue those events in order. Omitting the snapshot replay
+/// silently loses command execution history on resume/fork.
 pub(crate) struct AppServerStartedThread {
     pub(crate) session_configured: SessionConfiguredEvent,
     pub(crate) thread_snapshot: Option<Thread>,

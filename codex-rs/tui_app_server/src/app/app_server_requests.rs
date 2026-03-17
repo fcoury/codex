@@ -98,6 +98,11 @@ impl PendingAppServerRequests {
         self.mcp_legacy_requests.clear();
     }
 
+    /// Removes all pending entries that were registered under `request_id`.
+    ///
+    /// Used as a rollback when the TUI fails to enqueue the corresponding
+    /// event into a thread channel — without this, the entry would linger
+    /// and the TUI would try to resolve a request the user never saw.
     pub(super) fn clear_request(&mut self, request_id: &AppServerRequestId) {
         self.exec_approvals
             .retain(|_, pending| &pending.request_id != request_id);

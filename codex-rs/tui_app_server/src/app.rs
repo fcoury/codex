@@ -423,6 +423,12 @@ impl ThreadEventStore {
             .has_pending_thread_approvals()
     }
 
+    /// Removes a single exec approval from the interactive-replay state
+    /// without requiring a turn ID.
+    ///
+    /// Called when the server resolves an approval externally (the agent
+    /// cancelled or another client responded). Without this cleanup the
+    /// chat widget would continue showing a stale approval prompt.
     fn clear_exec_approval_by_id(&mut self, approval_id: &str) {
         self.pending_interactive_replay
             .clear_exec_approval(approval_id);

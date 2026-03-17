@@ -96,6 +96,13 @@ use serde_json::Value;
 use std::time::Duration;
 
 impl App {
+    /// Dispatches a single event from the app-server event stream.
+    ///
+    /// For remote connections, `ServerRequest` variants are translated into
+    /// core `Event`s via `server_request_thread_event` and enqueued into the
+    /// thread channel so the TUI renders approval prompts. Legacy V1 exec
+    /// approvals are accepted only on remote connections
+    /// (`allow_legacy_exec_approvals`).
     pub(super) async fn handle_app_server_event(
         &mut self,
         app_server_client: &AppServerSession,
@@ -1048,6 +1055,11 @@ fn command_execution_status_to_core(status: &CommandExecutionStatus) -> ExecComm
     }
 }
 
+/// Converts a remote app-server `ThreadItem` to the core `TurnItem` the TUI uses.
+///
+/// Returns `None` for item types that have dedicated handling
+/// (`CommandExecution` goes through `command_execution_*_event` functions) or
+/// that the TUI does not render yet (`FileChange`, `McpToolCall`, etc.).
 fn thread_item_to_core(item: ThreadItem) -> Option<TurnItem> {
     match item {
         ThreadItem::UserMessage { id, content } => Some(TurnItem::UserMessage(UserMessageItem {
@@ -1108,6 +1120,9 @@ fn thread_item_to_core(item: ThreadItem) -> Option<TurnItem> {
     }
 }
 
+/// Maps an app-server web-search action to its core equivalent.
+///
+/// Returns `None` for `Other`, which has no core representation.
 fn app_server_web_search_action_to_core(
     action: codex_app_server_protocol::WebSearchAction,
 ) -> Option<codex_protocol::models::WebSearchAction> {
