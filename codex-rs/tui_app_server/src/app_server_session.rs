@@ -1134,7 +1134,7 @@ mod tests {
 
         let started =
             started_thread_from_resume_response(&response).expect("resume response should map");
-        assert_eq!(started.thread_snapshot, Some(response.thread.clone()));
+        assert_eq!(started.thread_snapshot, Some(response.thread));
         assert!(started.session_configured.initial_messages.is_none());
     }
 }
