@@ -435,16 +435,19 @@ impl ThreadEventStore {
             .clear_exec_approval(approval_id);
     }
 
+    /// Same as [`clear_exec_approval_by_id`] but for permission grant prompts.
     fn clear_request_permissions_by_id(&mut self, call_id: &str) {
         self.pending_interactive_replay
             .clear_request_permissions(call_id);
     }
 
+    /// Same as [`clear_exec_approval_by_id`] but for user-input prompts.
     fn clear_request_user_input_by_id(&mut self, call_id: &str) {
         self.pending_interactive_replay
             .clear_request_user_input(call_id);
     }
 
+    /// Same as [`clear_exec_approval_by_id`] but for MCP elicitation forms.
     fn clear_elicitation_request(
         &mut self,
         server_name: &str,
@@ -1817,6 +1820,13 @@ impl App {
         self.chat_widget.set_pending_thread_approvals(threads);
     }
 
+    /// Propagates an externally resolved prompt to both the thread's replay
+    /// state and the visible UI overlay stack.
+    ///
+    /// Two cleanup targets exist because they serve different purposes:
+    /// the `ThreadEventStore` replay state determines which prompts reappear
+    /// on thread switch, while the `ChatWidget` overlay controls what the
+    /// user sees right now.
     async fn clear_resolved_app_server_request(
         &mut self,
         resolved_request: &ResolvedAppServerRequest,
@@ -2209,6 +2219,13 @@ impl App {
         self.enqueue_started_thread(started).await
     }
 
+    /// Activates a freshly started/resumed/forked thread by applying its
+    /// session config, draining any events that arrived before the thread ID
+    /// was known, and replaying the thread snapshot (if any) through the
+    /// adapter layer so the chat widget displays prior history.
+    ///
+    /// This is the single entry point for thread activation — both startup
+    /// and mid-session fork/resume converge here.
     async fn enqueue_started_thread(&mut self, started: AppServerStartedThread) -> Result<()> {
         let session_event = Event {
             id: String::new(),
@@ -2244,6 +2261,9 @@ impl App {
         Ok(())
     }
 
+    /// Feeds pre-converted snapshot events into both the thread event store
+    /// and the chat widget's replay path (which suppresses live side effects
+    /// like notifications and rate-limit prompts).
     async fn replay_started_thread_snapshot(&mut self, snapshot_events: Vec<Event>) -> Result<()> {
         let Some(thread_id) = self.primary_thread_id else {
             return Ok(());

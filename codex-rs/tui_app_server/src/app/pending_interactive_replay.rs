@@ -324,6 +324,7 @@ impl PendingInteractiveReplayState {
         );
     }
 
+    /// Same as [`clear_exec_approval`] but for permission grant prompts.
     pub(super) fn clear_request_permissions(&mut self, call_id: &str) {
         self.request_permissions_call_ids.remove(call_id);
         Self::remove_call_id_from_turn_map(
@@ -332,6 +333,7 @@ impl PendingInteractiveReplayState {
         );
     }
 
+    /// Same as [`clear_exec_approval`] but for user-input prompts.
     pub(super) fn clear_request_user_input(&mut self, call_id: &str) {
         self.request_user_input_call_ids.remove(call_id);
         Self::remove_call_id_from_turn_map(
@@ -340,6 +342,8 @@ impl PendingInteractiveReplayState {
         );
     }
 
+    /// Same as [`clear_exec_approval`] but for MCP elicitation forms,
+    /// identified by server name + request ID.
     pub(super) fn clear_elicitation_request(
         &mut self,
         server_name: &str,

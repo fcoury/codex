@@ -868,6 +868,9 @@ impl BottomPane {
         !self.view_stack.is_empty()
     }
 
+    /// Walks the view stack bottom-to-top, applying `mutate` to each view.
+    /// Views that report `is_complete()` after mutation are removed.
+    /// Returns `true` if any view was affected, triggering a redraw.
     fn mutate_views<F>(&mut self, mut mutate: F) -> bool
     where
         F: FnMut(&mut dyn BottomPaneView) -> bool,
@@ -2053,10 +2056,10 @@ mod tests {
         });
 
         assert_eq!(pane.view_stack.len(), 2);
-        assert_eq!(pane.remove_request_permissions("perm-1"), true);
+        assert!(pane.remove_request_permissions("perm-1"));
         assert_eq!(pane.view_stack.len(), 1);
-        assert_eq!(pane.has_active_view(), true);
-        assert_eq!(pane.remove_request_user_input("input-1"), true);
-        assert_eq!(pane.has_active_view(), false);
+        assert!(pane.has_active_view());
+        assert!(pane.remove_request_user_input("input-1"));
+        assert!(!pane.has_active_view());
     }
 }

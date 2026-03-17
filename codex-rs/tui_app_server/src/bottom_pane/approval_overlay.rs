@@ -133,6 +133,9 @@ impl ApprovalOverlay {
         self.queue.push(req);
     }
 
+    /// Removes any queued or current request matching `predicate`. If the
+    /// current request is removed, advances to the next queued request (or
+    /// marks the overlay complete if the queue is empty).
     fn remove_request<F>(&mut self, predicate: F) -> bool
     where
         F: Fn(&ApprovalRequest) -> bool,

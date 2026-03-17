@@ -91,12 +91,16 @@ struct PendingExecApproval {
     thread_id: String,
 }
 
+/// Tracks a pending permission or file-change request (anything keyed by a
+/// single call/item ID that doesn't need response-format branching).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingThreadRequest {
     request_id: AppServerRequestId,
     thread_id: String,
 }
 
+/// Tracks a pending user-input request. Carries the `call_id` separately
+/// because the map key is the `turn_id`, but cleanup needs the `call_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingUserInputRequest {
     request_id: AppServerRequestId,
@@ -104,6 +108,8 @@ struct PendingUserInputRequest {
     call_id: String,
 }
 
+/// Tracks a pending MCP elicitation so `resolve_notification` can report the
+/// server name and synthesize the MCP `RequestId` for UI cleanup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingMcpRequest {
     thread_id: String,
@@ -450,6 +456,8 @@ impl PendingAppServerRequests {
         resolved_requests
     }
 
+    /// Removes exec approval entries matching `request_id` and returns the
+    /// cleanup keys the caller needs to clear the corresponding UI prompts.
     fn remove_exec_approvals(
         &mut self,
         request_id: &AppServerRequestId,
@@ -469,6 +477,9 @@ impl PendingAppServerRequests {
         resolved_exec_approvals
     }
 
+    /// Removes all non-exec pending entries (permissions, user input, MCP,
+    /// file changes) matching `request_id`. Also tracks rollback matchers
+    /// for MCP elicitation to prevent late legacy events from orphaning.
     fn remove_non_exec_requests(
         &mut self,
         request_id: &AppServerRequestId,
@@ -576,6 +587,8 @@ impl McpServerMatcher {
     }
 }
 
+/// Converts between the two ID types that happen to share the same
+/// string-or-integer shape but live in different protocol crates.
 fn app_server_request_id_to_mcp_request_id(request_id: &AppServerRequestId) -> McpRequestId {
     match request_id {
         AppServerRequestId::String(value) => McpRequestId::String(value.clone()),

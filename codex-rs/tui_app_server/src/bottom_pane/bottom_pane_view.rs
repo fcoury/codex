@@ -89,18 +89,25 @@ pub(crate) trait BottomPaneView: Renderable {
         Some(request)
     }
 
+    /// Attempts to remove a specific prompt from this view's request queue
+    /// or current request. Returns `true` if the view held the prompt and
+    /// removed it. Views that don't track the given prompt type return
+    /// `false` (the default), allowing the caller to walk the stack.
     fn remove_exec_approval(&mut self, _approval_id: &str) -> bool {
         false
     }
 
+    /// See [`remove_exec_approval`].
     fn remove_request_permissions(&mut self, _call_id: &str) -> bool {
         false
     }
 
+    /// See [`remove_exec_approval`].
     fn remove_request_user_input(&mut self, _call_id: &str) -> bool {
         false
     }
 
+    /// See [`remove_exec_approval`].
     fn remove_mcp_elicitation(&mut self, _server_name: &str, _request_id: &RequestId) -> bool {
         false
     }
