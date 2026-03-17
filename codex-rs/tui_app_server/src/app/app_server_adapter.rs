@@ -13,6 +13,38 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_protocol::ThreadId;
+use codex_protocol::approvals::ExecApprovalRequestEvent;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::items::AgentMessageContent;
+use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::ContextCompactionItem;
+use codex_protocol::items::ImageGenerationItem;
+use codex_protocol::items::PlanItem;
+use codex_protocol::items::ReasoningItem;
+use codex_protocol::items::TurnItem;
+use codex_protocol::items::UserMessageItem;
+use codex_protocol::items::WebSearchItem;
+use codex_protocol::protocol::AgentMessageDeltaEvent;
+use codex_protocol::protocol::AgentReasoningDeltaEvent;
+use codex_protocol::protocol::AgentReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::ErrorEvent;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::ItemStartedEvent;
+use codex_protocol::protocol::PlanDeltaEvent;
+use codex_protocol::protocol::RealtimeConversationClosedEvent;
+use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
+use codex_protocol::protocol::RealtimeConversationStartedEvent;
+use codex_protocol::protocol::RealtimeEvent;
+use codex_protocol::protocol::ThreadNameUpdatedEvent;
+use codex_protocol::protocol::TokenCountEvent;
+use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageInfo;
+use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnAbortedEvent;
+use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnStartedEvent;
 use serde_json::Value;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -159,6 +191,68 @@ impl App {
         app_server_client: &AppServerSession,
         request: ServerRequest,
     ) {
+        if app_server_client.is_remote()
+            && let ServerRequest::ExecCommandApproval { .. } = &request
+        {
+            match legacy_exec_approval_thread_event(&request) {
+                Ok((thread_id, event)) => {
+                    if let Some(unsupported) =
+                        self.pending_app_server_requests.note_server_request(&request)
+                    {
+                        tracing::warn!(
+                            request_id = ?unsupported.request_id,
+                            message = unsupported.message,
+                            "rejecting unsupported app-server request"
+                        );
+                        self.chat_widget
+                            .add_error_message(unsupported.message.clone());
+                        if let Err(err) = self
+                            .reject_app_server_request(
+                                app_server_client,
+                                unsupported.request_id,
+                                unsupported.message,
+                            )
+                            .await
+                        {
+                            tracing::warn!("{err}");
+                        }
+                        return;
+                    }
+
+                    let result = if self.primary_thread_id == Some(thread_id)
+                        || self.primary_thread_id.is_none()
+                    {
+                        self.enqueue_primary_event(event).await
+                    } else {
+                        self.enqueue_thread_event(thread_id, event).await
+                    };
+                    if let Err(err) = result {
+                        self.reject_failed_legacy_exec_approval_enqueue(
+                            app_server_client,
+                            &request,
+                            err,
+                        )
+                        .await;
+                    }
+                }
+                Err(message) => {
+                    tracing::warn!(request_id = ?request.id(), "{message}");
+                    self.chat_widget.add_error_message(message.clone());
+                    if let Err(err) = self
+                        .reject_app_server_request(
+                            app_server_client,
+                            request.id().clone(),
+                            message,
+                        )
+                        .await
+                    {
+                        tracing::warn!("{err}");
+                    }
+                }
+            }
+            return;
+        }
+
         if let Some(unsupported) = self
             .pending_app_server_requests
             .note_server_request(&request)
@@ -196,6 +290,23 @@ impl App {
             };
         if let Err(err) = result {
             tracing::warn!("failed to enqueue app-server request: {err}");
+        }
+    }
+
+    async fn reject_failed_legacy_exec_approval_enqueue(
+        &mut self,
+        app_server_client: &AppServerSession,
+        request: &ServerRequest,
+        err: String,
+    ) {
+        let message = format!("failed to surface legacy exec approval: {err}");
+        self.pending_app_server_requests.resolve_notification(request.id());
+        self.chat_widget.add_error_message(message.clone());
+        if let Err(reject_err) = self
+            .reject_app_server_request(app_server_client, request.id().clone(), message)
+            .await
+        {
+            tracing::warn!("{reject_err}");
         }
     }
 
@@ -281,6 +392,34 @@ impl App {
             .await
             .map_err(|err| format!("failed to reject app-server request: {err}"))
     }
+}
+
+fn legacy_exec_approval_thread_event(request: &ServerRequest) -> Result<(ThreadId, Event), String> {
+    let ServerRequest::ExecCommandApproval { params, .. } = request else {
+        return Err("expected legacy exec command approval".to_string());
+    };
+
+    Ok((
+        params.conversation_id,
+        Event {
+            id: String::new(),
+            msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+                call_id: params.call_id.clone(),
+                approval_id: params.approval_id.clone(),
+                turn_id: String::new(),
+                command: params.command.clone(),
+                cwd: params.cwd.clone(),
+                reason: params.reason.clone(),
+                network_approval_context: None,
+                proposed_execpolicy_amendment: None,
+                proposed_network_policy_amendments: None,
+                additional_permissions: None,
+                skill_metadata: None,
+                available_decisions: None,
+                parsed_cmd: params.parsed_cmd.clone(),
+            }),
+        },
+    ))
 }
 
 fn resolve_chatgpt_auth_tokens_refresh_response(
@@ -488,10 +627,24 @@ fn legacy_thread_notification(
 mod tests {
     use super::LegacyThreadNotification;
     use super::ServerNotificationThreadTarget;
+    use super::legacy_exec_approval_thread_event;
     use super::legacy_thread_notification;
+    use super::server_notification_thread_events;
     use super::server_notification_thread_target;
     use codex_app_server_protocol::JSONRPCNotification;
+    use super::thread_snapshot_events;
+    use super::turn_snapshot_events;
+    use codex_app_server_protocol::AgentMessageDeltaNotification;
+    use codex_app_server_protocol::CodexErrorInfo;
+    use codex_app_server_protocol::ExecCommandApprovalParams;
+    use codex_app_server_protocol::ItemCompletedNotification;
+    use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
+    use codex_app_server_protocol::RequestId as AppServerRequestId;
     use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ServerRequest;
+    use codex_app_server_protocol::Thread;
+    use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnStartedNotification;
     use codex_app_server_protocol::TurnStatus;
@@ -579,5 +732,25 @@ mod tests {
             server_notification_thread_target(&notification),
             ServerNotificationThreadTarget::InvalidThreadId("not-a-thread-id".to_string())
         );
+    }
+
+    #[test]
+    fn bridges_legacy_remote_exec_approval_requests() {
+        let request = ServerRequest::ExecCommandApproval {
+            request_id: AppServerRequestId::Integer(8),
+            params: ExecCommandApprovalParams {
+                conversation_id: ThreadId::new(),
+                call_id: "call-2".to_string(),
+                approval_id: Some("approval-2".to_string()),
+                command: vec!["pwd".to_string()],
+                cwd: "/tmp/project".into(),
+                reason: Some("Need shell".to_string()),
+                parsed_cmd: Vec::new(),
+            },
+        };
+
+        let (_, event) =
+            legacy_exec_approval_thread_event(&request).expect("request should bridge");
+        assert!(matches!(event.msg, EventMsg::ExecApprovalRequest(_)));
     }
 }
