@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use crate::app_command::AppCommand;
 use crate::app_command::AppCommandView;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
+use codex_app_server_protocol::ExecCommandApprovalResponse;
 use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
 use codex_app_server_protocol::GrantedPermissionProfile;
@@ -31,15 +33,33 @@ pub(super) struct UnsupportedAppServerRequest {
     pub(super) message: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ResolvedAppServerRequest {
+    pub(super) exec_approval_ids: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PendingAppServerRequests {
-    exec_approvals: HashMap<String, AppServerRequestId>,
+    exec_approvals: HashMap<String, PendingExecApproval>,
     file_change_approvals: HashMap<String, AppServerRequestId>,
     permissions_approvals: HashMap<String, AppServerRequestId>,
     user_inputs: HashMap<String, AppServerRequestId>,
     mcp_pending_by_matcher: HashMap<McpServerMatcher, AppServerRequestId>,
     mcp_legacy_by_matcher: HashMap<McpServerMatcher, McpLegacyRequestKey>,
     mcp_legacy_requests: HashMap<McpLegacyRequestKey, AppServerRequestId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExecApprovalResponseKind {
+    LegacyV1,
+    V2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingExecApproval {
+    approval_id: String,
+    request_id: AppServerRequestId,
+    response_kind: ExecApprovalResponseKind,
 }
 
 impl PendingAppServerRequests {
@@ -63,7 +83,14 @@ impl PendingAppServerRequests {
                     .approval_id
                     .clone()
                     .unwrap_or_else(|| params.item_id.clone());
-                self.exec_approvals.insert(approval_id, request_id.clone());
+                self.exec_approvals.insert(
+                    approval_id.clone(),
+                    PendingExecApproval {
+                        approval_id,
+                        request_id: request_id.clone(),
+                        response_kind: ExecApprovalResponseKind::V2,
+                    },
+                );
                 None
             }
             ServerRequest::FileChangeRequestApproval { request_id, params } => {
@@ -108,13 +135,20 @@ impl PendingAppServerRequests {
                             .to_string(),
                 })
             }
-            ServerRequest::ExecCommandApproval { request_id, .. } => {
-                Some(UnsupportedAppServerRequest {
-                    request_id: request_id.clone(),
-                    message:
-                        "Legacy command approval requests are not available in app-server TUI yet."
-                            .to_string(),
-                })
+            ServerRequest::ExecCommandApproval { request_id, params } => {
+                let approval_id = params
+                    .approval_id
+                    .clone()
+                    .unwrap_or_else(|| params.call_id.clone());
+                self.exec_approvals.insert(
+                    approval_id.clone(),
+                    PendingExecApproval {
+                        approval_id,
+                        request_id: request_id.clone(),
+                        response_kind: ExecApprovalResponseKind::LegacyV1,
+                    },
+                );
+                None
             }
         }
     }
@@ -152,15 +186,33 @@ impl PendingAppServerRequests {
             AppCommandView::ExecApproval { id, decision, .. } => self
                 .exec_approvals
                 .remove(id)
-                .map(|request_id| {
+                .map(|pending| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
-                        request_id,
-                        result: serde_json::to_value(CommandExecutionRequestApprovalResponse {
-                            decision: decision.clone().into(),
-                        })
-                        .map_err(|err| {
-                            format!("failed to serialize command execution approval response: {err}")
-                        })?,
+                        request_id: pending.request_id,
+                        result: match pending.response_kind {
+                            ExecApprovalResponseKind::LegacyV1 => {
+                                serde_json::to_value(ExecCommandApprovalResponse {
+                                    decision: decision.clone(),
+                                })
+                                .map_err(|err| {
+                                    format!(
+                                        "failed to serialize legacy command approval response: {err}"
+                                    )
+                                })?
+                            }
+                            ExecApprovalResponseKind::V2 => {
+                                serde_json::to_value(CommandExecutionRequestApprovalResponse {
+                                    decision: CommandExecutionApprovalDecision::from(
+                                        decision.clone(),
+                                    ),
+                                })
+                                .map_err(|err| {
+                                    format!(
+                                        "failed to serialize command execution approval response: {err}"
+                                    )
+                                })?
+                            }
+                        },
                     })
                 })
                 .transpose()?,
@@ -267,8 +319,18 @@ impl PendingAppServerRequests {
         Ok(resolution)
     }
 
-    pub(super) fn resolve_notification(&mut self, request_id: &AppServerRequestId) {
-        self.exec_approvals.retain(|_, value| value != request_id);
+    pub(super) fn resolve_notification(
+        &mut self,
+        request_id: &AppServerRequestId,
+    ) -> ResolvedAppServerRequest {
+        let exec_approval_ids = self
+            .exec_approvals
+            .values()
+            .filter(|pending| &pending.request_id == request_id)
+            .map(|pending| pending.approval_id.clone())
+            .collect();
+        self.exec_approvals
+            .retain(|_, value| &value.request_id != request_id);
         self.file_change_approvals
             .retain(|_, value| value != request_id);
         self.permissions_approvals
@@ -278,6 +340,7 @@ impl PendingAppServerRequests {
             .retain(|_, value| value != request_id);
         self.mcp_legacy_requests
             .retain(|_, value| value != request_id);
+        ResolvedAppServerRequest { exec_approval_ids }
     }
 }
 
@@ -360,6 +423,7 @@ fn file_change_decision(decision: &ReviewDecision) -> Result<FileChangeApprovalD
 mod tests {
     use super::PendingAppServerRequests;
     use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
+    use codex_app_server_protocol::ExecCommandApprovalParams;
     use codex_app_server_protocol::FileChangeRequestApprovalParams;
     use codex_app_server_protocol::McpElicitationObjectType;
     use codex_app_server_protocol::McpElicitationSchema;
@@ -422,6 +486,138 @@ mod tests {
 
         assert_eq!(resolution.request_id, AppServerRequestId::Integer(41));
         assert_eq!(resolution.result, json!({ "decision": "accept" }));
+    }
+
+    #[test]
+    fn resolves_exec_approval_without_explicit_approval_id() {
+        let mut pending = PendingAppServerRequests::default();
+        let request = ServerRequest::CommandExecutionRequestApproval {
+            request_id: AppServerRequestId::Integer(43),
+            params: CommandExecutionRequestApprovalParams {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "call-1".to_string(),
+                approval_id: None,
+                reason: None,
+                network_approval_context: None,
+                command: Some("ls".to_string()),
+                cwd: None,
+                command_actions: None,
+                additional_permissions: None,
+                skill_metadata: None,
+                proposed_execpolicy_amendment: None,
+                proposed_network_policy_amendments: None,
+                available_decisions: None,
+            },
+        };
+
+        assert_eq!(pending.note_server_request(&request), None);
+
+        let resolution = pending
+            .take_resolution(&Op::ExecApproval {
+                id: "call-1".to_string(),
+                turn_id: None,
+                decision: ReviewDecision::Approved,
+            })
+            .expect("resolution should serialize")
+            .expect("request should be pending");
+
+        assert_eq!(resolution.request_id, AppServerRequestId::Integer(43));
+        assert_eq!(resolution.result, json!({ "decision": "accept" }));
+    }
+
+    #[test]
+    fn resolves_legacy_exec_approval_through_app_server_request_id() {
+        let mut pending = PendingAppServerRequests::default();
+        let request = ServerRequest::ExecCommandApproval {
+            request_id: AppServerRequestId::Integer(42),
+            params: ExecCommandApprovalParams {
+                conversation_id: codex_protocol::ThreadId::new(),
+                call_id: "call-2".to_string(),
+                approval_id: Some("approval-2".to_string()),
+                command: vec!["pwd".to_string()],
+                cwd: "/tmp/project".into(),
+                reason: Some("Need shell access".to_string()),
+                parsed_cmd: Vec::new(),
+            },
+        };
+
+        assert_eq!(pending.note_server_request(&request), None);
+
+        let resolution = pending
+            .take_resolution(&Op::ExecApproval {
+                id: "approval-2".to_string(),
+                turn_id: None,
+                decision: ReviewDecision::Approved,
+            })
+            .expect("resolution should serialize")
+            .expect("request should be pending");
+
+        assert_eq!(resolution.request_id, AppServerRequestId::Integer(42));
+        assert_eq!(resolution.result, json!({ "decision": "approved" }));
+    }
+
+    #[test]
+    fn resolves_legacy_exec_approval_without_explicit_approval_id() {
+        let mut pending = PendingAppServerRequests::default();
+        let request = ServerRequest::ExecCommandApproval {
+            request_id: AppServerRequestId::Integer(44),
+            params: ExecCommandApprovalParams {
+                conversation_id: codex_protocol::ThreadId::new(),
+                call_id: "call-3".to_string(),
+                approval_id: None,
+                command: vec!["pwd".to_string()],
+                cwd: "/tmp/project".into(),
+                reason: Some("Need shell access".to_string()),
+                parsed_cmd: Vec::new(),
+            },
+        };
+
+        assert_eq!(pending.note_server_request(&request), None);
+
+        let resolution = pending
+            .take_resolution(&Op::ExecApproval {
+                id: "call-3".to_string(),
+                turn_id: None,
+                decision: ReviewDecision::Approved,
+            })
+            .expect("resolution should serialize")
+            .expect("request should be pending");
+
+        assert_eq!(resolution.request_id, AppServerRequestId::Integer(44));
+        assert_eq!(resolution.result, json!({ "decision": "approved" }));
+    }
+
+    #[test]
+    fn resolve_notification_returns_resolved_exec_approval_ids() {
+        let mut pending = PendingAppServerRequests::default();
+        let request = ServerRequest::ExecCommandApproval {
+            request_id: AppServerRequestId::Integer(45),
+            params: ExecCommandApprovalParams {
+                conversation_id: codex_protocol::ThreadId::new(),
+                call_id: "call-4".to_string(),
+                approval_id: Some("approval-4".to_string()),
+                command: vec!["pwd".to_string()],
+                cwd: "/tmp/project".into(),
+                reason: Some("Need shell access".to_string()),
+                parsed_cmd: Vec::new(),
+            },
+        };
+
+        assert_eq!(pending.note_server_request(&request), None);
+
+        let resolved = pending.resolve_notification(&AppServerRequestId::Integer(45));
+        assert_eq!(resolved.exec_approval_ids, vec!["approval-4".to_string()]);
+        assert_eq!(
+            pending
+                .take_resolution(&Op::ExecApproval {
+                    id: "approval-4".to_string(),
+                    turn_id: None,
+                    decision: ReviewDecision::Approved,
+                })
+                .expect("resolution should serialize"),
+            None
+        );
     }
 
     #[test]

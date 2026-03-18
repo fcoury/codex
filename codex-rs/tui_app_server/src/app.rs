@@ -129,6 +129,7 @@ use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
 use self::app_server_adapter::thread_snapshot_events;
 use self::app_server_requests::PendingAppServerRequests;
+use self::app_server_requests::ResolvedAppServerRequest;
 use self::pending_interactive_replay::PendingInteractiveReplayState;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
@@ -425,6 +426,11 @@ impl ThreadEventStore {
         T: Into<AppCommand>,
     {
         self.pending_interactive_replay.note_outbound_op(op);
+    }
+
+    fn note_exec_approval_resolved(&mut self, approval_id: &str) {
+        self.pending_interactive_replay
+            .note_exec_approval_resolved(approval_id);
     }
 
     fn op_can_change_pending_replay_state<T>(op: T) -> bool
@@ -1377,6 +1383,32 @@ impl App {
             return;
         };
         self.note_thread_outbound_op(thread_id, op).await;
+    }
+
+    async fn note_app_server_request_resolved(&mut self, resolved: ResolvedAppServerRequest) {
+        if resolved.exec_approval_ids.is_empty() {
+            return;
+        }
+
+        self.pending_primary_events.retain(|event| {
+            let EventMsg::ExecApprovalRequest(approval) = &event.msg else {
+                return true;
+            };
+            !resolved
+                .exec_approval_ids
+                .contains(&approval.effective_approval_id())
+        });
+        self.chat_widget
+            .remove_resolved_exec_approvals(&resolved.exec_approval_ids);
+
+        for channel in self.thread_event_channels.values() {
+            let mut store = channel.store.lock().await;
+            for approval_id in &resolved.exec_approval_ids {
+                store.note_exec_approval_resolved(approval_id);
+            }
+        }
+
+        self.refresh_pending_thread_approvals().await;
     }
 
     async fn active_turn_id_for_thread(&self, thread_id: ThreadId) -> Option<String> {
@@ -4948,6 +4980,80 @@ mod tests {
         }
 
         panic!("expected approval action to submit a thread-scoped op");
+    }
+
+    #[tokio::test]
+    async fn resolved_buffered_primary_exec_approval_does_not_replay_after_session_configured()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = ThreadId::new();
+        let approval_event = Event {
+            id: "approval-event".to_string(),
+            msg: EventMsg::ExecApprovalRequest(
+                codex_protocol::protocol::ExecApprovalRequestEvent {
+                    call_id: "call-1".to_string(),
+                    approval_id: Some("approval-1".to_string()),
+                    turn_id: String::new(),
+                    command: vec!["echo".to_string(), "hello".to_string()],
+                    cwd: PathBuf::from("/tmp/project"),
+                    reason: Some("needs approval".to_string()),
+                    network_approval_context: None,
+                    proposed_execpolicy_amendment: None,
+                    proposed_network_policy_amendments: None,
+                    additional_permissions: None,
+                    skill_metadata: None,
+                    available_decisions: None,
+                    parsed_cmd: Vec::new(),
+                },
+            ),
+        };
+        let session_configured_event = Event {
+            id: "session-configured".to_string(),
+            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                session_id: thread_id,
+                forked_from_id: None,
+                thread_name: None,
+                model: "gpt-test".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                cwd: PathBuf::from("/tmp/project"),
+                reasoning_effort: None,
+                history_log_id: 0,
+                history_entry_count: 0,
+                initial_messages: None,
+                network_proxy: None,
+                rollout_path: Some(PathBuf::new()),
+            }),
+        };
+
+        app.enqueue_primary_event(approval_event).await?;
+        app.note_app_server_request_resolved(ResolvedAppServerRequest {
+            exec_approval_ids: vec!["approval-1".to_string()],
+        })
+        .await;
+        app.enqueue_primary_event(session_configured_event).await?;
+
+        let rx = app
+            .active_thread_rx
+            .as_mut()
+            .expect("primary thread receiver should be active");
+        let first_event = time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timed out waiting for session configured event")
+            .expect("channel closed unexpectedly");
+
+        assert!(matches!(first_event.msg, EventMsg::SessionConfigured(_)));
+        assert!(
+            time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "resolved buffered approval should not replay after session configured"
+        );
+
+        Ok(())
     }
 
     #[tokio::test]
