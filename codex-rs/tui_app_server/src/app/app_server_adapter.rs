@@ -165,7 +165,7 @@ impl App {
         request: ServerRequest,
     ) {
         if self
-            .try_handle_legacy_remote_exec_approval_request(app_server_client, &request)
+            .try_handle_legacy_exec_approval_request(app_server_client, &request)
             .await
         {
             return;
@@ -211,14 +211,12 @@ impl App {
         }
     }
 
-    async fn try_handle_legacy_remote_exec_approval_request(
+    async fn try_handle_legacy_exec_approval_request(
         &mut self,
         app_server_client: &AppServerSession,
         request: &ServerRequest,
     ) -> bool {
-        if !app_server_client.is_remote()
-            || !matches!(request, ServerRequest::ExecCommandApproval { .. })
-        {
+        if !matches!(request, ServerRequest::ExecCommandApproval { .. }) {
             return false;
         }
 
