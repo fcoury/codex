@@ -164,63 +164,10 @@ impl App {
         app_server_client: &AppServerSession,
         request: ServerRequest,
     ) {
-        if app_server_client.is_remote()
-            && let ServerRequest::ExecCommandApproval { .. } = &request
+        if self
+            .try_handle_legacy_remote_exec_approval_request(app_server_client, &request)
+            .await
         {
-            match bridge_legacy_exec_approval_request(&request) {
-                Ok((thread_id, bridged_request)) => {
-                    if let Some(unsupported) = self
-                        .pending_app_server_requests
-                        .note_server_request(&request)
-                    {
-                        tracing::warn!(
-                            request_id = ?unsupported.request_id,
-                            message = unsupported.message,
-                            "rejecting unsupported app-server request"
-                        );
-                        self.chat_widget
-                            .add_error_message(unsupported.message.clone());
-                        if let Err(err) = self
-                            .reject_app_server_request(
-                                app_server_client,
-                                unsupported.request_id,
-                                unsupported.message,
-                            )
-                            .await
-                        {
-                            tracing::warn!("{err}");
-                        }
-                        return;
-                    }
-
-                    let result = if self.primary_thread_id == Some(thread_id)
-                        || self.primary_thread_id.is_none()
-                    {
-                        self.enqueue_primary_thread_request(bridged_request).await
-                    } else {
-                        self.enqueue_thread_request(thread_id, bridged_request)
-                            .await
-                    };
-                    if let Err(err) = result {
-                        self.reject_failed_legacy_exec_approval_enqueue(
-                            app_server_client,
-                            &request,
-                            err.to_string(),
-                        )
-                        .await;
-                    }
-                }
-                Err(message) => {
-                    tracing::warn!(request_id = ?request.id(), "{message}");
-                    self.chat_widget.add_error_message(message.clone());
-                    if let Err(err) = self
-                        .reject_app_server_request(app_server_client, request.id().clone(), message)
-                        .await
-                    {
-                        tracing::warn!("{err}");
-                    }
-                }
-            }
             return;
         }
 
@@ -262,6 +209,75 @@ impl App {
         if let Err(err) = result {
             tracing::warn!("failed to enqueue app-server request: {err}");
         }
+    }
+
+    async fn try_handle_legacy_remote_exec_approval_request(
+        &mut self,
+        app_server_client: &AppServerSession,
+        request: &ServerRequest,
+    ) -> bool {
+        if !app_server_client.is_remote()
+            || !matches!(request, ServerRequest::ExecCommandApproval { .. })
+        {
+            return false;
+        }
+
+        match bridge_legacy_exec_approval_request(request) {
+            Ok((thread_id, bridged_request)) => {
+                if let Some(unsupported) = self
+                    .pending_app_server_requests
+                    .note_server_request(request)
+                {
+                    tracing::warn!(
+                        request_id = ?unsupported.request_id,
+                        message = unsupported.message,
+                        "rejecting unsupported app-server request"
+                    );
+                    self.chat_widget
+                        .add_error_message(unsupported.message.clone());
+                    if let Err(err) = self
+                        .reject_app_server_request(
+                            app_server_client,
+                            unsupported.request_id,
+                            unsupported.message,
+                        )
+                        .await
+                    {
+                        tracing::warn!("{err}");
+                    }
+                    return true;
+                }
+
+                let result = if self.primary_thread_id == Some(thread_id)
+                    || self.primary_thread_id.is_none()
+                {
+                    self.enqueue_primary_thread_request(bridged_request).await
+                } else {
+                    self.enqueue_thread_request(thread_id, bridged_request)
+                        .await
+                };
+                if let Err(err) = result {
+                    self.reject_failed_legacy_exec_approval_enqueue(
+                        app_server_client,
+                        request,
+                        err.to_string(),
+                    )
+                    .await;
+                }
+            }
+            Err(message) => {
+                tracing::warn!(request_id = ?request.id(), "{message}");
+                self.chat_widget.add_error_message(message.clone());
+                if let Err(err) = self
+                    .reject_app_server_request(app_server_client, request.id().clone(), message)
+                    .await
+                {
+                    tracing::warn!("{err}");
+                }
+            }
+        }
+
+        true
     }
 
     async fn reject_failed_legacy_exec_approval_enqueue(
