@@ -1,8 +1,30 @@
+//! Tracks pending app-server requests and correlates them with user
+//! decisions to produce JSON-RPC response payloads.
+//!
+//! When the remote app-server needs interactive input (command approval,
+//! file-change approval, permission grant, user-input prompt, or MCP
+//! elicitation), it sends a `ServerRequest` with a `request_id`. This
+//! module records that request, waits for the TUI to produce an
+//! `AppCommand` with the user's decision, and then builds the
+//! `AppServerRequestResolution` that the caller sends back as a
+//! JSON-RPC response.
+//!
+//! ## MCP elicitation correlation
+//!
+//! MCP elicitation has a two-phase correlation problem: the legacy event
+//! path delivers an `ElicitationRequest` event (with a core
+//! `McpRequestId`), while the server-request path delivers a
+//! `McpServerElicitationRequest` (with an app-server `RequestId`).
+//! `McpServerMatcher` hashes on `(server_name, turn_id, request_body)`
+//! to pair these two regardless of arrival order.
+
 use std::collections::HashMap;
 
 use crate::app_command::AppCommand;
 use crate::app_command::AppCommandView;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
+use codex_app_server_protocol::ExecCommandApprovalResponse;
 use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
 use codex_app_server_protocol::GrantedPermissionProfile;
@@ -31,14 +53,46 @@ pub(super) struct UnsupportedAppServerRequest {
     pub(super) message: String,
 }
 
+/// Discriminates between the two wire formats for exec-approval responses.
+///
+/// - `LegacyV1` — older `ExecCommandApproval` path; serializes to
+///   `ExecCommandApprovalResponse` with `{ "decision": "approved" }`.
+/// - `V2` — current `CommandExecutionRequestApproval` path; serializes
+///   to `CommandExecutionRequestApprovalResponse` with
+///   `{ "decision": "accept" }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExecApprovalResponseKind {
+    LegacyV1,
+    V2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingExecApproval {
+    request_id: AppServerRequestId,
+    response_kind: ExecApprovalResponseKind,
+}
+
+/// In-memory registry of app-server requests awaiting user decisions.
+///
+/// Each request type has its own index keyed by the identifier the TUI
+/// will use to look it up when the user makes a choice (approval ID,
+/// item ID, turn ID, etc.). The maps are drained by `take_resolution`
+/// and bulk-cleared on turn boundaries or disconnects.
 #[derive(Debug, Default)]
 pub(super) struct PendingAppServerRequests {
-    exec_approvals: HashMap<String, AppServerRequestId>,
+    /// Keyed by approval-ID (or item-ID fallback).
+    exec_approvals: HashMap<String, PendingExecApproval>,
+    /// Keyed by item-ID.
     file_change_approvals: HashMap<String, AppServerRequestId>,
+    /// Keyed by item-ID.
     permissions_approvals: HashMap<String, AppServerRequestId>,
+    /// Keyed by turn-ID.
     user_inputs: HashMap<String, AppServerRequestId>,
+    /// V2 server-requests that arrived before the matching legacy event.
     mcp_pending_by_matcher: HashMap<McpServerMatcher, AppServerRequestId>,
+    /// Legacy events that arrived before the matching V2 server-request.
     mcp_legacy_by_matcher: HashMap<McpServerMatcher, McpLegacyRequestKey>,
+    /// Fully correlated MCP requests ready for resolution.
     mcp_legacy_requests: HashMap<McpLegacyRequestKey, AppServerRequestId>,
 }
 
@@ -56,6 +110,7 @@ impl PendingAppServerRequests {
     pub(super) fn note_server_request(
         &mut self,
         request: &ServerRequest,
+        allow_legacy_exec_approvals: bool,
     ) -> Option<UnsupportedAppServerRequest> {
         match request {
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
@@ -63,7 +118,13 @@ impl PendingAppServerRequests {
                     .approval_id
                     .clone()
                     .unwrap_or_else(|| params.item_id.clone());
-                self.exec_approvals.insert(approval_id, request_id.clone());
+                self.exec_approvals.insert(
+                    approval_id,
+                    PendingExecApproval {
+                        request_id: request_id.clone(),
+                        response_kind: ExecApprovalResponseKind::V2,
+                    },
+                );
                 None
             }
             ServerRequest::FileChangeRequestApproval { request_id, params } => {
@@ -108,17 +169,51 @@ impl PendingAppServerRequests {
                             .to_string(),
                 })
             }
-            ServerRequest::ExecCommandApproval { request_id, .. } => {
-                Some(UnsupportedAppServerRequest {
-                    request_id: request_id.clone(),
-                    message:
-                        "Legacy command approval requests are not available in app-server TUI yet."
+            ServerRequest::ExecCommandApproval { request_id, params } => {
+                if !allow_legacy_exec_approvals {
+                    Some(UnsupportedAppServerRequest {
+                        request_id: request_id.clone(),
+                        message: "Legacy command approval requests are not available in app-server TUI yet."
                             .to_string(),
-                })
+                    })
+                } else {
+                    let approval_id = params
+                        .approval_id
+                        .clone()
+                        .unwrap_or_else(|| params.call_id.clone());
+                    self.exec_approvals.insert(
+                        approval_id,
+                        PendingExecApproval {
+                            request_id: request_id.clone(),
+                            response_kind: ExecApprovalResponseKind::LegacyV1,
+                        },
+                    );
+                    None
+                }
             }
         }
     }
 
+    pub(super) fn clear_request(&mut self, request_id: &AppServerRequestId) {
+        self.exec_approvals
+            .retain(|_, value| &value.request_id != request_id);
+        self.file_change_approvals
+            .retain(|_, value| value != request_id);
+        self.permissions_approvals
+            .retain(|_, value| value != request_id);
+        self.user_inputs.retain(|_, value| value != request_id);
+        self.mcp_pending_by_matcher
+            .retain(|_, value| value != request_id);
+        self.mcp_legacy_requests
+            .retain(|_, value| value != request_id);
+    }
+
+    /// Record a legacy event so it can be correlated with a future
+    /// `McpServerElicitationRequest` server-request.
+    ///
+    /// Only `ElicitationRequest` events need this treatment; all other
+    /// legacy event types are either fully handled by the legacy path or
+    /// have a 1:1 server-request equivalent that carries its own ID.
     pub(super) fn note_legacy_event(&mut self, event: &Event) {
         let EventMsg::ElicitationRequest(request) = &event.msg else {
             return;
@@ -152,15 +247,33 @@ impl PendingAppServerRequests {
             AppCommandView::ExecApproval { id, decision, .. } => self
                 .exec_approvals
                 .remove(id)
-                .map(|request_id| {
+                .map(|pending| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
-                        request_id,
-                        result: serde_json::to_value(CommandExecutionRequestApprovalResponse {
-                            decision: decision.clone().into(),
-                        })
-                        .map_err(|err| {
-                            format!("failed to serialize command execution approval response: {err}")
-                        })?,
+                        request_id: pending.request_id,
+                        result: match pending.response_kind {
+                            ExecApprovalResponseKind::LegacyV1 => {
+                                serde_json::to_value(ExecCommandApprovalResponse {
+                                    decision: decision.clone(),
+                                })
+                                .map_err(|err| {
+                                    format!(
+                                        "failed to serialize legacy command approval response: {err}"
+                                    )
+                                })?
+                            }
+                            ExecApprovalResponseKind::V2 => {
+                                serde_json::to_value(CommandExecutionRequestApprovalResponse {
+                                    decision: CommandExecutionApprovalDecision::from(
+                                        decision.clone(),
+                                    ),
+                                })
+                                .map_err(|err| {
+                                    format!(
+                                        "failed to serialize command execution approval response: {err}"
+                                    )
+                                })?
+                            }
+                        },
                     })
                 })
                 .transpose()?,
@@ -268,7 +381,8 @@ impl PendingAppServerRequests {
     }
 
     pub(super) fn resolve_notification(&mut self, request_id: &AppServerRequestId) {
-        self.exec_approvals.retain(|_, value| value != request_id);
+        self.exec_approvals
+            .retain(|_, value| &value.request_id != request_id);
         self.file_change_approvals
             .retain(|_, value| value != request_id);
         self.permissions_approvals
@@ -281,10 +395,18 @@ impl PendingAppServerRequests {
     }
 }
 
+/// Content-based key for pairing a legacy `ElicitationRequest` event
+/// with its corresponding `McpServerElicitationRequest` server-request.
+///
+/// Both sides serialize the elicitation request body to a canonical JSON
+/// string so they produce the same matcher regardless of which arrives
+/// first. The `turn_id` further scopes the match to the correct turn.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct McpServerMatcher {
     server_name: String,
     turn_id: Option<String>,
+    /// Canonical JSON serialization of the elicitation request body,
+    /// used for equality comparison.
     request: String,
 }
 
@@ -335,6 +457,8 @@ impl McpServerMatcher {
     }
 }
 
+/// Identifies a legacy MCP elicitation by the values the TUI uses to
+/// resolve it: the server name and the core-protocol request ID.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct McpLegacyRequestKey {
     server_name: String,
@@ -360,6 +484,7 @@ fn file_change_decision(decision: &ReviewDecision) -> Result<FileChangeApprovalD
 mod tests {
     use super::PendingAppServerRequests;
     use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
+    use codex_app_server_protocol::ExecCommandApprovalParams;
     use codex_app_server_protocol::FileChangeRequestApprovalParams;
     use codex_app_server_protocol::McpElicitationObjectType;
     use codex_app_server_protocol::McpElicitationSchema;
@@ -409,7 +534,10 @@ mod tests {
             },
         };
 
-        assert_eq!(pending.note_server_request(&request), None);
+        assert_eq!(
+            pending.note_server_request(&request, /*allow_legacy_exec_approvals*/ false),
+            None
+        );
 
         let resolution = pending
             .take_resolution(&Op::ExecApproval {
@@ -425,35 +553,75 @@ mod tests {
     }
 
     #[test]
+    fn resolves_legacy_exec_approval_through_app_server_request_id() {
+        let mut pending = PendingAppServerRequests::default();
+        let request = ServerRequest::ExecCommandApproval {
+            request_id: AppServerRequestId::Integer(42),
+            params: ExecCommandApprovalParams {
+                conversation_id: codex_protocol::ThreadId::new(),
+                call_id: "call-2".to_string(),
+                approval_id: Some("approval-2".to_string()),
+                command: vec!["pwd".to_string()],
+                cwd: "/tmp/project".into(),
+                reason: Some("Need shell access".to_string()),
+                parsed_cmd: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            pending.note_server_request(&request, /*allow_legacy_exec_approvals*/ true),
+            None
+        );
+
+        let resolution = pending
+            .take_resolution(&Op::ExecApproval {
+                id: "approval-2".to_string(),
+                turn_id: None,
+                decision: ReviewDecision::Approved,
+            })
+            .expect("resolution should serialize")
+            .expect("request should be pending");
+
+        assert_eq!(resolution.request_id, AppServerRequestId::Integer(42));
+        assert_eq!(resolution.result, json!({ "decision": "approved" }));
+    }
+
+    #[test]
     fn resolves_permissions_and_user_input_through_app_server_request_id() {
         let mut pending = PendingAppServerRequests::default();
 
         assert_eq!(
-            pending.note_server_request(&ServerRequest::PermissionsRequestApproval {
-                request_id: AppServerRequestId::Integer(7),
-                params: PermissionsRequestApprovalParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "perm-1".to_string(),
-                    reason: None,
-                    permissions: serde_json::from_value(json!({
-                        "network": { "enabled": null }
-                    }))
-                    .expect("valid permissions"),
+            pending.note_server_request(
+                &ServerRequest::PermissionsRequestApproval {
+                    request_id: AppServerRequestId::Integer(7),
+                    params: PermissionsRequestApprovalParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        item_id: "perm-1".to_string(),
+                        reason: None,
+                        permissions: serde_json::from_value(json!({
+                            "network": { "enabled": null }
+                        }))
+                        .expect("valid permissions"),
+                    },
                 },
-            }),
+                /*allow_legacy_exec_approvals*/ false,
+            ),
             None
         );
         assert_eq!(
-            pending.note_server_request(&ServerRequest::ToolRequestUserInput {
-                request_id: AppServerRequestId::Integer(8),
-                params: ToolRequestUserInputParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-2".to_string(),
-                    item_id: "tool-1".to_string(),
-                    questions: Vec::new(),
+            pending.note_server_request(
+                &ServerRequest::ToolRequestUserInput {
+                    request_id: AppServerRequestId::Integer(8),
+                    params: ToolRequestUserInputParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-2".to_string(),
+                        item_id: "tool-1".to_string(),
+                        questions: Vec::new(),
+                    },
                 },
-            }),
+                /*allow_legacy_exec_approvals*/ false,
+            ),
             None
         );
 
@@ -536,24 +704,27 @@ mod tests {
         });
 
         assert_eq!(
-            pending.note_server_request(&ServerRequest::McpServerElicitationRequest {
-                request_id: AppServerRequestId::Integer(12),
-                params: McpServerElicitationRequestParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: Some("turn-1".to_string()),
-                    server_name: "example".to_string(),
-                    request: McpServerElicitationRequest::Form {
-                        meta: None,
-                        message: "Need input".to_string(),
-                        requested_schema: McpElicitationSchema {
-                            schema_uri: None,
-                            type_: McpElicitationObjectType::Object,
-                            properties: BTreeMap::new(),
-                            required: None,
+            pending.note_server_request(
+                &ServerRequest::McpServerElicitationRequest {
+                    request_id: AppServerRequestId::Integer(12),
+                    params: McpServerElicitationRequestParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: Some("turn-1".to_string()),
+                        server_name: "example".to_string(),
+                        request: McpServerElicitationRequest::Form {
+                            meta: None,
+                            message: "Need input".to_string(),
+                            requested_schema: McpElicitationSchema {
+                                schema_uri: None,
+                                type_: McpElicitationObjectType::Object,
+                                properties: BTreeMap::new(),
+                                required: None,
+                            },
                         },
                     },
                 },
-            }),
+                /*allow_legacy_exec_approvals*/ false,
+            ),
             None
         );
 
@@ -583,16 +754,19 @@ mod tests {
     fn rejects_dynamic_tool_calls_as_unsupported() {
         let mut pending = PendingAppServerRequests::default();
         let unsupported = pending
-            .note_server_request(&ServerRequest::DynamicToolCall {
-                request_id: AppServerRequestId::Integer(99),
-                params: codex_app_server_protocol::DynamicToolCallParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    call_id: "tool-1".to_string(),
-                    tool: "tool".to_string(),
-                    arguments: json!({}),
+            .note_server_request(
+                &ServerRequest::DynamicToolCall {
+                    request_id: AppServerRequestId::Integer(99),
+                    params: codex_app_server_protocol::DynamicToolCallParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        call_id: "tool-1".to_string(),
+                        tool: "tool".to_string(),
+                        arguments: json!({}),
+                    },
                 },
-            })
+                /*allow_legacy_exec_approvals*/ false,
+            )
             .expect("dynamic tool calls should be rejected");
 
         assert_eq!(unsupported.request_id, AppServerRequestId::Integer(99));
@@ -607,13 +781,17 @@ mod tests {
         let mut pending = PendingAppServerRequests::default();
 
         assert_eq!(
-            pending.note_server_request(&ServerRequest::ChatgptAuthTokensRefresh {
-                request_id: AppServerRequestId::Integer(100),
-                params: codex_app_server_protocol::ChatgptAuthTokensRefreshParams {
-                    reason: codex_app_server_protocol::ChatgptAuthTokensRefreshReason::Unauthorized,
-                    previous_account_id: Some("workspace-1".to_string()),
+            pending.note_server_request(
+                &ServerRequest::ChatgptAuthTokensRefresh {
+                    request_id: AppServerRequestId::Integer(100),
+                    params: codex_app_server_protocol::ChatgptAuthTokensRefreshParams {
+                        reason:
+                            codex_app_server_protocol::ChatgptAuthTokensRefreshReason::Unauthorized,
+                        previous_account_id: Some("workspace-1".to_string()),
+                    },
                 },
-            }),
+                /*allow_legacy_exec_approvals*/ false,
+            ),
             None
         );
     }
@@ -622,16 +800,19 @@ mod tests {
     fn rejects_invalid_patch_decisions_for_file_change_requests() {
         let mut pending = PendingAppServerRequests::default();
         assert_eq!(
-            pending.note_server_request(&ServerRequest::FileChangeRequestApproval {
-                request_id: AppServerRequestId::Integer(13),
-                params: FileChangeRequestApprovalParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "patch-1".to_string(),
-                    reason: None,
-                    grant_root: None,
+            pending.note_server_request(
+                &ServerRequest::FileChangeRequestApproval {
+                    request_id: AppServerRequestId::Integer(13),
+                    params: FileChangeRequestApprovalParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        item_id: "patch-1".to_string(),
+                        reason: None,
+                        grant_root: None,
+                    },
                 },
-            }),
+                /*allow_legacy_exec_approvals*/ false,
+            ),
             None
         );
 
