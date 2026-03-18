@@ -1379,6 +1379,8 @@ impl App {
                 .exec_approval_ids
                 .contains(&approval.effective_approval_id())
         });
+        self.chat_widget
+            .remove_resolved_exec_approvals(&resolved.exec_approval_ids);
 
         for channel in self.thread_event_channels.values() {
             let mut store = channel.store.lock().await;
