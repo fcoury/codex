@@ -130,8 +130,10 @@ impl App {
     ) {
         match &notification {
             ServerNotification::ServerRequestResolved(notification) => {
-                self.pending_app_server_requests
+                let resolved = self
+                    .pending_app_server_requests
                     .resolve_notification(&notification.request_id);
+                self.note_app_server_request_resolved(resolved).await;
             }
             ServerNotification::AccountRateLimitsUpdated(notification) => {
                 self.chat_widget.on_rate_limit_snapshot(Some(
@@ -300,7 +302,8 @@ impl App {
         err: String,
     ) {
         let message = format!("failed to surface legacy exec approval: {err}");
-        self.pending_app_server_requests.resolve_notification(request.id());
+        let resolved = self.pending_app_server_requests.resolve_notification(request.id());
+        self.note_app_server_request_resolved(resolved).await;
         self.chat_widget.add_error_message(message.clone());
         if let Err(reject_err) = self
             .reject_app_server_request(app_server_client, request.id().clone(), message)
