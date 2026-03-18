@@ -142,6 +142,14 @@ impl PendingInteractiveReplayState {
         }
     }
 
+    pub(super) fn note_exec_approval_resolved(&mut self, approval_id: &str) {
+        self.exec_approval_call_ids.remove(approval_id);
+        Self::remove_call_id_from_turn_map(
+            &mut self.exec_approval_call_ids_by_turn_id,
+            approval_id,
+        );
+    }
+
     pub(super) fn note_event(&mut self, event: &Event) {
         match &event.msg {
             EventMsg::ExecApprovalRequest(ev) => {
@@ -711,6 +719,40 @@ mod tests {
             decision: codex_protocol::protocol::ReviewDecision::Approved,
         });
 
+        assert_eq!(store.has_pending_thread_approvals(), false);
+    }
+
+    #[test]
+    fn thread_event_snapshot_drops_exec_approval_after_server_resolution() {
+        let mut store = ThreadEventStore::new(8);
+        store.push_event(Event {
+            id: "ev-1".to_string(),
+            msg: EventMsg::ExecApprovalRequest(
+                codex_protocol::protocol::ExecApprovalRequestEvent {
+                    call_id: "call-1".to_string(),
+                    approval_id: Some("approval-1".to_string()),
+                    turn_id: String::new(),
+                    command: vec!["echo".to_string(), "hi".to_string()],
+                    cwd: PathBuf::from("/tmp"),
+                    reason: None,
+                    network_approval_context: None,
+                    proposed_execpolicy_amendment: None,
+                    proposed_network_policy_amendments: None,
+                    additional_permissions: None,
+                    skill_metadata: None,
+                    available_decisions: None,
+                    parsed_cmd: Vec::new(),
+                },
+            ),
+        });
+
+        store.note_exec_approval_resolved("approval-1");
+
+        let snapshot = store.snapshot();
+        assert!(
+            snapshot.events.is_empty(),
+            "server-resolved exec approval prompt should not replay on thread switch"
+        );
         assert_eq!(store.has_pending_thread_approvals(), false);
     }
 

@@ -76,8 +76,10 @@ impl App {
             }
             AppServerEvent::ServerNotification(notification) => match notification {
                 ServerNotification::ServerRequestResolved(notification) => {
-                    self.pending_app_server_requests
+                    let resolved = self
+                        .pending_app_server_requests
                         .resolve_notification(&notification.request_id);
+                    self.note_app_server_request_resolved(resolved).await;
                 }
                 ServerNotification::AccountRateLimitsUpdated(notification) => {
                     self.chat_widget.on_rate_limit_snapshot(Some(
@@ -198,16 +200,29 @@ impl App {
                                     && self.primary_thread_id == Some(thread_id)
                             {
                                 if let Err(err) = self.enqueue_primary_event(event).await {
-                                    tracing::warn!(
-                                        "failed to enqueue primary app-server server request: {err}"
-                                    );
+                                    let message =
+                                        format!("failed to surface legacy exec approval: {err}");
+                                    tracing::warn!("{message}");
+                                    self.reject_failed_legacy_exec_approval_enqueue(
+                                        app_server_client,
+                                        request.id().clone(),
+                                        message,
+                                    )
+                                    .await;
                                 }
                             } else if let Err(err) =
                                 self.enqueue_thread_event(thread_id, event).await
                             {
-                                tracing::warn!(
-                                    "failed to enqueue app-server server request for {thread_id}: {err}"
+                                let message = format!(
+                                    "failed to surface legacy exec approval for {thread_id}: {err}"
                                 );
+                                tracing::warn!("{message}");
+                                self.reject_failed_legacy_exec_approval_enqueue(
+                                    app_server_client,
+                                    request.id().clone(),
+                                    message,
+                                )
+                                .await;
                             }
                         }
                         Err(message) => {
@@ -342,6 +357,25 @@ impl App {
             )
             .await
             .map_err(|err| format!("failed to reject app-server request: {err}"))
+    }
+
+    async fn reject_failed_legacy_exec_approval_enqueue(
+        &mut self,
+        app_server_client: &AppServerSession,
+        request_id: codex_app_server_protocol::RequestId,
+        message: String,
+    ) {
+        let resolved = self
+            .pending_app_server_requests
+            .resolve_notification(&request_id);
+        self.note_app_server_request_resolved(resolved).await;
+        self.chat_widget.add_error_message(message.clone());
+        if let Err(reject_err) = self
+            .reject_app_server_request(app_server_client, request_id, message)
+            .await
+        {
+            tracing::warn!("{reject_err}");
+        }
     }
 }
 
@@ -1349,10 +1383,11 @@ mod tests {
 
     #[test]
     fn bridges_legacy_remote_exec_approval_requests() {
+        let thread_id = ThreadId::new();
         let request = ServerRequest::ExecCommandApproval {
             request_id: AppServerRequestId::Integer(8),
             params: ExecCommandApprovalParams {
-                conversation_id: ThreadId::new(),
+                conversation_id: thread_id,
                 call_id: "call-2".to_string(),
                 approval_id: Some("approval-2".to_string()),
                 command: vec!["pwd".to_string()],
@@ -1362,8 +1397,17 @@ mod tests {
             },
         };
 
-        let (_, event) =
+        let (actual_thread_id, event) =
             legacy_exec_approval_thread_event(&request).expect("request should bridge");
-        assert!(matches!(event.msg, EventMsg::ExecApprovalRequest(_)));
+        assert_eq!(actual_thread_id, thread_id);
+        let EventMsg::ExecApprovalRequest(approval) = event.msg else {
+            panic!("expected ExecApprovalRequest event");
+        };
+        assert_eq!(approval.call_id, "call-2");
+        assert_eq!(approval.approval_id.as_deref(), Some("approval-2"));
+        assert_eq!(approval.command, vec!["pwd".to_string()]);
+        assert_eq!(approval.cwd, PathBuf::from("/tmp/project"));
+        assert_eq!(approval.reason.as_deref(), Some("Need shell"));
+        assert!(approval.parsed_cmd.is_empty());
     }
 }

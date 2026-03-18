@@ -33,6 +33,11 @@ pub(super) struct UnsupportedAppServerRequest {
     pub(super) message: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ResolvedAppServerRequest {
+    pub(super) exec_approval_ids: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PendingAppServerRequests {
     exec_approvals: HashMap<String, PendingExecApproval>,
@@ -52,6 +57,7 @@ enum ExecApprovalResponseKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingExecApproval {
+    approval_id: String,
     request_id: AppServerRequestId,
     response_kind: ExecApprovalResponseKind,
 }
@@ -78,8 +84,9 @@ impl PendingAppServerRequests {
                     .clone()
                     .unwrap_or_else(|| params.item_id.clone());
                 self.exec_approvals.insert(
-                    approval_id,
+                    approval_id.clone(),
                     PendingExecApproval {
+                        approval_id,
                         request_id: request_id.clone(),
                         response_kind: ExecApprovalResponseKind::V2,
                     },
@@ -134,8 +141,9 @@ impl PendingAppServerRequests {
                     .clone()
                     .unwrap_or_else(|| params.call_id.clone());
                 self.exec_approvals.insert(
-                    approval_id,
+                    approval_id.clone(),
                     PendingExecApproval {
+                        approval_id,
                         request_id: request_id.clone(),
                         response_kind: ExecApprovalResponseKind::LegacyV1,
                     },
@@ -311,7 +319,16 @@ impl PendingAppServerRequests {
         Ok(resolution)
     }
 
-    pub(super) fn resolve_notification(&mut self, request_id: &AppServerRequestId) {
+    pub(super) fn resolve_notification(
+        &mut self,
+        request_id: &AppServerRequestId,
+    ) -> ResolvedAppServerRequest {
+        let exec_approval_ids = self
+            .exec_approvals
+            .values()
+            .filter(|pending| &pending.request_id == request_id)
+            .map(|pending| pending.approval_id.clone())
+            .collect();
         self.exec_approvals
             .retain(|_, value| &value.request_id != request_id);
         self.file_change_approvals
@@ -323,6 +340,7 @@ impl PendingAppServerRequests {
             .retain(|_, value| value != request_id);
         self.mcp_legacy_requests
             .retain(|_, value| value != request_id);
+        ResolvedAppServerRequest { exec_approval_ids }
     }
 }
 
@@ -471,6 +489,44 @@ mod tests {
     }
 
     #[test]
+    fn resolves_exec_approval_without_explicit_approval_id() {
+        let mut pending = PendingAppServerRequests::default();
+        let request = ServerRequest::CommandExecutionRequestApproval {
+            request_id: AppServerRequestId::Integer(43),
+            params: CommandExecutionRequestApprovalParams {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "call-1".to_string(),
+                approval_id: None,
+                reason: None,
+                network_approval_context: None,
+                command: Some("ls".to_string()),
+                cwd: None,
+                command_actions: None,
+                additional_permissions: None,
+                skill_metadata: None,
+                proposed_execpolicy_amendment: None,
+                proposed_network_policy_amendments: None,
+                available_decisions: None,
+            },
+        };
+
+        assert_eq!(pending.note_server_request(&request), None);
+
+        let resolution = pending
+            .take_resolution(&Op::ExecApproval {
+                id: "call-1".to_string(),
+                turn_id: None,
+                decision: ReviewDecision::Approved,
+            })
+            .expect("resolution should serialize")
+            .expect("request should be pending");
+
+        assert_eq!(resolution.request_id, AppServerRequestId::Integer(43));
+        assert_eq!(resolution.result, json!({ "decision": "accept" }));
+    }
+
+    #[test]
     fn resolves_legacy_exec_approval_through_app_server_request_id() {
         let mut pending = PendingAppServerRequests::default();
         let request = ServerRequest::ExecCommandApproval {
@@ -499,6 +555,69 @@ mod tests {
 
         assert_eq!(resolution.request_id, AppServerRequestId::Integer(42));
         assert_eq!(resolution.result, json!({ "decision": "approved" }));
+    }
+
+    #[test]
+    fn resolves_legacy_exec_approval_without_explicit_approval_id() {
+        let mut pending = PendingAppServerRequests::default();
+        let request = ServerRequest::ExecCommandApproval {
+            request_id: AppServerRequestId::Integer(44),
+            params: ExecCommandApprovalParams {
+                conversation_id: codex_protocol::ThreadId::new(),
+                call_id: "call-3".to_string(),
+                approval_id: None,
+                command: vec!["pwd".to_string()],
+                cwd: "/tmp/project".into(),
+                reason: Some("Need shell access".to_string()),
+                parsed_cmd: Vec::new(),
+            },
+        };
+
+        assert_eq!(pending.note_server_request(&request), None);
+
+        let resolution = pending
+            .take_resolution(&Op::ExecApproval {
+                id: "call-3".to_string(),
+                turn_id: None,
+                decision: ReviewDecision::Approved,
+            })
+            .expect("resolution should serialize")
+            .expect("request should be pending");
+
+        assert_eq!(resolution.request_id, AppServerRequestId::Integer(44));
+        assert_eq!(resolution.result, json!({ "decision": "approved" }));
+    }
+
+    #[test]
+    fn resolve_notification_returns_resolved_exec_approval_ids() {
+        let mut pending = PendingAppServerRequests::default();
+        let request = ServerRequest::ExecCommandApproval {
+            request_id: AppServerRequestId::Integer(45),
+            params: ExecCommandApprovalParams {
+                conversation_id: codex_protocol::ThreadId::new(),
+                call_id: "call-4".to_string(),
+                approval_id: Some("approval-4".to_string()),
+                command: vec!["pwd".to_string()],
+                cwd: "/tmp/project".into(),
+                reason: Some("Need shell access".to_string()),
+                parsed_cmd: Vec::new(),
+            },
+        };
+
+        assert_eq!(pending.note_server_request(&request), None);
+
+        let resolved = pending.resolve_notification(&AppServerRequestId::Integer(45));
+        assert_eq!(resolved.exec_approval_ids, vec!["approval-4".to_string()]);
+        assert_eq!(
+            pending
+                .take_resolution(&Op::ExecApproval {
+                    id: "approval-4".to_string(),
+                    turn_id: None,
+                    decision: ReviewDecision::Approved,
+                })
+                .expect("resolution should serialize"),
+            None
+        );
     }
 
     #[test]
