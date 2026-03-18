@@ -3,6 +3,7 @@ use crate::app_event::AppEvent;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::app_server_rate_limit_snapshot_to_core;
 use crate::app_server_session::status_account_display_from_auth_mode;
+use crate::exec_command::escape_command;
 use crate::local_chatgpt_auth::load_local_chatgpt_auth;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::AuthMode;
@@ -385,7 +386,7 @@ fn bridge_legacy_exec_approval_request(
                 approval_id: params.approval_id.clone(),
                 reason: params.reason.clone(),
                 network_approval_context: None,
-                command: Some(params.command.join(" ")),
+                command: Some(escape_command(&params.command)),
                 cwd: Some(params.cwd.clone()),
                 command_actions: Some(
                     params
@@ -714,7 +715,7 @@ mod tests {
             conversation_id: ThreadId::new(),
             call_id: "call-2".to_string(),
             approval_id: Some("approval-2".to_string()),
-            command: vec!["pwd".to_string()],
+            command: vec!["printf".to_string(), "hello world".to_string()],
             cwd: "/tmp/project".into(),
             reason: Some("Need shell".to_string()),
             parsed_cmd: Vec::new(),
@@ -739,7 +740,7 @@ mod tests {
                     approval_id: Some("approval-2".to_string()),
                     reason: Some("Need shell".to_string()),
                     network_approval_context: None,
-                    command: Some("pwd".to_string()),
+                    command: Some("printf 'hello world'".to_string()),
                     cwd: Some("/tmp/project".into()),
                     command_actions: Some(Vec::new()),
                     additional_permissions: None,
