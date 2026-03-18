@@ -7,44 +7,14 @@ use crate::local_chatgpt_auth::load_local_chatgpt_auth;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ChatgptAuthTokensRefreshParams;
+use codex_app_server_protocol::CommandAction;
+use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_protocol::ThreadId;
-use codex_protocol::approvals::ExecApprovalRequestEvent;
-use codex_protocol::config_types::ModeKind;
-use codex_protocol::items::AgentMessageContent;
-use codex_protocol::items::AgentMessageItem;
-use codex_protocol::items::ContextCompactionItem;
-use codex_protocol::items::ImageGenerationItem;
-use codex_protocol::items::PlanItem;
-use codex_protocol::items::ReasoningItem;
-use codex_protocol::items::TurnItem;
-use codex_protocol::items::UserMessageItem;
-use codex_protocol::items::WebSearchItem;
-use codex_protocol::protocol::AgentMessageDeltaEvent;
-use codex_protocol::protocol::AgentReasoningDeltaEvent;
-use codex_protocol::protocol::AgentReasoningRawContentDeltaEvent;
-use codex_protocol::protocol::ErrorEvent;
-use codex_protocol::protocol::Event;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::ItemStartedEvent;
-use codex_protocol::protocol::PlanDeltaEvent;
-use codex_protocol::protocol::RealtimeConversationClosedEvent;
-use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
-use codex_protocol::protocol::RealtimeConversationStartedEvent;
-use codex_protocol::protocol::RealtimeEvent;
-use codex_protocol::protocol::ThreadNameUpdatedEvent;
-use codex_protocol::protocol::TokenCountEvent;
-use codex_protocol::protocol::TokenUsage;
-use codex_protocol::protocol::TokenUsageInfo;
-use codex_protocol::protocol::TurnAbortReason;
-use codex_protocol::protocol::TurnAbortedEvent;
-use codex_protocol::protocol::TurnCompleteEvent;
-use codex_protocol::protocol::TurnStartedEvent;
 use serde_json::Value;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -196,10 +166,11 @@ impl App {
         if app_server_client.is_remote()
             && let ServerRequest::ExecCommandApproval { .. } = &request
         {
-            match legacy_exec_approval_thread_event(&request) {
-                Ok((thread_id, event)) => {
-                    if let Some(unsupported) =
-                        self.pending_app_server_requests.note_server_request(&request)
+            match bridge_legacy_exec_approval_request(&request) {
+                Ok((thread_id, bridged_request)) => {
+                    if let Some(unsupported) = self
+                        .pending_app_server_requests
+                        .note_server_request(&request)
                     {
                         tracing::warn!(
                             request_id = ?unsupported.request_id,
@@ -224,15 +195,16 @@ impl App {
                     let result = if self.primary_thread_id == Some(thread_id)
                         || self.primary_thread_id.is_none()
                     {
-                        self.enqueue_primary_event(event).await
+                        self.enqueue_primary_thread_request(bridged_request).await
                     } else {
-                        self.enqueue_thread_event(thread_id, event).await
+                        self.enqueue_thread_request(thread_id, bridged_request)
+                            .await
                     };
                     if let Err(err) = result {
                         self.reject_failed_legacy_exec_approval_enqueue(
                             app_server_client,
                             &request,
-                            err,
+                            err.to_string(),
                         )
                         .await;
                     }
@@ -241,11 +213,7 @@ impl App {
                     tracing::warn!(request_id = ?request.id(), "{message}");
                     self.chat_widget.add_error_message(message.clone());
                     if let Err(err) = self
-                        .reject_app_server_request(
-                            app_server_client,
-                            request.id().clone(),
-                            message,
-                        )
+                        .reject_app_server_request(app_server_client, request.id().clone(), message)
                         .await
                     {
                         tracing::warn!("{err}");
@@ -302,7 +270,9 @@ impl App {
         err: String,
     ) {
         let message = format!("failed to surface legacy exec approval: {err}");
-        let resolved = self.pending_app_server_requests.resolve_notification(request.id());
+        let resolved = self
+            .pending_app_server_requests
+            .resolve_notification(request.id());
         self.note_app_server_request_resolved(resolved).await;
         self.chat_widget.add_error_message(message.clone());
         if let Err(reject_err) = self
@@ -397,30 +367,40 @@ impl App {
     }
 }
 
-fn legacy_exec_approval_thread_event(request: &ServerRequest) -> Result<(ThreadId, Event), String> {
-    let ServerRequest::ExecCommandApproval { params, .. } = request else {
+fn bridge_legacy_exec_approval_request(
+    request: &ServerRequest,
+) -> Result<(ThreadId, ServerRequest), String> {
+    let ServerRequest::ExecCommandApproval { request_id, params } = request else {
         return Err("expected legacy exec command approval".to_string());
     };
 
     Ok((
         params.conversation_id,
-        Event {
-            id: String::new(),
-            msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
-                call_id: params.call_id.clone(),
-                approval_id: params.approval_id.clone(),
+        ServerRequest::CommandExecutionRequestApproval {
+            request_id: request_id.clone(),
+            params: CommandExecutionRequestApprovalParams {
+                thread_id: params.conversation_id.to_string(),
                 turn_id: String::new(),
-                command: params.command.clone(),
-                cwd: params.cwd.clone(),
+                item_id: params.call_id.clone(),
+                approval_id: params.approval_id.clone(),
                 reason: params.reason.clone(),
                 network_approval_context: None,
-                proposed_execpolicy_amendment: None,
-                proposed_network_policy_amendments: None,
+                command: Some(params.command.join(" ")),
+                cwd: Some(params.cwd.clone()),
+                command_actions: Some(
+                    params
+                        .parsed_cmd
+                        .clone()
+                        .into_iter()
+                        .map(CommandAction::from)
+                        .collect(),
+                ),
                 additional_permissions: None,
                 skill_metadata: None,
+                proposed_execpolicy_amendment: None,
+                proposed_network_policy_amendments: None,
                 available_decisions: None,
-                parsed_cmd: params.parsed_cmd.clone(),
-            }),
+            },
         },
     ))
 }
@@ -630,24 +610,15 @@ fn legacy_thread_notification(
 mod tests {
     use super::LegacyThreadNotification;
     use super::ServerNotificationThreadTarget;
-    use super::legacy_exec_approval_thread_event;
+    use super::bridge_legacy_exec_approval_request;
     use super::legacy_thread_notification;
-    use super::server_notification_thread_events;
     use super::server_notification_thread_target;
-    use codex_app_server_protocol::JSONRPCNotification;
-    use super::thread_snapshot_events;
-    use super::turn_snapshot_events;
-    use codex_app_server_protocol::AgentMessageDeltaNotification;
-    use codex_app_server_protocol::CodexErrorInfo;
+    use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
     use codex_app_server_protocol::ExecCommandApprovalParams;
-    use codex_app_server_protocol::ItemCompletedNotification;
-    use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
+    use codex_app_server_protocol::JSONRPCNotification;
     use codex_app_server_protocol::RequestId as AppServerRequestId;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::ServerRequest;
-    use codex_app_server_protocol::Thread;
-    use codex_app_server_protocol::ThreadItem;
-    use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnStartedNotification;
     use codex_app_server_protocol::TurnStatus;
@@ -739,21 +710,45 @@ mod tests {
 
     #[test]
     fn bridges_legacy_remote_exec_approval_requests() {
+        let params = ExecCommandApprovalParams {
+            conversation_id: ThreadId::new(),
+            call_id: "call-2".to_string(),
+            approval_id: Some("approval-2".to_string()),
+            command: vec!["pwd".to_string()],
+            cwd: "/tmp/project".into(),
+            reason: Some("Need shell".to_string()),
+            parsed_cmd: Vec::new(),
+        };
         let request = ServerRequest::ExecCommandApproval {
             request_id: AppServerRequestId::Integer(8),
-            params: ExecCommandApprovalParams {
-                conversation_id: ThreadId::new(),
-                call_id: "call-2".to_string(),
-                approval_id: Some("approval-2".to_string()),
-                command: vec!["pwd".to_string()],
-                cwd: "/tmp/project".into(),
-                reason: Some("Need shell".to_string()),
-                parsed_cmd: Vec::new(),
-            },
+            params: params.clone(),
         };
 
-        let (_, event) =
-            legacy_exec_approval_thread_event(&request).expect("request should bridge");
-        assert!(matches!(event.msg, EventMsg::ExecApprovalRequest(_)));
+        let (thread_id, bridged_request) =
+            bridge_legacy_exec_approval_request(&request).expect("request should bridge");
+
+        assert_eq!(thread_id, params.conversation_id);
+        assert_eq!(
+            bridged_request,
+            ServerRequest::CommandExecutionRequestApproval {
+                request_id: AppServerRequestId::Integer(8),
+                params: CommandExecutionRequestApprovalParams {
+                    thread_id: params.conversation_id.to_string(),
+                    turn_id: String::new(),
+                    item_id: "call-2".to_string(),
+                    approval_id: Some("approval-2".to_string()),
+                    reason: Some("Need shell".to_string()),
+                    network_approval_context: None,
+                    command: Some("pwd".to_string()),
+                    cwd: Some("/tmp/project".into()),
+                    command_actions: Some(Vec::new()),
+                    additional_permissions: None,
+                    skill_metadata: None,
+                    proposed_execpolicy_amendment: None,
+                    proposed_network_policy_amendments: None,
+                    available_decisions: None,
+                },
+            }
+        );
     }
 }
