@@ -1,0 +1,9 @@
+---
+source: tui/src/multi_agents.rs
+expression: rendered
+---
+• Finished waiting
+  └ Atlas [worker]: Completed
+      Да, это уже реальный blocker.
+      Лог menubar app теперь такой:
+      auth pool at `/Users/palvaleri/codex-session-router/var/auth` contains no valid profiles

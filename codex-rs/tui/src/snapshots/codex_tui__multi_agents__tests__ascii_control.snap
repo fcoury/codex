@@ -1,0 +1,8 @@
+---
+source: tui/src/multi_agents.rs
+expression: rendered
+---
+• Finished waiting
+  └ Atlas [worker]: Completed
+      Replaying the preview path with ASCII control text.
+      Keep `S2` and `N/A` intact while preserving `/tmp/session-router/auth`.

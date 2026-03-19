@@ -1,0 +1,14 @@
+---
+source: tui_app_server/src/multi_agents.rs
+expression: terminal.backend()
+---
+"• Finished waiting                                                              "
+"  └ Atlas [worker]: Completed                                                   "
+"      Вношу две узкие правки в tooling docs: уточняю исключение для `Architect  "
+"initial draft` и добавляю owner-facing инструкцию по `racex_plan_bundle`.       "
+"      Mirror-патч не прошёл через `apply_patch`; tooling-файл отдельно дожму    "
+"сейчас, а для sibling mirror, если понадобится, пойду через явное разрешение на "
+"один безопасный sync-патч.                                                      "
+"                                                                                "
+"                                                                                "
+"                                                                                "

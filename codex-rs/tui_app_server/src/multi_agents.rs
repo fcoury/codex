@@ -32,8 +32,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
-const COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES: usize = 160;
-const COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES: usize = 240;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentPickerThreadEntry {
@@ -343,7 +341,7 @@ pub(crate) fn resume_end(ev: CollabResumeEndEvent) -> PlainHistoryCell {
             },
             /*spawn_request*/ None,
         ),
-        vec![status_summary_line(&status)],
+        status_summary_lines(&status),
     )
 }
 
@@ -516,67 +514,79 @@ fn wait_complete_lines(
         entries
     };
 
-    entries
-        .into_iter()
-        .map(|entry| {
-            let CollabAgentStatusEntry {
-                thread_id,
-                agent_nickname,
-                agent_role,
-                status,
-            } = entry;
-            let mut spans = agent_label_spans(AgentLabel {
+    let mut lines = Vec::new();
+    for entry in entries {
+        let CollabAgentStatusEntry {
+            thread_id,
+            agent_nickname,
+            agent_role,
+            status,
+        } = entry;
+        let mut entry_lines = status_entry_lines(
+            AgentLabel {
                 thread_id: Some(thread_id),
                 nickname: agent_nickname.as_deref(),
                 role: agent_role.as_deref(),
-            });
-            spans.push(Span::from(": ").dim());
-            spans.extend(status_summary_spans(&status));
-            spans.into()
-        })
-        .collect()
+            },
+            &status,
+        );
+        if entry_lines.len() > 1 {
+            entry_lines = prefix_lines(entry_lines, "".into(), "  ".into());
+        }
+        lines.extend(entry_lines);
+    }
+    lines
 }
 
-fn status_summary_line(status: &AgentStatus) -> Line<'static> {
-    status_summary_spans(status).into()
+fn status_entry_lines(agent: AgentLabel<'_>, status: &AgentStatus) -> Vec<Line<'static>> {
+    let mut summary_lines = status_summary_lines(status);
+    let mut spans = agent_label_spans(agent);
+    spans.push(Span::from(": ").dim());
+    if let Some(first_summary_line) = summary_lines.first() {
+        spans.extend(first_summary_line.spans.clone());
+    }
+
+    let mut lines = vec![Line::from(spans)];
+    if !summary_lines.is_empty() {
+        lines.extend(summary_lines.drain(1..));
+    }
+    lines
 }
 
-fn status_summary_spans(status: &AgentStatus) -> Vec<Span<'static>> {
+fn status_summary_lines(status: &AgentStatus) -> Vec<Line<'static>> {
     match status {
-        AgentStatus::PendingInit => vec![Span::from("Pending init").cyan()],
-        AgentStatus::Running => vec![Span::from("Running").cyan().bold()],
+        AgentStatus::PendingInit => vec![Line::from(vec![Span::from("Pending init").cyan()])],
+        AgentStatus::Running => vec![Line::from(vec![Span::from("Running").cyan().bold()])],
         // Allow `.yellow()`
         #[allow(clippy::disallowed_methods)]
-        AgentStatus::Interrupted => vec![Span::from("Interrupted").yellow()],
+        AgentStatus::Interrupted => vec![Line::from(vec![Span::from("Interrupted").yellow()])],
         AgentStatus::Completed(message) => {
-            let mut spans = vec![Span::from("Completed").green()];
+            let mut lines = vec![Line::from(vec![Span::from("Completed").green()])];
             if let Some(message) = message.as_ref() {
-                let message_preview = truncate_text(
-                    &message.split_whitespace().collect::<Vec<_>>().join(" "),
-                    COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES,
-                );
-                if !message_preview.is_empty() {
-                    spans.push(Span::from(" - ").dim());
-                    spans.push(Span::from(message_preview));
-                }
+                lines.extend(status_message_lines(message));
             }
-            spans
+            lines
         }
         AgentStatus::Errored(error) => {
-            let mut spans = vec![Span::from("Error").red()];
-            let error_preview = truncate_text(
-                &error.split_whitespace().collect::<Vec<_>>().join(" "),
-                COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES,
-            );
-            if !error_preview.is_empty() {
-                spans.push(Span::from(" - ").dim());
-                spans.push(Span::from(error_preview));
-            }
-            spans
+            let mut lines = vec![Line::from(vec![Span::from("Error").red()])];
+            lines.extend(status_message_lines(error));
+            lines
         }
-        AgentStatus::Shutdown => vec![Span::from("Shutdown")],
-        AgentStatus::NotFound => vec![Span::from("Not found").red()],
+        AgentStatus::Shutdown => vec![Line::from("Shutdown")],
+        AgentStatus::NotFound => vec![Line::from(vec![Span::from("Not found").red()])],
     }
+}
+
+fn status_message_lines(message: &str) -> Vec<Line<'static>> {
+    let trimmed = message.trim_matches(['\r', '\n']);
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    trimmed
+        .split('\n')
+        .map(|line| Line::from(line.trim_end_matches('\r').to_string()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -589,8 +599,20 @@ mod tests {
     use crossterm::event::KeyModifiers;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use ratatui::style::Color;
     use ratatui::style::Modifier;
+    use ratatui::text::Text;
+    use ratatui::widgets::Paragraph;
+    use ratatui::widgets::WidgetRef;
+    use ratatui::widgets::Wrap;
+
+    struct Issue15001Scenario<'a> {
+        name: &'a str,
+        message: &'a str,
+        expected_substrings: &'a [&'a str],
+    }
 
     #[test]
     fn collab_events_snapshot() {
@@ -681,6 +703,119 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         assert_snapshot!("collab_agent_transcript", snapshot);
+    }
+
+    #[test]
+    fn waiting_end_preserves_multiline_completed_messages() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let receiver_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000002")
+            .expect("valid receiver thread id");
+        let message = "Вношу две узкие правки в tooling docs: уточняю исключение для `Architect initial draft` и добавляю owner-facing инструкцию по `racex_plan_bundle`.\nMirror-патч не прошёл через `apply_patch`; tooling-файл отдельно дожму сейчас, а для sibling mirror, если понадобится, пойду через явное разрешение на один безопасный sync-патч.";
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            receiver_thread_id,
+            AgentStatus::Completed(Some(message.to_string())),
+        );
+        let cell = waiting_end(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: "call-wait".to_string(),
+            agent_statuses: vec![CollabAgentStatusEntry {
+                thread_id: receiver_thread_id,
+                agent_nickname: Some("Atlas".to_string()),
+                agent_role: Some("worker".to_string()),
+                status: AgentStatus::Completed(Some(message.to_string())),
+            }],
+            statuses,
+        });
+
+        assert_snapshot!(cell_to_text(&cell));
+    }
+
+    #[test]
+    fn waiting_end_preserves_negation_and_paths_in_completed_messages() {
+        let scenario = issue_15001_scenarios()
+            .into_iter()
+            .find(|scenario| scenario.name == "negation_and_paths")
+            .expect("scenario should exist");
+        let rendered = cell_to_text(&waiting_end_with_message(scenario.message));
+        for expected_substring in scenario.expected_substrings {
+            assert!(
+                rendered.contains(expected_substring),
+                "missing expected token `{expected_substring}` in rendered output:\n{rendered}"
+            );
+        }
+
+        assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn waiting_end_issue_15001_scenarios_preserve_expected_tokens() {
+        for scenario in issue_15001_scenarios() {
+            let rendered = cell_to_text(&waiting_end_with_message(scenario.message));
+            for expected_substring in scenario.expected_substrings {
+                assert!(
+                    rendered.contains(expected_substring),
+                    "scenario `{}` dropped expected token `{expected_substring}` in rendered output:\n{rendered}",
+                    scenario.name
+                );
+            }
+            assert_snapshot!(scenario.name, rendered);
+        }
+    }
+
+    #[test]
+    fn waiting_end_preserves_multiple_agent_blocks() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let atlas_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000002")
+            .expect("valid atlas thread id");
+        let bob_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000003")
+            .expect("valid bob thread id");
+        let atlas_message = issue_15001_scenarios()[0].message;
+        let bob_message =
+            "Need a second pass on the tmux capture.\nThe raw rollout is still correct.";
+        let cell = waiting_end(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: "call-wait".to_string(),
+            agent_statuses: vec![
+                CollabAgentStatusEntry {
+                    thread_id: atlas_thread_id,
+                    agent_nickname: Some("Atlas".to_string()),
+                    agent_role: Some("worker".to_string()),
+                    status: AgentStatus::Completed(Some(atlas_message.to_string())),
+                },
+                CollabAgentStatusEntry {
+                    thread_id: bob_thread_id,
+                    agent_nickname: Some("Bob".to_string()),
+                    agent_role: Some("explorer".to_string()),
+                    status: AgentStatus::Completed(Some(bob_message.to_string())),
+                },
+            ],
+            statuses: HashMap::from([
+                (
+                    atlas_thread_id,
+                    AgentStatus::Completed(Some(atlas_message.to_string())),
+                ),
+                (
+                    bob_thread_id,
+                    AgentStatus::Completed(Some(bob_message.to_string())),
+                ),
+            ]),
+        });
+
+        let rendered = cell_to_text(&cell);
+        assert!(rendered.contains("Atlas [worker]: Completed"));
+        assert!(rendered.contains("Bob [explorer]: Completed"));
+        assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn waiting_end_issue_15001_width_matrix_snapshot() {
+        let cell = waiting_end_with_message(issue_15001_scenarios()[0].message);
+        snapshot_rendered_cell("waiting_end_issue_15001_width_80", &cell, 80, 10);
+        snapshot_rendered_cell("waiting_end_issue_15001_width_120", &cell, 120, 10);
+        snapshot_rendered_cell("waiting_end_issue_15001_width_160", &cell, 160, 10);
     }
 
     #[cfg(target_os = "macos")]
@@ -794,6 +929,67 @@ mod tests {
             .map(line_to_text)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn waiting_end_with_message(message: &str) -> PlainHistoryCell {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let receiver_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000002")
+            .expect("valid receiver thread id");
+        waiting_end(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: "call-wait".to_string(),
+            agent_statuses: vec![CollabAgentStatusEntry {
+                thread_id: receiver_thread_id,
+                agent_nickname: Some("Atlas".to_string()),
+                agent_role: Some("worker".to_string()),
+                status: AgentStatus::Completed(Some(message.to_string())),
+            }],
+            statuses: HashMap::from([(
+                receiver_thread_id,
+                AgentStatus::Completed(Some(message.to_string())),
+            )]),
+        })
+    }
+
+    fn issue_15001_scenarios() -> Vec<Issue15001Scenario<'static>> {
+        vec![
+            Issue15001Scenario {
+                name: "multiline_cyrillic_with_backticks",
+                message: "Вношу две узкие правки в tooling docs: уточняю исключение для `Architect initial draft` и добавляю owner-facing инструкцию по `racex_plan_bundle`.\nMirror-патч не прошёл через `apply_patch`; tooling-файл отдельно дожму сейчас, а для sibling mirror, если понадобится, пойду через явное разрешение на один безопасный sync-патч.",
+                expected_substrings: &[
+                    "Architect initial draft",
+                    "racex_plan_bundle",
+                    "apply_patch",
+                ],
+            },
+            Issue15001Scenario {
+                name: "negation_and_paths",
+                message: "Да, это уже реальный blocker.\nЛог menubar app теперь такой:\nauth pool at `/Users/palvaleri/codex-session-router/var/auth` contains no valid profiles",
+                expected_substrings: &[
+                    "/Users/palvaleri/codex-session-router/var/auth",
+                    "contains no valid profiles",
+                ],
+            },
+            Issue15001Scenario {
+                name: "ascii_control",
+                message: "Replaying the preview path with ASCII control text.\nKeep `S2` and `N/A` intact while preserving `/tmp/session-router/auth`.",
+                expected_substrings: &["S2", "N/A", "/tmp/session-router/auth"],
+            },
+        ]
+    }
+
+    fn snapshot_rendered_cell(name: &str, cell: &PlainHistoryCell, width: u16, height: u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let lines = cell.display_lines(width);
+        terminal
+            .draw(|frame| {
+                Paragraph::new(Text::from(lines))
+                    .wrap(Wrap { trim: false })
+                    .render_ref(frame.area(), frame.buffer_mut())
+            })
+            .expect("draw");
+        assert_snapshot!(name, terminal.backend());
     }
 
     fn line_to_text(line: &Line<'static>) -> String {
