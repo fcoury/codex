@@ -1037,6 +1037,76 @@ mod tests {
     }
 
     #[test]
+    fn wrap_ranges_trim_round_trips_cyrillic_with_inline_code_markers_and_indent() {
+        let text = "Гейты проходят. Проверяю только `Visual Acceptance`, чтобы корректно закрыть reviewer-флоу по этому plan и не застрять на несуществующей UI-проверке.";
+        let opts = textwrap::Options::new(48)
+            .initial_indent("• ")
+            .subsequent_indent("  ");
+
+        let ranges = wrap_ranges(text, opts);
+        let mut rebuilt = String::new();
+        let mut cursor = 0usize;
+        for range in ranges {
+            let start = range.start.max(cursor).min(text.len());
+            let end = range.end.min(text.len());
+            if start < end {
+                rebuilt.push_str(&text[start..end]);
+            }
+            cursor = cursor.max(end);
+        }
+
+        assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn word_wrap_line_preserves_cyrillic_and_inline_code_span_boundaries() {
+        let line = Line::from(vec![
+            "Гейты проходят. Проверяю только ".into(),
+            "`Visual Acceptance`".cyan(),
+            ", чтобы корректно закрыть reviewer-флоу по этому plan и не застрять на несуществующей UI-проверке.".into(),
+        ]);
+        let opts = RtOptions::new(48)
+            .initial_indent(Line::from("• "))
+            .subsequent_indent(Line::from("  "));
+
+        let out = word_wrap_line(&line, opts);
+        let rendered = out.iter().map(concat_line).join("\n");
+        let logical_text = out
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| {
+                let content = concat_line(line);
+                if idx == 0 {
+                    content.strip_prefix("• ").unwrap_or(&content).to_string()
+                } else {
+                    content.strip_prefix("  ").unwrap_or(&content).to_string()
+                }
+            })
+            .join("");
+
+        assert!(
+            rendered.starts_with("• Гейты"),
+            "bullet-prefixed wrapped line dropped the leading Cyrillic glyph: {rendered}"
+        );
+        assert!(
+            !rendered.contains("• ейты"),
+            "bullet prefix appears to overwrite the leading glyph: {rendered}"
+        );
+        assert!(
+            logical_text.contains("только `Visual Acceptance`"),
+            "inline-code-like span boundary was fused or damaged: {logical_text}"
+        );
+        assert!(
+            logical_text.contains("закрыть reviewer-флоу"),
+            "word-internal Cyrillic chunk was dropped near wrap boundary: {logical_text}"
+        );
+        assert_eq!(
+            logical_text,
+            "Гейты проходят. Проверяю только `Visual Acceptance`, чтобы корректно закрыть reviewer-флоу по этому plan и не застрять на несуществующей UI-проверке."
+        );
+    }
+
+    #[test]
     fn wrap_lines_applies_initial_indent_only_once() {
         let opts = RtOptions::new(8)
             .initial_indent(Line::from("- "))
@@ -1404,4 +1474,5 @@ them."#
         assert_eq!(rebuilt, text);
         assert!(ranges.len() > 1, "expected wrapped ranges, got: {ranges:?}");
     }
+
 }
