@@ -2130,7 +2130,6 @@ async fn streamed_agent_message_delta_issue_15001_repro_b_matches_one_shot_rende
         "N/A` для visual review.\n",
     ];
 
-    let mut streamed_rows = Vec::new();
     for (idx, delta) in deltas.iter().enumerate() {
         chat.handle_codex_event(Event {
             id: format!("delta-{idx}"),
@@ -2140,23 +2139,25 @@ async fn streamed_agent_message_delta_issue_15001_repro_b_matches_one_shot_rende
         });
         loop {
             chat.on_commit_tick();
-            let inserted = drain_insert_history(&mut rx);
-            for cell in inserted {
-                for line in cell {
-                    streamed_rows.push(line_to_string(&line).chars().skip(2).collect::<String>());
-                }
-            }
+            let _ = drain_insert_history(&mut rx);
 
             let queued = chat
                 .stream_controller
                 .as_ref()
-                .map(|controller| controller.queued_lines())
+                .map(super::super::streaming::controller::StreamController::queued_lines)
                 .unwrap_or_default();
             if queued == 0 {
                 break;
             }
         }
     }
+
+    let streamed_rows = chat
+        .active_cell_transcript_lines(width)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|line| line_to_string(&line).chars().skip(2).collect::<String>())
+        .collect::<Vec<_>>();
 
     let full_source: String = deltas.iter().copied().collect();
     let mut rendered = Vec::new();

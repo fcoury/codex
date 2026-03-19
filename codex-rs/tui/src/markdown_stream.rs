@@ -8,7 +8,6 @@ use crate::markdown;
 /// completed logical lines.
 pub(crate) struct MarkdownStreamCollector {
     buffer: String,
-    committed_line_count: usize,
     width: Option<usize>,
     cwd: PathBuf,
 }
@@ -23,7 +22,6 @@ impl MarkdownStreamCollector {
     pub fn new(width: Option<usize>, cwd: &Path) -> Self {
         Self {
             buffer: String::new(),
-            committed_line_count: 0,
             width,
             cwd: cwd.to_path_buf(),
         }
@@ -31,7 +29,6 @@ impl MarkdownStreamCollector {
 
     pub fn clear(&mut self) {
         self.buffer.clear();
-        self.committed_line_count = 0;
     }
 
     pub fn push_delta(&mut self, delta: &str) {
@@ -50,26 +47,7 @@ impl MarkdownStreamCollector {
         } else {
             return Vec::new();
         };
-        let mut rendered: Vec<Line<'static>> = Vec::new();
-        markdown::append_markdown(&source, self.width, Some(self.cwd.as_path()), &mut rendered);
-        let mut complete_line_count = rendered.len();
-        if complete_line_count > 0
-            && crate::render::line_utils::is_blank_line_spaces_only(
-                &rendered[complete_line_count - 1],
-            )
-        {
-            complete_line_count -= 1;
-        }
-
-        if self.committed_line_count >= complete_line_count {
-            return Vec::new();
-        }
-
-        let out_slice = &rendered[self.committed_line_count..complete_line_count];
-
-        let out = out_slice.to_vec();
-        self.committed_line_count = complete_line_count;
-        out
+        self.render_source(&source)
     }
 
     /// Finalize the stream: emit all remaining lines beyond the last commit.
@@ -91,18 +69,23 @@ impl MarkdownStreamCollector {
         );
         tracing::trace!("markdown finalize (raw source):\n---\n{source}\n---");
 
-        let mut rendered: Vec<Line<'static>> = Vec::new();
-        markdown::append_markdown(&source, self.width, Some(self.cwd.as_path()), &mut rendered);
-
-        let out = if self.committed_line_count >= rendered.len() {
-            Vec::new()
-        } else {
-            rendered[self.committed_line_count..].to_vec()
-        };
+        let out = self.render_source(&source);
 
         // Reset collector state for next stream.
         self.clear();
         out
+    }
+
+    fn render_source(&self, source: &str) -> Vec<Line<'static>> {
+        let mut rendered: Vec<Line<'static>> = Vec::new();
+        markdown::append_markdown(source, self.width, Some(self.cwd.as_path()), &mut rendered);
+        if rendered
+            .last()
+            .is_some_and(|line| crate::render::line_utils::is_blank_line_spaces_only(line))
+        {
+            rendered.pop();
+        }
+        rendered
     }
 }
 
@@ -123,11 +106,17 @@ pub(crate) fn simulate_stream_markdown_for_tests(
     for d in deltas {
         collector.push_delta(d);
         if d.contains('\n') {
-            out.extend(collector.commit_complete_lines());
+            let commit = collector.commit_complete_lines();
+            if !commit.is_empty() {
+                out = commit;
+            }
         }
     }
     if finalize {
-        out.extend(collector.finalize_and_drain());
+        let final_render = collector.finalize_and_drain();
+        if !final_render.is_empty() {
+            out = final_render;
+        }
     }
     out
 }
@@ -270,7 +259,8 @@ mod tests {
     #[tokio::test]
     async fn heading_starts_on_new_line_when_following_paragraph() {
         // Stream a paragraph line, then a heading on the next line.
-        // Expect two distinct rendered lines: "Hello." and "Heading".
+        // The collector emits the latest committed snapshot, so the second
+        // commit includes both the paragraph and the heading block.
         let mut c = super::MarkdownStreamCollector::new(None, &super::test_cwd());
         c.push_delta("Hello.\n");
         let out1 = c.commit_complete_lines();
@@ -306,8 +296,8 @@ mod tests {
             .collect();
         assert_eq!(
             s2,
-            vec!["", "## Heading"],
-            "expected a blank separator then the heading line"
+            vec!["Hello.", "", "## Heading"],
+            "expected the full committed snapshot with paragraph and heading"
         );
 
         let line_to_string = |l: &ratatui::text::Line<'_>| -> String {
@@ -319,14 +309,15 @@ mod tests {
         };
 
         assert_eq!(line_to_string(&out1[0]), "Hello.");
-        assert_eq!(line_to_string(&out2[1]), "## Heading");
+        assert_eq!(line_to_string(&out2[2]), "## Heading");
     }
 
     #[tokio::test]
     async fn heading_not_inlined_when_split_across_chunks() {
         // Paragraph without trailing newline, then a chunk that starts with the newline
-        // and the heading text, then a final newline. The collector should first commit
-        // only the paragraph line, and later commit the heading as its own line.
+        // and the heading text, then a final newline. The collector should
+        // first commit only the paragraph line, then later re-emit the full
+        // committed snapshot once the heading line is complete.
         let mut c = super::MarkdownStreamCollector::new(None, &super::test_cwd());
         c.push_delta("Sounds good!");
         // No commit yet
@@ -366,8 +357,8 @@ mod tests {
             .collect();
         assert_eq!(
             s2,
-            vec!["", "## Adding Bird subcommand"],
-            "expected the heading line only on the final commit"
+            vec!["Sounds good!", "", "## Adding Bird subcommand"],
+            "expected the full committed snapshot on the final commit"
         );
 
         // Sanity check raw markdown rendering for a simple line does not produce spurious extras.
@@ -419,11 +410,11 @@ mod tests {
             writeln!(f, "width: {:?}", self.width)?;
             writeln!(f, "deltas:")?;
             for (idx, delta) in self.deltas.iter().enumerate() {
-                writeln!(f, "  [{idx}] {:?}", delta)?;
+                writeln!(f, "  [{idx}] {delta:?}")?;
             }
             writeln!(f, "commits:")?;
             for (idx, commit) in self.commits.iter().enumerate() {
-                writeln!(f, "  [{idx}] {:?}", commit)?;
+                writeln!(f, "  [{idx}] {commit:?}")?;
             }
             writeln!(f, "finalize: {:?}", self.finalize)?;
             writeln!(f, "combined: {:?}", self.combined)?;
@@ -448,14 +439,16 @@ mod tests {
             if delta.contains('\n') {
                 let commit = lines_to_plain_strings(&collector.commit_complete_lines());
                 if !commit.is_empty() {
-                    combined.extend(commit.clone());
+                    combined = commit.clone();
                     commits.push(commit);
                 }
             }
         }
 
         let finalize = lines_to_plain_strings(&collector.finalize_and_drain());
-        combined.extend(finalize.clone());
+        if !finalize.is_empty() {
+            combined = finalize.clone();
+        }
 
         let full_source: String = deltas.iter().copied().collect();
         let full_render = render_markdown_to_plain_strings(&full_source, width);
