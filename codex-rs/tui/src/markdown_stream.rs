@@ -786,4 +786,17 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn markdown_stream_re_emits_when_later_text_rewraps_prior_rows() {
+        let deltas = ["This is a very long sentence that\n", "causes wrapping\n"];
+
+        for width in [Some(20), Some(24), Some(28)] {
+            assert_stream_trace_matches_full(
+                "later text that rewraps a prior row should not swallow shifted words",
+                &deltas,
+                width,
+            );
+        }
+    }
 }

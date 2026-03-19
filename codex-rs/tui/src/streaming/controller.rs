@@ -521,4 +521,17 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn controller_rewraps_prior_rows_without_swallowing_shifted_words() {
+        let deltas = ["This is a very long sentence that\n", "causes wrapping\n"];
+
+        for display_width in [22usize, 26, 30] {
+            assert_controller_matches_full(
+                "stream controller should replace earlier rows when later text rewraps them",
+                &deltas,
+                display_width,
+            );
+        }
+    }
 }
