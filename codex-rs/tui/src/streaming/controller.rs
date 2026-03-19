@@ -248,6 +248,7 @@ impl PlanStreamController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt;
     use std::path::PathBuf;
 
     fn test_cwd() -> PathBuf {
@@ -267,6 +268,93 @@ mod tests {
                     .join("")
             })
             .collect()
+    }
+
+    #[derive(Debug)]
+    struct ControllerTrace {
+        display_width: usize,
+        deltas: Vec<String>,
+        transcript: Vec<String>,
+        visible_rows: Vec<String>,
+        full_render: Vec<String>,
+    }
+
+    impl fmt::Display for ControllerTrace {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            writeln!(f, "display_width: {}", self.display_width)?;
+            writeln!(f, "deltas:")?;
+            for (idx, delta) in self.deltas.iter().enumerate() {
+                writeln!(f, "  [{idx}] {:?}", delta)?;
+            }
+            writeln!(f, "transcript: {:?}", self.transcript)?;
+            writeln!(f, "visible_rows: {:?}", self.visible_rows)?;
+            writeln!(f, "full_render: {:?}", self.full_render)
+        }
+    }
+
+    fn render_markdown_to_plain_strings(source: &str, width: Option<usize>) -> Vec<String> {
+        let mut rendered: Vec<ratatui::text::Line<'static>> = Vec::new();
+        let test_cwd = test_cwd();
+        crate::markdown::append_markdown(source, width, Some(test_cwd.as_path()), &mut rendered);
+        lines_to_plain_strings(&rendered)
+    }
+
+    fn strip_agent_prefix(line: String) -> String {
+        line.chars().skip(2).collect()
+    }
+
+    fn collect_controller_trace(deltas: &[&str], display_width: usize) -> ControllerTrace {
+        let collector_width = display_width.saturating_sub(2);
+        let mut ctrl = StreamController::new(Some(collector_width), &test_cwd());
+        let mut transcript = Vec::new();
+        let mut visible_rows = Vec::new();
+
+        for delta in deltas {
+            ctrl.push(delta);
+            while let (Some(cell), idle) = ctrl.on_commit_tick() {
+                transcript.extend(lines_to_plain_strings(&cell.transcript_lines(u16::MAX)));
+                visible_rows.extend(
+                    lines_to_plain_strings(&cell.display_lines(display_width as u16))
+                        .into_iter()
+                        .map(strip_agent_prefix),
+                );
+                if idle {
+                    break;
+                }
+            }
+        }
+
+        if let Some(cell) = ctrl.finalize() {
+            transcript.extend(lines_to_plain_strings(&cell.transcript_lines(u16::MAX)));
+            visible_rows.extend(
+                lines_to_plain_strings(&cell.display_lines(display_width as u16))
+                    .into_iter()
+                    .map(strip_agent_prefix),
+            );
+        }
+
+        let full_source: String = deltas.iter().copied().collect();
+        let full_render = render_markdown_to_plain_strings(&full_source, Some(collector_width));
+
+        ControllerTrace {
+            display_width,
+            deltas: deltas.iter().map(|delta| (*delta).to_string()).collect(),
+            transcript,
+            visible_rows,
+            full_render,
+        }
+    }
+
+    fn assert_controller_matches_full(label: &str, deltas: &[&str], display_width: usize) {
+        let trace = collect_controller_trace(deltas, display_width);
+        assert_eq!(
+            trace.transcript, trace.full_render,
+            "{label} diverged at transcript layer\n{trace}"
+        );
+        assert_eq!(
+            trace.visible_rows, trace.full_render,
+            "{label} diverged at visible row layer\n{trace}"
+        );
     }
 
     #[tokio::test]
@@ -392,5 +480,34 @@ mod tests {
             streamed, expected,
             "expected exact rendered lines for loose/tight section"
         );
+    }
+
+    #[tokio::test]
+    async fn controller_inline_code_completion_rewrites_prior_line_matches_full() {
+        let deltas = ["Проверяю `S2` vs `\n", "N/A`\n"];
+
+        for display_width in [26usize, 42, 82] {
+            assert_controller_matches_full(
+                "stream controller should not preserve stale pre-closure inline-code output",
+                &deltas,
+                display_width,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn controller_issue_15001_repro_b_matches_full() {
+        let deltas = [
+            "Evidence собран; перехожу к reviewer artifact. Открою один-два свежих backend review-файла, чтобы сохранить repo-local формат и правильно зафиксировать `S2` vs `\n",
+            "N/A` для visual review.\n",
+        ];
+
+        for display_width in [42usize, 50, 62, 74, 82] {
+            assert_controller_matches_full(
+                "stream controller should match one-shot render for issue-15001 repro B",
+                &deltas,
+                display_width,
+            );
+        }
     }
 }

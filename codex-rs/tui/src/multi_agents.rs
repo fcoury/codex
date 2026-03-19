@@ -683,6 +683,40 @@ mod tests {
         assert_snapshot!("collab_agent_transcript", snapshot);
     }
 
+    #[test]
+    fn waiting_end_flattens_completed_messages_into_lossy_summary() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let robie_id = ThreadId::from_string("00000000-0000-0000-0000-000000000002")
+            .expect("valid robie thread id");
+
+        let message = "Да, это уже реальный blocker.\nЛог menubar app теперь такой:\nauth pool at `/Users/palvaleri/codex-session-router/var/auth` contains no valid profiles";
+        let cell = waiting_end(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: "call-wait".to_string(),
+            agent_statuses: vec![CollabAgentStatusEntry {
+                thread_id: robie_id,
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                status: AgentStatus::Completed(Some(message.to_string())),
+            }],
+            statuses: HashMap::from([(
+                robie_id,
+                AgentStatus::Completed(Some(message.to_string())),
+            )]),
+        });
+
+        let rendered = cell_to_text(&cell);
+        assert!(
+            rendered.contains("Completed - Да, это уже реальный blocker. Лог menubar app теперь такой: auth pool at"),
+            "expected finished-waiting summary to flatten whitespace: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("Completed\n"),
+            "waiting_end should remain a single summary line today: {rendered:?}"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn agent_shortcut_matches_option_arrow_word_motion_fallbacks_only_when_allowed() {

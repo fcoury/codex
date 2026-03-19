@@ -2066,6 +2066,14 @@ fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) -> String {
     s
 }
 
+fn line_to_string(line: &ratatui::text::Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.clone())
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 #[tokio::test]
 async fn collab_spawn_end_shows_requested_model_and_effort() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
@@ -2107,6 +2115,62 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
     assert!(
         rendered.contains("Spawned Robie [explorer] (gpt-5 high)"),
         "expected spawn line to include agent metadata and requested model, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn streamed_agent_message_delta_issue_15001_repro_b_matches_one_shot_render() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let width: u16 = 42;
+    chat.last_rendered_width.set(Some(width as usize));
+    chat.on_task_started();
+
+    let deltas = [
+        "Evidence собран; перехожу к reviewer artifact. Открою один-два свежих backend review-файла, чтобы сохранить repo-local формат и правильно зафиксировать `S2` vs `\n",
+        "N/A` для visual review.\n",
+    ];
+
+    let mut streamed_rows = Vec::new();
+    for (idx, delta) in deltas.iter().enumerate() {
+        chat.handle_codex_event(Event {
+            id: format!("delta-{idx}"),
+            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+                delta: (*delta).to_string(),
+            }),
+        });
+        loop {
+            chat.on_commit_tick();
+            let inserted = drain_insert_history(&mut rx);
+            for cell in inserted {
+                for line in cell {
+                    streamed_rows.push(line_to_string(&line).chars().skip(2).collect::<String>());
+                }
+            }
+
+            let queued = chat
+                .stream_controller
+                .as_ref()
+                .map(|controller| controller.queued_lines())
+                .unwrap_or_default();
+            if queued == 0 {
+                break;
+            }
+        }
+    }
+
+    let full_source: String = deltas.iter().copied().collect();
+    let mut rendered = Vec::new();
+    crate::markdown::append_markdown(
+        &full_source,
+        Some(width.saturating_sub(2) as usize),
+        Some(chat.config.cwd.as_path()),
+        &mut rendered,
+    );
+    let full_rows = rendered.iter().map(line_to_string).collect::<Vec<_>>();
+
+    assert_eq!(
+        streamed_rows, full_rows,
+        "chatwidget streamed rows diverged from one-shot render\nstreamed: {streamed_rows:?}\nfull: {full_rows:?}\nsource:\n{full_source}"
     );
 }
 

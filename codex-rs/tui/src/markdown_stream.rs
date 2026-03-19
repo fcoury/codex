@@ -136,6 +136,7 @@ pub(crate) fn simulate_stream_markdown_for_tests(
 mod tests {
     use super::*;
     use ratatui::style::Color;
+    use std::fmt;
 
     #[tokio::test]
     async fn no_commit_until_newline() {
@@ -401,6 +402,80 @@ mod tests {
                     .join("")
             })
             .collect()
+    }
+
+    #[derive(Debug)]
+    struct StreamTrace {
+        width: Option<usize>,
+        deltas: Vec<String>,
+        commits: Vec<Vec<String>>,
+        finalize: Vec<String>,
+        combined: Vec<String>,
+        full_render: Vec<String>,
+    }
+
+    impl fmt::Display for StreamTrace {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            writeln!(f, "width: {:?}", self.width)?;
+            writeln!(f, "deltas:")?;
+            for (idx, delta) in self.deltas.iter().enumerate() {
+                writeln!(f, "  [{idx}] {:?}", delta)?;
+            }
+            writeln!(f, "commits:")?;
+            for (idx, commit) in self.commits.iter().enumerate() {
+                writeln!(f, "  [{idx}] {:?}", commit)?;
+            }
+            writeln!(f, "finalize: {:?}", self.finalize)?;
+            writeln!(f, "combined: {:?}", self.combined)?;
+            writeln!(f, "full_render: {:?}", self.full_render)
+        }
+    }
+
+    fn render_markdown_to_plain_strings(source: &str, width: Option<usize>) -> Vec<String> {
+        let mut rendered: Vec<ratatui::text::Line<'static>> = Vec::new();
+        let test_cwd = super::test_cwd();
+        crate::markdown::append_markdown(source, width, Some(test_cwd.as_path()), &mut rendered);
+        lines_to_plain_strings(&rendered)
+    }
+
+    fn collect_stream_trace(deltas: &[&str], width: Option<usize>) -> StreamTrace {
+        let mut collector = super::MarkdownStreamCollector::new(width, &super::test_cwd());
+        let mut commits = Vec::new();
+        let mut combined = Vec::new();
+
+        for delta in deltas {
+            collector.push_delta(delta);
+            if delta.contains('\n') {
+                let commit = lines_to_plain_strings(&collector.commit_complete_lines());
+                if !commit.is_empty() {
+                    combined.extend(commit.clone());
+                    commits.push(commit);
+                }
+            }
+        }
+
+        let finalize = lines_to_plain_strings(&collector.finalize_and_drain());
+        combined.extend(finalize.clone());
+
+        let full_source: String = deltas.iter().copied().collect();
+        let full_render = render_markdown_to_plain_strings(&full_source, width);
+
+        StreamTrace {
+            width,
+            deltas: deltas.iter().map(|delta| (*delta).to_string()).collect(),
+            commits,
+            finalize,
+            combined,
+            full_render,
+        }
+    }
+
+    fn assert_stream_trace_matches_full(label: &str, deltas: &[&str], width: Option<usize>) {
+        let trace = collect_stream_trace(deltas, width);
+        assert_eq!(
+            trace.combined, trace.full_render,
+            "{label} diverged from one-shot render\n{trace}"
+        );
     }
 
     #[tokio::test]
@@ -688,5 +763,34 @@ mod tests {
             "more stuff\n",
         ])
         .await;
+    }
+
+    #[tokio::test]
+    async fn markdown_stream_re_emits_when_inline_code_completion_rewrites_prior_line() {
+        let deltas = ["Проверяю `S2` vs `\n", "N/A`\n"];
+
+        for width in [None, Some(24), Some(40), Some(80)] {
+            assert_stream_trace_matches_full(
+                "inline-code completion should not leave stale pre-closure output",
+                &deltas,
+                width,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn markdown_stream_issue_15001_repro_b_cross_newline_code_span_matches_full() {
+        let deltas = [
+            "Evidence собран; перехожу к reviewer artifact. Открою один-два свежих backend review-файла, чтобы сохранить repo-local формат и правильно зафиксировать `S2` vs `\n",
+            "N/A` для visual review.\n",
+        ];
+
+        for width in [Some(40), Some(48), Some(60), Some(72), Some(80)] {
+            assert_stream_trace_matches_full(
+                "issue-15001 repro B should match one-shot render after code-span closure",
+                &deltas,
+                width,
+            );
+        }
     }
 }
