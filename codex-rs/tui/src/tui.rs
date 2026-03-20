@@ -496,6 +496,48 @@ impl Tui {
             }
 
             if !self.pending_history_lines.is_empty() {
+                if crate::investigation_debug::enabled() {
+                    let line_count = self.pending_history_lines.len();
+                    let span_count = self
+                        .pending_history_lines
+                        .iter()
+                        .map(|line| line.spans.len())
+                        .sum::<usize>();
+                    let total_bytes = self
+                        .pending_history_lines
+                        .iter()
+                        .flat_map(|line| line.spans.iter())
+                        .map(|span| span.content.len())
+                        .sum::<usize>();
+                    let max_width = self
+                        .pending_history_lines
+                        .iter()
+                        .map(ratatui::text::Line::width)
+                        .max()
+                        .unwrap_or(0);
+                    let preview = self
+                        .pending_history_lines
+                        .iter()
+                        .take(3)
+                        .chain(self.pending_history_lines.iter().rev().take(3).rev())
+                        .map(|line| {
+                            line.spans
+                                .iter()
+                                .map(|span| span.content.as_ref())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let report = format!(
+                        "screen_width: {}\nline_count: {line_count}\nspan_count: {span_count}\ntotal_bytes: {total_bytes}\nmax_line_width: {max_width}\npreview:\n{preview}\n",
+                        size.width
+                    );
+                    crate::investigation_debug::write_text(
+                        "pending-history",
+                        "frame-batch.txt",
+                        &report,
+                    );
+                }
                 crate::insert_history::insert_history_lines(
                     terminal,
                     self.pending_history_lines.clone(),

@@ -2,6 +2,7 @@ use std::fmt;
 use std::io;
 use std::io::Write;
 
+use crate::investigation_debug;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::line_contains_url_like;
@@ -43,7 +44,6 @@ where
     let mut area = terminal.viewport_area;
     let mut should_update_area = false;
     let last_cursor_pos = terminal.last_known_cursor_pos;
-    let writer = terminal.backend_mut();
 
     // Pre-wrap lines for terminal scrollback. Three paths:
     //
@@ -59,21 +59,93 @@ where
     let wrap_width = area.width.max(1) as usize;
     let mut wrapped = Vec::new();
     let mut wrapped_rows = 0usize;
+    let mut url_only_lines = 0usize;
+    let mut mixed_url_lines = 0usize;
+    let mut plain_text_bytes = 0usize;
 
     for line in &lines {
-        let line_wrapped =
-            if line_contains_url_like(line) && !line_has_mixed_url_and_non_url_tokens(line) {
-                vec![line.clone()]
-            } else {
-                adaptive_wrap_line(line, RtOptions::new(wrap_width))
-            };
+        let contains_url = line_contains_url_like(line);
+        let mixed_url_and_non_url_tokens = line_has_mixed_url_and_non_url_tokens(line);
+        if contains_url && !mixed_url_and_non_url_tokens {
+            url_only_lines += 1;
+        } else if mixed_url_and_non_url_tokens {
+            mixed_url_lines += 1;
+        }
+        plain_text_bytes += line
+            .spans
+            .iter()
+            .map(|span| span.content.len())
+            .sum::<usize>();
+        let line_wrapped = if contains_url && !mixed_url_and_non_url_tokens {
+            vec![line.clone()]
+        } else {
+            adaptive_wrap_line(line, RtOptions::new(wrap_width))
+        };
         wrapped_rows += line_wrapped
             .iter()
             .map(|wrapped_line| wrapped_line.width().max(1).div_ceil(wrap_width))
             .sum::<usize>();
         wrapped.extend(line_wrapped);
     }
+    if investigation_debug::enabled() {
+        let full_input_lines = lines
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| format!("{idx:04}: {}", line_to_plain_text(line)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let input_preview = lines
+            .iter()
+            .take(3)
+            .chain(lines.iter().rev().take(3).rev())
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let wrapped_preview = wrapped
+            .iter()
+            .take(3)
+            .chain(wrapped.iter().rev().take(3).rev())
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = format!(
+            "input_lines: {}\nwrapped_lines: {}\nwrapped_rows: {}\nwrap_width: {wrap_width}\nurl_only_lines: {url_only_lines}\nmixed_url_lines: {mixed_url_lines}\nplain_text_bytes: {plain_text_bytes}\ninput_preview:\n{input_preview}\n\nwrapped_preview:\n{wrapped_preview}\n",
+            lines.len(),
+            wrapped.len(),
+            wrapped_rows
+        );
+        investigation_debug::write_text("insert-history", "stats.txt", &report);
+        let full_input_report = format!(
+            "input_lines: {}\nwrap_width: {wrap_width}\n\n{full_input_lines}\n",
+            lines.len()
+        );
+        investigation_debug::write_text(
+            "insert-history-input-lines",
+            "input-lines.txt",
+            &full_input_report,
+        );
+        let full_wrapped_lines = wrapped
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| format!("{idx:04}: {}", line_to_plain_text(line)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let full_wrapped_report = format!(
+            "wrap_width: {wrap_width}\nwrapped_lines: {}\nwrapped_rows: {}\n\n{full_wrapped_lines}\n",
+            wrapped.len(),
+            wrapped_rows
+        );
+        investigation_debug::write_text(
+            "insert-history-lines",
+            "wrapped-lines.txt",
+            &full_wrapped_report,
+        );
+    }
     let wrapped_lines = wrapped_rows as u16;
+    let mut writer = investigation_debug::TeeWriter::new(
+        terminal.backend_mut(),
+        investigation_debug::capture_ansi_enabled(),
+    );
     let cursor_top = if area.bottom() < screen_size.height {
         // If the viewport is not at the bottom of the screen, scroll it down to make room.
         // Don't scroll it past the bottom of the screen.
@@ -86,13 +158,13 @@ where
         //   3) Emitting Reverse Index (RI, ESC M) `scroll_amount` times
         //   4) Resetting the scroll region back to full screen
         let top_1based = area.top() + 1; // Convert 0-based row to 1-based for DECSTBM
-        queue!(writer, SetScrollRegion(top_1based..screen_size.height))?;
-        queue!(writer, MoveTo(0, area.top()))?;
+        queue!(&mut writer, SetScrollRegion(top_1based..screen_size.height))?;
+        queue!(&mut writer, MoveTo(0, area.top()))?;
         for _ in 0..scroll_amount {
             // Reverse Index (RI): ESC M
-            queue!(writer, Print("\x1bM"))?;
+            queue!(&mut writer, Print("\x1bM"))?;
         }
-        queue!(writer, ResetScrollRegion)?;
+        queue!(&mut writer, ResetScrollRegion)?;
 
         let cursor_top = area.top().saturating_sub(1);
         area.y += scroll_amount;
@@ -117,29 +189,29 @@ where
     // ││                            ││
     // │╰────────────────────────────╯│
     // └──────────────────────────────┘
-    queue!(writer, SetScrollRegion(1..area.top()))?;
+    queue!(&mut writer, SetScrollRegion(1..area.top()))?;
 
     // NB: we are using MoveTo instead of set_cursor_position here to avoid messing with the
     // terminal's last_known_cursor_position, which hopefully will still be accurate after we
     // fetch/restore the cursor position. insert_history_lines should be cursor-position-neutral :)
-    queue!(writer, MoveTo(0, cursor_top))?;
+    queue!(&mut writer, MoveTo(0, cursor_top))?;
 
     for line in wrapped {
-        queue!(writer, Print("\r\n"))?;
+        queue!(&mut writer, Print("\r\n"))?;
         // URL lines can be wider than the terminal and will
         // character-wrap onto continuation rows. Pre-clear those rows
         // so stale content from a previously longer line is erased.
         let physical_rows = line.width().max(1).div_ceil(wrap_width);
         if physical_rows > 1 {
-            queue!(writer, SavePosition)?;
+            queue!(&mut writer, SavePosition)?;
             for _ in 1..physical_rows {
-                queue!(writer, MoveDown(1), MoveToColumn(0))?;
-                queue!(writer, Clear(ClearType::UntilNewLine))?;
+                queue!(&mut writer, MoveDown(1), MoveToColumn(0))?;
+                queue!(&mut writer, Clear(ClearType::UntilNewLine))?;
             }
-            queue!(writer, RestorePosition)?;
+            queue!(&mut writer, RestorePosition)?;
         }
         queue!(
-            writer,
+            &mut writer,
             SetColors(Colors::new(
                 line.style
                     .fg
@@ -151,7 +223,7 @@ where
                     .unwrap_or(CColor::Reset)
             ))
         )?;
-        queue!(writer, Clear(ClearType::UntilNewLine))?;
+        queue!(&mut writer, Clear(ClearType::UntilNewLine))?;
         // Merge line-level style into each span so that ANSI colors reflect
         // line styles (e.g., blockquotes with green fg).
         let merged_spans: Vec<Span> = line
@@ -162,23 +234,33 @@ where
                 content: s.content.clone(),
             })
             .collect();
-        write_spans(writer, merged_spans.iter())?;
+        write_spans(&mut writer, merged_spans.iter())?;
     }
 
-    queue!(writer, ResetScrollRegion)?;
+    queue!(&mut writer, ResetScrollRegion)?;
 
     // Restore the cursor position to where it was before we started.
-    queue!(writer, MoveTo(last_cursor_pos.x, last_cursor_pos.y))?;
+    queue!(&mut writer, MoveTo(last_cursor_pos.x, last_cursor_pos.y))?;
 
-    let _ = writer;
+    let ansi_capture = writer.finish_capture();
     if should_update_area {
         terminal.set_viewport_area(area);
     }
     if wrapped_lines > 0 {
         terminal.note_history_rows_inserted(wrapped_lines);
     }
+    if let Some(ansi_capture) = ansi_capture {
+        investigation_debug::write_bytes("insert-history-ansi", "payload.ansi", &ansi_capture);
+    }
 
     Ok(())
+}
+
+fn line_to_plain_text(line: &Line) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

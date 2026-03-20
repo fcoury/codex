@@ -23,6 +23,7 @@ use crate::history_cell;
 use crate::history_cell::HistoryCell;
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
+use crate::investigation_debug;
 use crate::model_migration::ModelMigrationOutcome;
 use crate::model_migration::migration_copy_for_models;
 use crate::model_migration::run_model_migration_prompt;
@@ -298,6 +299,74 @@ struct ThreadEventStore {
     input_state: Option<ThreadInputState>,
     capacity: usize,
     active: bool,
+}
+
+fn lines_to_plain_text(lines: &[Line<'static>]) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_history_cells_plain_text(cells: &[Arc<dyn HistoryCell>], width: u16) -> String {
+    cells
+        .iter()
+        .enumerate()
+        .map(|(idx, cell)| {
+            let mut section = format!("cell[{idx}]\n");
+            section.push_str(&lines_to_plain_text(&cell.display_lines(width)));
+            section
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn summarize_snapshot_event(event: &Event) -> String {
+    match &event.msg {
+        EventMsg::SessionConfigured(ev) => {
+            format!("SessionConfigured(session_id={})", ev.session_id)
+        }
+        EventMsg::TurnStarted(ev) => format!("TurnStarted(turn_id={})", ev.turn_id),
+        EventMsg::TurnComplete(ev) => format!(
+            "TurnComplete(turn_id={}, last_agent_message_present={})",
+            ev.turn_id,
+            ev.last_agent_message.is_some()
+        ),
+        EventMsg::AgentMessageDelta(ev) => format!("AgentMessageDelta(delta={:?})", ev.delta),
+        EventMsg::AgentMessage(ev) => format!("AgentMessage(message={:?})", ev.message),
+        EventMsg::ItemCompleted(ev) => format!("ItemCompleted(item={:?})", ev.item),
+        other => format!("{other:?}"),
+    }
+}
+
+fn thread_snapshot_debug_report(
+    thread_id: ThreadId,
+    label: &str,
+    snapshot: &ThreadEventSnapshot,
+) -> String {
+    let mut report = format!("thread_id: {thread_id}\nlabel: {label}\n");
+    report.push_str(&format!(
+        "session_configured: {}\ninput_state_present: {}\nevent_count: {}\n",
+        snapshot.session_configured.is_some(),
+        snapshot.input_state.is_some(),
+        snapshot.events.len()
+    ));
+    if let Some(event) = &snapshot.session_configured {
+        report.push_str("session_configured_event:\n");
+        report.push_str(&summarize_snapshot_event(event));
+        report.push('\n');
+    }
+    report.push_str("events:\n");
+    for (idx, event) in snapshot.events.iter().enumerate() {
+        report.push_str(&format!("  [{idx}] {}\n", summarize_snapshot_event(event)));
+    }
+    report
 }
 
 impl ThreadEventStore {
@@ -1371,6 +1440,33 @@ impl App {
         self.chat_widget.set_active_agent_label(label);
     }
 
+    fn dump_thread_replay_view_debug(&self, stage: &str, thread_id: ThreadId, width: u16) {
+        if !investigation_debug::enabled() {
+            return;
+        }
+
+        let label = self.thread_label(thread_id);
+        let mut report = format!(
+            "thread_id: {thread_id}\nlabel: {label}\nstage: {stage}\nwidth: {width}\ntranscript_cells: {}\n",
+            self.transcript_cells.len()
+        );
+        report.push_str("\ntranscript:\n");
+        report.push_str(&render_history_cells_plain_text(
+            &self.transcript_cells,
+            width,
+        ));
+        report.push_str("\n\nactive_cell:\n");
+        match self.chat_widget.active_cell_transcript_lines(width) {
+            Some(lines) => report.push_str(&lines_to_plain_text(&lines)),
+            None => report.push_str("<none>"),
+        }
+        investigation_debug::write_text(
+            "thread-replay",
+            &format!("{thread_id}-{stage}.txt"),
+            &report,
+        );
+    }
+
     async fn thread_cwd(&self, thread_id: ThreadId) -> Option<PathBuf> {
         let channel = self.thread_event_channels.get(&thread_id)?;
         let store = channel.store.lock().await;
@@ -1733,6 +1829,15 @@ impl App {
             return Ok(());
         };
 
+        if investigation_debug::enabled() {
+            let label = self.thread_label(thread_id);
+            investigation_debug::write_text(
+                "thread-snapshot",
+                &format!("{thread_id}-before-replay.txt"),
+                &thread_snapshot_debug_report(thread_id, &label, &snapshot),
+            );
+        }
+
         self.active_thread_id = Some(thread_id);
         self.active_thread_rx = Some(receiver);
 
@@ -1748,6 +1853,11 @@ impl App {
 
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot, !is_replay_only);
+        self.dump_thread_replay_view_debug(
+            "post-replay",
+            thread_id,
+            tui.terminal.last_known_screen_size.width,
+        );
         if is_replay_only {
             self.chat_widget.add_info_message(
                 format!("Agent thread {thread_id} is closed. Replaying saved transcript."),
@@ -1755,6 +1865,11 @@ impl App {
             );
         }
         self.drain_active_thread_events(tui).await?;
+        self.dump_thread_replay_view_debug(
+            "post-drain",
+            thread_id,
+            tui.terminal.last_known_screen_size.width,
+        );
         self.refresh_pending_thread_approvals().await;
 
         Ok(())
@@ -2582,6 +2697,17 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
                 self.transcript_cells.push(cell.clone());
+                if investigation_debug::enabled() {
+                    let thread_label = self
+                        .active_thread_id
+                        .map(|thread_id| self.thread_label(thread_id))
+                        .unwrap_or_else(|| "main".to_string());
+                    investigation_debug::write_text(
+                        "history-cell-pre-display",
+                        &format!("{thread_label}-cell.txt"),
+                        &history_cell::investigation_report(cell.as_ref()),
+                    );
+                }
                 let mut display = cell.display_lines(tui.terminal.last_known_screen_size.width);
                 if !display.is_empty() {
                     // Only insert a separating blank line for new cells that are not
@@ -4197,11 +4323,16 @@ mod tests {
     use codex_protocol::config_types::CollaborationModeMask;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
+    use codex_protocol::items::AgentMessageContent;
+    use codex_protocol::items::AgentMessageItem;
+    use codex_protocol::items::TurnItem;
+    use codex_protocol::models::MessagePhase;
     use codex_protocol::openai_models::ModelAvailabilityNux;
     use codex_protocol::protocol::AgentMessageDeltaEvent;
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::Event;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionConfiguredEvent;
     use codex_protocol::protocol::SessionSource;
@@ -5016,6 +5147,107 @@ mod tests {
             ),
             other => panic!("expected restored paste submission, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn replay_thread_snapshot_prefers_completed_agent_message_item_over_deltas() {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        let turn_id = "turn-1".to_string();
+        let completed_message =
+            "clean completed agent message with intact file references".to_string();
+
+        app.replay_thread_snapshot(
+            ThreadEventSnapshot {
+                session_configured: Some(Event {
+                    id: "session-configured".to_string(),
+                    msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                        session_id: thread_id,
+                        forked_from_id: None,
+                        thread_name: None,
+                        model: "gpt-test".to_string(),
+                        model_provider_id: "test-provider".to_string(),
+                        service_tier: None,
+                        approval_policy: AskForApproval::Never,
+                        approvals_reviewer: ApprovalsReviewer::User,
+                        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                        cwd: PathBuf::from("/tmp/project"),
+                        reasoning_effort: None,
+                        history_log_id: 0,
+                        history_entry_count: 0,
+                        initial_messages: None,
+                        network_proxy: None,
+                        rollout_path: Some(PathBuf::new()),
+                    }),
+                }),
+                events: vec![
+                    Event {
+                        id: "turn-started".to_string(),
+                        msg: EventMsg::TurnStarted(TurnStartedEvent {
+                            turn_id: turn_id.clone(),
+                            model_context_window: None,
+                            collaboration_mode_kind: Default::default(),
+                        }),
+                    },
+                    Event {
+                        id: "agent-delta-1".to_string(),
+                        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+                            delta: "corrupted streamed ".to_string(),
+                        }),
+                    },
+                    Event {
+                        id: "agent-delta-2".to_string(),
+                        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+                            delta: "text".to_string(),
+                        }),
+                    },
+                    Event {
+                        id: "item-completed".to_string(),
+                        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+                            thread_id,
+                            turn_id,
+                            item: TurnItem::AgentMessage(AgentMessageItem {
+                                id: "msg-1".to_string(),
+                                content: vec![AgentMessageContent::Text {
+                                    text: completed_message.clone(),
+                                }],
+                                phase: Some(MessagePhase::Commentary),
+                            }),
+                        }),
+                    },
+                ],
+                input_state: None,
+            },
+            false,
+        );
+
+        let mut agent_message_reports = Vec::new();
+        while let Ok(event) = app_event_rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event
+                && cell.as_any().is::<AgentMessageCell>()
+            {
+                agent_message_reports
+                    .push(crate::history_cell::investigation_report(cell.as_ref()));
+            }
+        }
+
+        assert_eq!(
+            agent_message_reports.len(),
+            1,
+            "thread-snapshot replay should insert a single completed agent message cell, got:\n{}",
+            agent_message_reports.join("\n---\n"),
+        );
+        let agent_message_report = agent_message_reports
+            .pop()
+            .expect("expected replayed agent message cell");
+        assert!(
+            agent_message_report.contains(&completed_message),
+            "replayed agent message cell should use the clean completed item:\n{agent_message_report}"
+        );
+        assert!(
+            !agent_message_report.contains("corrupted streamed text"),
+            "replayed agent message cell should not preserve replayed deltas over the completed item:\n{agent_message_report}"
+        );
     }
 
     #[tokio::test]

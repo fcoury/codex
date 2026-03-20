@@ -196,6 +196,46 @@ impl dyn HistoryCell {
     }
 }
 
+pub(crate) fn investigation_report(cell: &dyn HistoryCell) -> String {
+    if let Some(cell) = cell.as_any().downcast_ref::<AgentMessageCell>() {
+        let lines = cell
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| format!("{idx:04}: {}", plain_text(line)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!(
+            "kind: AgentMessageCell\nis_first_line: {}\nraw_lines: {}\n\n{lines}\n",
+            cell.is_first_line,
+            cell.lines.len()
+        );
+    }
+
+    if let Some(cell) = cell.as_any().downcast_ref::<PlainHistoryCell>() {
+        let lines = cell
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| format!("{idx:04}: {}", plain_text(line)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!(
+            "kind: PlainHistoryCell\nraw_lines: {}\n\n{lines}\n",
+            cell.lines.len()
+        );
+    }
+
+    format!("kind: {}\n", std::any::type_name_of_val(cell))
+}
+
+fn plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
 #[derive(Debug)]
 pub(crate) struct UserHistoryCell {
     pub message: String,
