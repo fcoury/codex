@@ -60,6 +60,7 @@ use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
+use codex_protocol::protocol::AgentMessageContentDeltaEvent;
 use codex_protocol::protocol::AgentMessageDeltaEvent;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AgentReasoningDeltaEvent;
@@ -275,6 +276,130 @@ async fn thread_snapshot_replay_does_not_duplicate_agent_message_history() {
     assert!(
         rendered.contains("assistant reply"),
         "expected replayed assistant message, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn resume_initial_replay_does_not_duplicate_completed_agent_message_history() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    chat.replay_initial_messages(vec![
+        EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "assistant reply".to_string(),
+        }),
+        EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: ThreadId::new(),
+            turn_id: "turn-1".to_string(),
+            item: TurnItem::AgentMessage(AgentMessageItem {
+                id: "msg-1".to_string(),
+                content: vec![AgentMessageContent::Text {
+                    text: "assistant reply".to_string(),
+                }],
+                phase: None,
+                memory_citation: None,
+            }),
+        }),
+        EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: Some("assistant reply".to_string()),
+        }),
+    ]);
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected replayed assistant message to render once"
+    );
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("assistant reply"),
+        "expected replayed assistant message, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn thread_snapshot_replay_uses_turn_complete_last_agent_message_without_completed_item() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event_replay(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    chat.handle_codex_event_replay(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "stale delta".to_string(),
+        }),
+    });
+    chat.handle_codex_event_replay(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: Some("assistant reply".to_string()),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected replayed assistant message to render from TurnComplete fallback"
+    );
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("assistant reply"),
+        "expected replayed assistant message, got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("stale delta"),
+        "expected replay fallback to ignore stale delta content, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn thread_snapshot_replay_does_not_duplicate_commentary_item_from_turn_complete() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event_replay(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: ThreadId::new(),
+            turn_id: "turn-1".to_string(),
+            item: TurnItem::AgentMessage(AgentMessageItem {
+                id: "msg-1".to_string(),
+                content: vec![AgentMessageContent::Text {
+                    text: "commentary reply".to_string(),
+                }],
+                phase: Some(MessagePhase::Commentary),
+                memory_citation: None,
+            }),
+        }),
+    });
+    chat.handle_codex_event_replay(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: Some("commentary reply".to_string()),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected TurnComplete fallback to skip duplicate commentary text"
+    );
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("commentary reply"),
+        "expected replayed commentary message, got {rendered:?}"
     );
 }
 
@@ -1900,6 +2025,12 @@ async fn make_chatwidget_manual(
         terminal_title_status_kind: TerminalTitleStatusKind::Working,
         retry_status_header: None,
         pending_status_indicator_restore: false,
+        live_agent_message_item_id: None,
+        pending_live_agent_message_duplicate: None,
+        thread_snapshot_replay_saw_final_agent_message_item: false,
+        thread_snapshot_replay_last_agent_message_item: None,
+        thread_snapshot_replay_agent_delta_turn_id: None,
+        thread_snapshot_replay_agent_deltas_active: false,
         suppress_queue_autosend: false,
         thread_id: None,
         thread_name: None,
@@ -3110,7 +3241,7 @@ async fn plan_implementation_popup_skips_when_messages_queued() {
     chat.bottom_pane.set_task_running(true);
     chat.queue_user_message("Queued message".into());
 
-    chat.on_task_complete(Some("Plan details".to_string()), false);
+    chat.on_task_complete(Some("Plan details".to_string()), None);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -3136,7 +3267,7 @@ async fn plan_implementation_popup_skips_without_proposed_plan() {
             status: StepStatus::Pending,
         }],
     });
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -3157,7 +3288,7 @@ async fn plan_implementation_popup_shows_after_proposed_plan_output() {
     chat.on_task_started();
     chat.on_plan_delta("- Step 1\n- Step 2\n".to_string());
     chat.on_plan_item_completed("- Step 1\n- Step 2\n".to_string());
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -3199,7 +3330,7 @@ async fn plan_implementation_popup_skips_when_steer_follows_proposed_plan() {
     }
 
     complete_user_message(&mut chat, "user-1", "Please continue.");
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -3245,7 +3376,7 @@ async fn plan_implementation_popup_shows_after_new_plan_follows_steer() {
 "
         .to_string(),
     );
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -3275,7 +3406,7 @@ async fn plan_implementation_popup_skips_when_rate_limit_prompt_pending() {
         }],
     });
     chat.on_rate_limit_snapshot(Some(snapshot(92.0)));
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -3908,6 +4039,24 @@ async fn idle_commit_ticks_do_not_restore_status_without_commentary_completion()
 }
 
 #[tokio::test]
+async fn commit_tick_requests_redraw_when_active_stream_cell_changes() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.on_task_started();
+    chat.on_agent_message_delta("Preamble line\n".to_string());
+
+    let (frame_requester, mut frame_schedule_rx) = FrameRequester::test_observable();
+    chat.frame_requester = frame_requester;
+
+    chat.on_commit_tick();
+
+    assert!(
+        chat.active_cell.is_some(),
+        "expected commit tick to update active cell"
+    );
+    assert!(frame_schedule_rx.try_recv().is_ok());
+}
+
+#[tokio::test]
 async fn commentary_completion_restores_status_indicator_before_exec_begin() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
 
@@ -3957,6 +4106,601 @@ async fn plan_completion_restores_status_indicator_after_streaming_plan_output()
 
     assert_eq!(chat.bottom_pane.status_indicator_visible(), true);
     assert_eq!(chat.bottom_pane.is_task_running(), true);
+}
+
+#[tokio::test]
+async fn later_plan_deltas_flush_non_plan_active_cells_before_replacing_active_slot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let plan_mask =
+        collaboration_modes::mask_for_kind(chat.models_manager.as_ref(), ModeKind::Plan)
+            .expect("expected plan collaboration mask");
+    chat.set_collaboration_mask(plan_mask);
+
+    chat.on_task_started();
+    chat.on_plan_delta("- Step 1\n".to_string());
+    chat.on_commit_tick();
+    drain_insert_history(&mut rx);
+
+    chat.on_web_search_begin(WebSearchBeginEvent {
+        call_id: "search-1".to_string(),
+    });
+    drain_insert_history(&mut rx);
+    assert!(
+        chat.active_cell
+            .as_ref()
+            .is_some_and(|cell| cell.as_any().is::<WebSearchCell>())
+    );
+
+    chat.on_plan_delta("- Step 2\n".to_string());
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected web search active cell to flush into history"
+    );
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("Searching"),
+        "expected flushed web search history cell, got {rendered:?}"
+    );
+    assert!(
+        !chat
+            .active_cell
+            .as_ref()
+            .is_some_and(|cell| cell.as_any().is::<WebSearchCell>())
+    );
+    assert!(chat.plan_stream_controller.is_some());
+}
+
+#[tokio::test]
+async fn commit_tick_flushes_non_stream_active_cell_before_stream_replacement() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let plan_mask =
+        collaboration_modes::mask_for_kind(chat.models_manager.as_ref(), ModeKind::Plan)
+            .expect("expected plan collaboration mask");
+    chat.set_collaboration_mask(plan_mask);
+
+    chat.on_task_started();
+    chat.on_plan_delta("- Step 1\n".to_string());
+
+    chat.on_web_search_begin(WebSearchBeginEvent {
+        call_id: "search-1".to_string(),
+    });
+    drain_insert_history(&mut rx);
+    assert!(
+        chat.active_cell
+            .as_ref()
+            .is_some_and(|cell| cell.as_any().is::<WebSearchCell>())
+    );
+
+    chat.on_commit_tick();
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected commit tick to flush web search active cell into history"
+    );
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("Searching"),
+        "expected flushed web search history cell, got {rendered:?}"
+    );
+    assert!(
+        chat.active_cell
+            .as_ref()
+            .is_some_and(|cell| cell.as_any().is::<history_cell::ProposedPlanStreamCell>())
+    );
+}
+
+#[tokio::test]
+async fn plan_completion_flushes_non_plan_active_cell_before_finalized_plan() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let plan_mask =
+        collaboration_modes::mask_for_kind(chat.models_manager.as_ref(), ModeKind::Plan)
+            .expect("expected plan collaboration mask");
+    chat.set_collaboration_mask(plan_mask);
+
+    chat.on_task_started();
+    chat.on_plan_delta("- Step 1\n".to_string());
+    chat.on_commit_tick();
+    drain_insert_history(&mut rx);
+
+    chat.on_web_search_begin(WebSearchBeginEvent {
+        call_id: "search-1".to_string(),
+    });
+    drain_insert_history(&mut rx);
+    assert!(
+        chat.active_cell
+            .as_ref()
+            .is_some_and(|cell| cell.as_any().is::<WebSearchCell>())
+    );
+
+    chat.on_plan_item_completed("- Step 1\n".to_string());
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        2,
+        "expected web search row and finalized plan row to both reach history"
+    );
+    let search = lines_to_single_string(&cells[0]);
+    assert!(
+        search.contains("Searching"),
+        "expected flushed web search history cell, got {search:?}"
+    );
+    let plan = lines_to_single_string(&cells[1]);
+    assert!(
+        plan.contains("Proposed Plan"),
+        "expected finalized plan history cell, got {plan:?}"
+    );
+    assert!(chat.active_cell.is_none());
+}
+
+#[tokio::test]
+async fn task_complete_flushes_non_plan_active_cell_before_finalized_plan() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let plan_mask =
+        collaboration_modes::mask_for_kind(chat.models_manager.as_ref(), ModeKind::Plan)
+            .expect("expected plan collaboration mask");
+    chat.set_collaboration_mask(plan_mask);
+
+    chat.on_task_started();
+    chat.on_plan_delta("- Step 1\n".to_string());
+    chat.on_commit_tick();
+    drain_insert_history(&mut rx);
+
+    chat.on_web_search_begin(WebSearchBeginEvent {
+        call_id: "search-1".to_string(),
+    });
+    drain_insert_history(&mut rx);
+    assert!(
+        chat.active_cell
+            .as_ref()
+            .is_some_and(|cell| cell.as_any().is::<WebSearchCell>())
+    );
+
+    chat.on_task_complete(None, None);
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        2,
+        "expected web search row and finalized plan row to both reach history on task completion"
+    );
+    let search = lines_to_single_string(&cells[0]);
+    assert!(
+        search.contains("Searching"),
+        "expected flushed web search history cell, got {search:?}"
+    );
+    let plan = lines_to_single_string(&cells[1]);
+    assert!(
+        plan.contains("Proposed Plan"),
+        "expected finalized plan history cell, got {plan:?}"
+    );
+    assert!(chat.active_cell.is_none());
+}
+
+#[tokio::test]
+async fn live_agent_message_content_delta_keeps_stream_contiguous_and_skips_legacy_echo() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new().to_string();
+
+    chat.handle_codex_event(Event {
+        id: "turn-started".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+
+    chat.handle_codex_event(Event {
+        id: "item-1-content".into(),
+        msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+            thread_id: thread_id.clone(),
+            turn_id: "turn-1".to_string(),
+            item_id: "item-1".to_string(),
+            delta: "first item\n".to_string(),
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "item-1-legacy".into(),
+        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "first item\n".to_string(),
+        }),
+    });
+    chat.on_commit_tick();
+
+    let first_active = chat
+        .active_cell_transcript_lines(u16::MAX)
+        .expect("expected active streamed cell after first item");
+    assert_eq!(
+        lines_to_single_string(&first_active).trim_end(),
+        "• first item"
+    );
+    assert!(drain_insert_history(&mut rx).is_empty());
+
+    chat.handle_codex_event(Event {
+        id: "item-2-content".into(),
+        msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+            thread_id,
+            turn_id: "turn-1".to_string(),
+            item_id: "item-2".to_string(),
+            delta: "second item\n".to_string(),
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "item-2-legacy".into(),
+        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "second item\n".to_string(),
+        }),
+    });
+    chat.on_commit_tick();
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+
+    let second_active = chat
+        .active_cell_transcript_lines(u16::MAX)
+        .expect("expected active streamed cell after second item");
+    assert_eq!(
+        lines_to_single_string(&second_active).trim_end(),
+        "• first item\n  second item"
+    );
+}
+
+#[tokio::test]
+async fn live_item_handoff_keeps_stream_contiguous_like_thread_snapshot_replay() {
+    let (mut live_chat, mut live_rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new().to_string();
+
+    live_chat.handle_codex_event(Event {
+        id: "turn-started".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+
+    for (event_id, item_id, delta) in [
+        ("item-1-content", "item-1", "line1\n"),
+        ("item-2-content", "item-2", "line2\n"),
+    ] {
+        live_chat.handle_codex_event(Event {
+            id: event_id.into(),
+            msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+                thread_id: thread_id.clone(),
+                turn_id: "turn-1".to_string(),
+                item_id: item_id.to_string(),
+                delta: delta.to_string(),
+            }),
+        });
+        live_chat.handle_codex_event(Event {
+            id: format!("{event_id}-legacy"),
+            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+                delta: delta.to_string(),
+            }),
+        });
+        live_chat.on_commit_tick();
+    }
+
+    let live_active = live_chat
+        .active_cell_transcript_lines(u16::MAX)
+        .expect("expected active streamed cell");
+    assert!(drain_insert_history(&mut live_rx).is_empty());
+    let live_blob = lines_to_single_string(&live_active);
+
+    let (mut replay_chat, _replay_rx, _op_rx) = make_chatwidget_manual(None).await;
+    replay_chat.prepare_thread_snapshot_replay(Some("turn-1".to_string()));
+    replay_chat.handle_codex_event_replay(Event {
+        id: "turn-started".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+    replay_chat.handle_codex_event_replay(Event {
+        id: "item-1-legacy".into(),
+        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "line1\n".to_string(),
+        }),
+    });
+    replay_chat.handle_codex_event_replay(Event {
+        id: "item-2-legacy".into(),
+        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "line2\n".to_string(),
+        }),
+    });
+    replay_chat.finish_thread_snapshot_replay();
+
+    let replay_active = replay_chat
+        .active_cell_transcript_lines(u16::MAX)
+        .expect("expected replayed active streamed cell");
+    let replay_blob = lines_to_single_string(&replay_active);
+
+    assert_eq!(live_blob.trim_end(), "• line1\n  line2");
+    assert_eq!(replay_blob.trim_end(), "• line1\n  line2");
+}
+
+#[tokio::test]
+async fn late_legacy_agent_message_echo_is_ignored_after_item_scoped_deltas() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new().to_string();
+
+    chat.handle_codex_event(Event {
+        id: "turn-started".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+
+    chat.handle_codex_event(Event {
+        id: "item-1-content".into(),
+        msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+            thread_id: thread_id.clone(),
+            turn_id: "turn-1".to_string(),
+            item_id: "item-1".to_string(),
+            delta: "line1\n".to_string(),
+        }),
+    });
+    chat.on_commit_tick();
+
+    chat.handle_codex_event(Event {
+        id: "item-2-content".into(),
+        msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+            thread_id,
+            turn_id: "turn-1".to_string(),
+            item_id: "item-2".to_string(),
+            delta: "line2\n".to_string(),
+        }),
+    });
+
+    chat.handle_codex_event(Event {
+        id: "item-1-legacy-late".into(),
+        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "line1\n".to_string(),
+        }),
+    });
+    chat.on_commit_tick();
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+
+    let live_active = chat
+        .active_cell_transcript_lines(u16::MAX)
+        .expect("expected active streamed cell");
+    assert_eq!(
+        lines_to_single_string(&live_active).trim_end(),
+        "• line1\n  line2"
+    );
+}
+
+#[tokio::test]
+async fn legacy_agent_message_echo_arriving_before_item_delta_is_deduped() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new().to_string();
+
+    chat.handle_codex_event(Event {
+        id: "turn-started".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+
+    chat.handle_codex_event(Event {
+        id: "item-1-legacy-first".into(),
+        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "line1\n".to_string(),
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "item-1-content-second".into(),
+        msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+            thread_id: thread_id.clone(),
+            turn_id: "turn-1".to_string(),
+            item_id: "item-1".to_string(),
+            delta: "line1\n".to_string(),
+        }),
+    });
+    chat.on_commit_tick();
+
+    chat.handle_codex_event(Event {
+        id: "item-2-legacy-first".into(),
+        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "line2\n".to_string(),
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "item-2-content-second".into(),
+        msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+            thread_id,
+            turn_id: "turn-1".to_string(),
+            item_id: "item-2".to_string(),
+            delta: "line2\n".to_string(),
+        }),
+    });
+    chat.on_commit_tick();
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+
+    let live_active = chat
+        .active_cell_transcript_lines(u16::MAX)
+        .expect("expected active streamed cell");
+    assert_eq!(
+        lines_to_single_string(&live_active).trim_end(),
+        "• line1\n  line2"
+    );
+}
+
+#[tokio::test]
+async fn live_agent_message_item_completed_prefers_completed_payload_over_stream_state() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "turn-started".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+
+    chat.on_agent_message_delta("stale live reconstruction".to_string());
+    chat.on_commit_tick();
+    assert!(drain_insert_history(&mut rx).is_empty());
+
+    chat.handle_codex_event(Event {
+        id: "item-1-completed".into(),
+        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: ThreadId::new(),
+            turn_id: "turn-1".to_string(),
+            item: TurnItem::AgentMessage(AgentMessageItem {
+                id: "msg-1".to_string(),
+                content: vec![AgentMessageContent::Text {
+                    text: "authoritative completed payload".to_string(),
+                }],
+                phase: Some(MessagePhase::Commentary),
+                memory_citation: None,
+            }),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1);
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(rendered.contains("authoritative completed payload"));
+    assert!(!rendered.contains("stale live reconstruction"));
+}
+
+#[tokio::test]
+async fn live_streamed_frontend_summary_matches_completed_render() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new().to_string();
+
+    let source = concat!(
+        "How it is consumed\n\n",
+        "mforge-ui depends on the workspace package, but in practice resolves it straight to the design system source tree via TS/Vite aliases, not a built artifact.\n\n",
+        "Actual usage is broad but concentrated around form and app-shell primitives. Representative examples:\n\n",
+        "- queue table wrapper uses DataTable, Empty, Result, SearchBoxInput, Switch, Label, Text, and shared ColumnDef/SortingState types\n",
+        "- dynamic page rendering uses Form, Dialog, and Button as core page runtime UI\n",
+        "- custom runtime-loaded components get the whole design system namespace injected as gistiaDesignSystem\n\n",
+        "Docs site coverage and gaps\n\n",
+        "The docs site is a VitePress app with two main sections, Guide and Reference, wired in docs-site/.vitepress/config.mts:12.\n",
+    );
+
+    chat.handle_codex_event(Event {
+        id: "turn-started".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+
+    for (idx, delta) in source.split_inclusive('\n').enumerate() {
+        chat.handle_codex_event(Event {
+            id: format!("content-{idx}"),
+            msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+                thread_id: thread_id.clone(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+                delta: delta.to_string(),
+            }),
+        });
+        chat.handle_codex_event(Event {
+            id: format!("legacy-{idx}"),
+            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+                delta: delta.to_string(),
+            }),
+        });
+        chat.on_commit_tick();
+    }
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+
+    let live_active = chat
+        .active_cell_transcript_lines(u16::MAX)
+        .expect("expected active streamed cell");
+    let completed = chat
+        .completed_agent_message_cell(source)
+        .expect("expected completed render")
+        .display_lines(u16::MAX);
+
+    assert_eq!(
+        lines_to_single_string(&live_active),
+        lines_to_single_string(&completed)
+    );
+}
+
+#[tokio::test]
+async fn live_stream_render_matches_fresh_buffer_after_each_chunk() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new().to_string();
+    let width: u16 = 100;
+    let total_height: u16 = 40;
+    let full_area = Rect::new(0, 0, width, total_height);
+    let mut persistent = Buffer::empty(full_area);
+
+    let source = concat!(
+        "How it is consumed\n\n",
+        "mforge-ui depends on the workspace package, but in practice resolves it straight to the design system source tree via TS/Vite aliases, not a built artifact.\n\n",
+        "Actual usage is broad but concentrated around form and app-shell primitives. Representative examples:\n\n",
+        "- queue table wrapper uses DataTable, Empty, Result, SearchBoxInput, Switch, Label, Text, and shared ColumnDef/SortingState types\n",
+        "- dynamic page rendering uses Form, Dialog, and Button as core page runtime UI\n",
+        "- custom runtime-loaded components get the whole design system namespace injected as gistiaDesignSystem\n\n",
+        "Docs site coverage and gaps\n\n",
+        "The docs site is a VitePress app with two main sections, Guide and Reference, wired in docs-site/.vitepress/config.mts:12.\n",
+    );
+
+    chat.handle_codex_event(Event {
+        id: "turn-started".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+
+    for (idx, delta) in source.split_inclusive('\n').enumerate() {
+        chat.handle_codex_event(Event {
+            id: format!("content-{idx}"),
+            msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+                thread_id: thread_id.clone(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+                delta: delta.to_string(),
+            }),
+        });
+        chat.handle_codex_event(Event {
+            id: format!("legacy-{idx}"),
+            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+                delta: delta.to_string(),
+            }),
+        });
+        chat.on_commit_tick();
+
+        let height = chat.desired_height(width);
+        let render_area = Rect::new(0, total_height.saturating_sub(height), width, height);
+        chat.render(render_area, &mut persistent);
+
+        let mut fresh = Buffer::empty(full_area);
+        chat.render(render_area, &mut fresh);
+
+        assert_eq!(
+            persistent, fresh,
+            "buffer diverged after chunk {idx}: {delta:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -5171,7 +5915,7 @@ async fn unified_exec_end_after_task_complete_is_suppressed() {
     );
     drain_insert_history(&mut rx);
 
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None);
     end_exec(&mut chat, begin, "", "", 0);
 
     let cells = drain_insert_history(&mut rx);
@@ -5185,7 +5929,7 @@ async fn unified_exec_end_after_task_complete_is_suppressed() {
 async fn unified_exec_interaction_after_task_complete_is_suppressed() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
     chat.on_task_started();
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None);
 
     chat.handle_codex_event(Event {
         id: "call-1".to_string(),
@@ -10695,45 +11439,22 @@ async fn default_terminal_title_refreshes_when_spinner_state_changes() {
     chat.config.animations = true;
 
     chat.config.tui_terminal_title = None;
-    let cwd = chat
-        .current_cwd
-        .clone()
-        .unwrap_or_else(|| chat.config.cwd.clone());
-    let project = get_git_repo_root(&cwd)
-        .map(|root| {
-            root.file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| format_directory_display(&root, None))
-        })
-        .or_else(|| {
-            chat.config
-                .config_layer_stack
-                .get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, true)
-                .iter()
-                .find_map(|layer| match &layer.name {
-                    ConfigLayerSource::Project { dot_codex_folder } => {
-                        dot_codex_folder.as_path().parent().map(|path| {
-                            path.file_name()
-                                .map(|name| name.to_string_lossy().to_string())
-                                .unwrap_or_else(|| format_directory_display(path, None))
-                        })
-                    }
-                    _ => None,
-                })
-        })
-        .unwrap_or_else(|| {
-            cwd.file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| format_directory_display(&cwd, None))
-        });
-    chat.last_terminal_title = Some(project.clone());
+    let cwd = PathBuf::from("/tmp/project");
+    chat.config.cwd = cwd.clone();
+    chat.current_cwd = Some(cwd);
+    chat.config.config_layer_stack = ConfigLayerStack::new(
+        Vec::new(),
+        chat.config.config_layer_stack.requirements().clone(),
+        chat.config.config_layer_stack.requirements_toml().clone(),
+    )
+    .expect("config layer stack without project layers");
     chat.bottom_pane.set_task_running(true);
     chat.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
     chat.terminal_title_animation_origin = Instant::now() + Duration::from_secs(1);
 
     chat.refresh_terminal_title();
 
-    assert_eq!(chat.last_terminal_title, Some(format!("⠋ {project}")));
+    assert_eq!(chat.last_terminal_title, Some("⠋ project".to_string()));
 }
 
 #[tokio::test]
@@ -11061,7 +11782,7 @@ async fn runtime_metrics_websocket_timing_logs_and_final_separator_sums_totals()
         .expect("expected websocket timing log");
     assert!(second_log.contains("TTFT: 80ms (iapi)"));
 
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None);
     let mut final_separator = None;
     while let Ok(event) = rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
