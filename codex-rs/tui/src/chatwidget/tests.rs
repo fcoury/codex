@@ -6142,6 +6142,111 @@ async fn model_history_other_entry_none_with_single_entry() {
 }
 
 #[tokio::test]
+async fn ctrl_o_toggles_to_other_recent_model_and_back_with_effort() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.set_model("model-a");
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::Medium));
+    chat.set_model("model-b");
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let first_events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        first_events.iter().any(|event| matches!(
+            event,
+            AppEvent::UpdateModelSelection {
+                model,
+                effort: Some(ReasoningEffortConfig::Medium),
+                scope: crate::app_event::ModelEffortScope::Global
+            } if model == "model-a"
+        )),
+        "expected first Ctrl+O toggle to restore model-a with Medium effort; events: {first_events:?}"
+    );
+    chat.set_model("model-a");
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::Medium));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let second_events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        second_events.iter().any(|event| matches!(
+            event,
+            AppEvent::UpdateModelSelection {
+                model,
+                effort: Some(ReasoningEffortConfig::High),
+                scope: crate::app_event::ModelEffortScope::Global
+            } if model == "model-b"
+        )),
+        "expected second Ctrl+O toggle to restore model-b with High effort; events: {second_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_o_with_single_history_entry_shows_no_previous_model_message() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.seed_model_history_if_empty();
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+
+    let mut saw_toggle_update = false;
+    let mut messages = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            AppEvent::UpdateModelSelection { .. } => saw_toggle_update = true,
+            AppEvent::InsertHistoryCell(cell) => {
+                messages.push(lines_to_single_string(&cell.display_lines(80)))
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        !saw_toggle_update,
+        "expected no model update when no alternate model is available"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("No previous model to toggle to yet.")),
+        "expected no-previous model message, got {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_o_during_task_running_reports_blocked() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_model("model-a");
+    chat.set_model("model-b");
+    chat.bottom_pane.set_task_running(true);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let mut saw_toggle_update = false;
+    let mut messages = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            AppEvent::UpdateModelSelection { .. } => saw_toggle_update = true,
+            AppEvent::InsertHistoryCell(cell) => {
+                messages.push(lines_to_single_string(&cell.display_lines(80)))
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !saw_toggle_update,
+        "expected Ctrl+O to be blocked while task is running"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Cannot switch model while a task is running.")),
+        "expected task-running block message, got {messages:?}"
+    );
+}
+
+#[tokio::test]
 async fn session_configured_uses_persisted_pair_other_when_default_present() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
     let default_model = chat.current_model().to_string();
