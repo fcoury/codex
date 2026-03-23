@@ -61,6 +61,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
@@ -134,11 +135,13 @@ use uuid::Uuid;
 mod agent_navigation;
 mod app_server_adapter;
 mod app_server_requests;
+mod loaded_threads;
 mod pending_interactive_replay;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
 use self::app_server_requests::PendingAppServerRequests;
+use self::loaded_threads::find_loaded_subagent_threads_for_primary;
 use self::pending_interactive_replay::PendingInteractiveReplayState;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
@@ -2625,7 +2628,7 @@ impl App {
         match app_server.start_thread(&config).await {
             Ok(started) => {
                 if let Err(err) = self
-                    .replace_chat_widget_with_app_server_thread(tui, started)
+                    .replace_chat_widget_with_app_server_thread(tui, app_server, started)
                     .await
                 {
                     self.chat_widget.add_error_message(format!(
@@ -2653,13 +2656,82 @@ impl App {
     async fn replace_chat_widget_with_app_server_thread(
         &mut self,
         tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
         started: AppServerStartedThread,
     ) -> Result<()> {
         let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
         self.chat_widget = ChatWidget::new_with_app_event(init);
         self.reset_thread_event_state();
         self.enqueue_primary_thread_session(started.session, started.turns)
+            .await?;
+        self.backfill_loaded_subagent_threads(app_server).await;
+        Ok(())
+    }
+
+    async fn backfill_loaded_subagent_threads(&mut self, app_server: &mut AppServerSession) {
+        let Some(primary_thread_id) = self.primary_thread_id else {
+            return;
+        };
+
+        let loaded_thread_ids = match app_server
+            .thread_loaded_list(ThreadLoadedListParams {
+                cursor: None,
+                limit: None,
+            })
             .await
+        {
+            Ok(response) => response.data,
+            Err(err) => {
+                tracing::warn!(%err, "failed to list loaded threads for subagent backfill");
+                return;
+            }
+        };
+
+        let mut threads = Vec::new();
+        for thread_id in loaded_thread_ids {
+            let Ok(thread_id) = ThreadId::from_string(&thread_id) else {
+                tracing::warn!("ignoring loaded thread with invalid id during subagent backfill");
+                continue;
+            };
+
+            match app_server
+                .thread_read(thread_id, /*include_turns*/ false)
+                .await
+            {
+                Ok(thread) => threads.push(thread),
+                Err(err) => {
+                    tracing::warn!(thread_id = %thread_id, %err, "failed to read loaded thread");
+                }
+            }
+        }
+
+        for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
+            self.ensure_thread_channel(thread.thread_id);
+            self.upsert_agent_picker_thread(
+                thread.thread_id,
+                thread.agent_nickname,
+                thread.agent_role,
+                /*is_closed*/ false,
+            );
+        }
+    }
+
+    async fn adjacent_thread_id_with_backfill(
+        &mut self,
+        app_server: &mut AppServerSession,
+        direction: AgentNavigationDirection,
+    ) -> Option<ThreadId> {
+        let current_thread = self.current_displayed_thread_id();
+        if let Some(thread_id) = self
+            .agent_navigation
+            .adjacent_thread_id(current_thread, direction)
+        {
+            return Some(thread_id);
+        }
+
+        self.backfill_loaded_subagent_threads(app_server).await;
+        self.agent_navigation
+            .adjacent_thread_id(self.current_displayed_thread_id(), direction)
     }
 
     fn fresh_session_config(&self) -> Config {
@@ -3314,7 +3386,9 @@ impl App {
                                 tui.set_notification_method(self.config.tui_notification_method);
                                 self.file_search.update_search_dir(self.config.cwd.clone());
                                 match self
-                                    .replace_chat_widget_with_app_server_thread(tui, resumed)
+                                    .replace_chat_widget_with_app_server_thread(
+                                        tui, app_server, resumed,
+                                    )
                                     .await
                                 {
                                     Ok(()) => {
@@ -3374,7 +3448,7 @@ impl App {
                         Ok(forked) => {
                             self.shutdown_current_thread(app_server).await;
                             match self
-                                .replace_chat_widget_with_app_server_thread(tui, forked)
+                                .replace_chat_widget_with_app_server_thread(tui, app_server, forked)
                                 .await
                             {
                                 Ok(()) => {
@@ -4892,10 +4966,10 @@ impl App {
             && self.chat_widget.composer_text_with_pending().is_empty()
             && previous_agent_shortcut_matches(key_event, allow_agent_word_motion_fallback)
         {
-            if let Some(thread_id) = self.agent_navigation.adjacent_thread_id(
-                self.current_displayed_thread_id(),
-                AgentNavigationDirection::Previous,
-            ) {
+            if let Some(thread_id) = self
+                .adjacent_thread_id_with_backfill(app_server, AgentNavigationDirection::Previous)
+                .await
+            {
                 let _ = self.select_agent_thread(tui, app_server, thread_id).await;
             }
             return;
@@ -4907,10 +4981,10 @@ impl App {
             && self.chat_widget.composer_text_with_pending().is_empty()
             && next_agent_shortcut_matches(key_event, allow_agent_word_motion_fallback)
         {
-            if let Some(thread_id) = self.agent_navigation.adjacent_thread_id(
-                self.current_displayed_thread_id(),
-                AgentNavigationDirection::Next,
-            ) {
+            if let Some(thread_id) = self
+                .adjacent_thread_id_with_backfill(app_server, AgentNavigationDirection::Next)
+                .await
+            {
                 let _ = self.select_agent_thread(tui, app_server, thread_id).await;
             }
             return;
