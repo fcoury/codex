@@ -954,6 +954,7 @@ async fn make_chatwidget_manual(
         saw_plan_item_this_turn: false,
         plan_delta_buffer: String::new(),
         plan_item_active: false,
+        agent_turn_markdowns: Vec::new(),
         last_separator_elapsed_secs: None,
         last_rendered_width: std::cell::Cell::new(None),
         feedback: codex_feedback::CodexFeedback::new(),

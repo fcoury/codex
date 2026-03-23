@@ -31,6 +31,7 @@ pub enum SlashCommand {
     Agent,
     // Undo,
     Diff,
+    Copy,
     Mention,
     Status,
     DebugConfig,
@@ -62,6 +63,7 @@ impl SlashCommand {
             // SlashCommand::Undo => "ask Codex to undo a turn",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
+            SlashCommand::Copy => "copy last response as markdown",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
             SlashCommand::Status => "show current session configuration and token usage",
@@ -118,6 +120,7 @@ impl SlashCommand {
             | SlashCommand::Plan
             | SlashCommand::Logout => false,
             SlashCommand::Diff
+            | SlashCommand::Copy
             | SlashCommand::Rename
             | SlashCommand::Mention
             | SlashCommand::Skills

@@ -143,6 +143,7 @@ const PLAN_IMPLEMENTATION_TITLE: &str = "Implement this plan?";
 const PLAN_IMPLEMENTATION_YES: &str = "Yes, implement this plan";
 const PLAN_IMPLEMENTATION_NO: &str = "No, stay in Plan mode";
 const PLAN_IMPLEMENTATION_CODING_MESSAGE: &str = "Implement the plan.";
+const COPY_HINT_DURATION: Duration = Duration::from_secs(2);
 
 use crate::app_event::AppEvent;
 use crate::app_event::ConnectorsSnapshot;
@@ -169,6 +170,8 @@ use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+use crate::clipboard_copy;
+use crate::clipboard_copy::CopyMethod;
 use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::collab;
 use crate::collaboration_modes;
@@ -582,6 +585,8 @@ pub(crate) struct ChatWidget {
     plan_delta_buffer: String,
     // True while a plan item is streaming.
     plan_item_active: bool,
+    // Raw markdown for assistant responses since the last session start.
+    agent_turn_markdowns: Vec<String>,
     // Status-indicator elapsed seconds captured at the last emitted final-message separator.
     //
     // This lets the separator show per-chunk work time (since the previous separator) rather than
@@ -941,6 +946,7 @@ impl ChatWidget {
     fn on_session_configured(&mut self, event: codex_core::protocol::SessionConfiguredEvent) {
         self.bottom_pane
             .set_history_metadata(event.history_log_id, event.history_entry_count);
+        self.agent_turn_markdowns.clear();
         self.set_skills(None);
         self.bottom_pane.set_connectors_snapshot(None);
         self.thread_id = Some(event.session_id);
@@ -1238,6 +1244,9 @@ impl ChatWidget {
             && let Some(cell) = controller.finalize()
         {
             self.add_boxed_history(cell);
+        }
+        if let Some(markdown) = last_agent_message.as_ref().filter(|msg| !msg.is_empty()) {
+            self.agent_turn_markdowns.push(markdown.clone());
         }
         self.flush_unified_exec_wait_streak();
         if !from_replay {
@@ -2528,6 +2537,7 @@ impl ChatWidget {
             saw_plan_item_this_turn: false,
             plan_delta_buffer: String::new(),
             plan_item_active: false,
+            agent_turn_markdowns: Vec::new(),
             last_separator_elapsed_secs: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
@@ -2679,6 +2689,7 @@ impl ChatWidget {
             saw_plan_item_this_turn: false,
             plan_delta_buffer: String::new(),
             plan_item_active: false,
+            agent_turn_markdowns: Vec::new(),
             queued_user_messages: VecDeque::new(),
             show_welcome_banner: is_first_run,
             suppress_session_configured_redraw: false,
@@ -2839,6 +2850,7 @@ impl ChatWidget {
             saw_plan_item_this_turn: false,
             plan_delta_buffer: String::new(),
             plan_item_active: false,
+            agent_turn_markdowns: Vec::new(),
             last_separator_elapsed_secs: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
@@ -2904,6 +2916,18 @@ impl ChatWidget {
                 self.bottom_pane.clear_quit_shortcut_hint();
                 self.quit_shortcut_expires_at = None;
                 self.quit_shortcut_key = None;
+            }
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(KeyModifiers::ALT)
+                && !key_hint::is_altgr(modifiers)
+                && c.eq_ignore_ascii_case(&'c') =>
+            {
+                self.copy_last_agent_markdown();
+                return;
             }
             KeyEvent {
                 code: KeyCode::Char(c),
@@ -3058,6 +3082,37 @@ impl ChatWidget {
 
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
         self.bottom_pane.set_footer_hint_override(items);
+    }
+
+    pub(crate) fn agent_markdown_for_index(&self, nth: usize) -> Option<&str> {
+        self.agent_turn_markdowns.get(nth).map(String::as_str)
+    }
+
+    fn copy_last_agent_markdown(&mut self) {
+        let Some(markdown) = self
+            .agent_turn_markdowns
+            .last()
+            .filter(|msg| !msg.is_empty())
+        else {
+            self.show_copy_footer_flash_line(Line::from("No response to copy".red()));
+            return;
+        };
+
+        let result = clipboard_copy::copy_to_clipboard(markdown);
+        self.show_copy_footer_flash(result);
+    }
+
+    fn show_copy_footer_flash(&mut self, result: Result<CopyMethod, clipboard_copy::CopyError>) {
+        let line = match result {
+            Ok(CopyMethod::Native) => Line::from("Copied Markdown".green()),
+            Ok(CopyMethod::Osc52) => Line::from("Copied Markdown (OSC 52)".green()),
+            Err(err) => Line::from(format!("Copy failed: {err}").red()),
+        };
+        self.show_copy_footer_flash_line(line);
+    }
+
+    fn show_copy_footer_flash_line(&mut self, line: Line<'static>) {
+        self.bottom_pane.show_footer_flash(line, COPY_HINT_DURATION);
     }
 
     pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
@@ -3244,6 +3299,9 @@ impl ChatWidget {
                     };
                     tx.send(AppEvent::DiffResult(text));
                 });
+            }
+            SlashCommand::Copy => {
+                self.copy_last_agent_markdown();
             }
             SlashCommand::Mention => {
                 self.insert_str("@");
@@ -3670,6 +3728,7 @@ impl ChatWidget {
     /// avoid triggering side effects. Event ids are passed as `None` to
     /// distinguish replayed events from live ones.
     fn replay_initial_messages(&mut self, events: Vec<EventMsg>) {
+        self.agent_turn_markdowns.clear();
         for msg in events {
             if matches!(
                 msg,

@@ -500,6 +500,12 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn show_footer_flash(&mut self, line: Line<'static>, duration: Duration) {
+        self.composer.show_footer_flash(line, duration);
+        self.request_redraw();
+        self.request_redraw_in(duration);
+    }
+
     /// Update the status indicator header (defaults to "Working") and details below it.
     ///
     /// Passing `None` clears any existing details. No-ops if the status indicator is not active.

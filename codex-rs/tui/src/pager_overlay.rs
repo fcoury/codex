@@ -17,6 +17,8 @@
 
 use std::io::Result;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::chatwidget::ActiveCellTranscriptKey;
 use crate::history_cell::HistoryCell;
@@ -48,6 +50,40 @@ use ratatui::widgets::Wrap;
 pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
     Static(StaticOverlay),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TranscriptBacktrackMode {
+    User,
+    Agent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HighlightedCells {
+    Single(usize),
+    Range { start: usize, end: usize },
+}
+
+impl HighlightedCells {
+    fn contains(self, idx: usize) -> bool {
+        match self {
+            HighlightedCells::Single(cell) => cell == idx,
+            HighlightedCells::Range { start, end } => (start..end).contains(&idx),
+        }
+    }
+
+    fn start(self) -> usize {
+        match self {
+            HighlightedCells::Single(cell) => cell,
+            HighlightedCells::Range { start, .. } => start,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FooterFlash {
+    line: Line<'static>,
+    expires_at: Instant,
 }
 
 impl Overlay {
@@ -102,6 +138,8 @@ const KEY_ESC: KeyBinding = key_hint::plain(KeyCode::Esc);
 const KEY_ENTER: KeyBinding = key_hint::plain(KeyCode::Enter);
 const KEY_CTRL_T: KeyBinding = key_hint::ctrl(KeyCode::Char('t'));
 const KEY_CTRL_C: KeyBinding = key_hint::ctrl(KeyCode::Char('c'));
+const KEY_TAB: KeyBinding = key_hint::plain(KeyCode::Tab);
+const KEY_C: KeyBinding = key_hint::plain(KeyCode::Char('c'));
 
 // Common pager navigation hints rendered on the first line
 const PAGER_KEY_HINTS: &[(&[KeyBinding], &str)] = &[
@@ -127,6 +165,37 @@ fn render_key_hints(area: Rect, buf: &mut Buffer, pairs: &[(&[KeyBinding], &str)
         spans.push(" ".into());
         spans.push(Span::from(desc.to_string()));
         first = false;
+    }
+    Paragraph::new(vec![Line::from(spans).dim()]).render_ref(area, buf);
+}
+
+fn render_key_hints_with_suffix(
+    area: Rect,
+    buf: &mut Buffer,
+    pairs: &[(&[KeyBinding], &str)],
+    suffix: Option<Span<'static>>,
+) {
+    let mut spans: Vec<Span<'static>> = vec![" ".into()];
+    let mut first = true;
+    for (keys, desc) in pairs {
+        if !first {
+            spans.push("   ".into());
+        }
+        for (i, key) in keys.iter().enumerate() {
+            if i > 0 {
+                spans.push("/".into());
+            }
+            spans.push(Span::from(key));
+        }
+        spans.push(" ".into());
+        spans.push(Span::from(desc.to_string()));
+        first = false;
+    }
+    if let Some(suffix) = suffix {
+        if !spans.is_empty() {
+            spans.push("   ".into());
+        }
+        spans.push(suffix);
     }
     Paragraph::new(vec![Line::from(spans).dim()]).render_ref(area, buf);
 }
@@ -427,7 +496,9 @@ pub(crate) struct TranscriptOverlay {
     view: PagerView,
     /// Committed transcript cells (does not include the live tail).
     cells: Vec<Arc<dyn HistoryCell>>,
-    highlight_cell: Option<usize>,
+    highlight_cells: Option<HighlightedCells>,
+    backtrack_mode: Option<TranscriptBacktrackMode>,
+    footer_flash: Option<FooterFlash>,
     /// Cache key for the render-only live tail appended after committed cells.
     live_tail_key: Option<LiveTailKey>,
     is_done: bool,
@@ -461,7 +532,9 @@ impl TranscriptOverlay {
                 usize::MAX,
             ),
             cells: transcript_cells,
-            highlight_cell: None,
+            highlight_cells: None,
+            backtrack_mode: None,
+            footer_flash: None,
             live_tail_key: None,
             is_done: false,
         }
@@ -469,28 +542,29 @@ impl TranscriptOverlay {
 
     fn render_cells(
         cells: &[Arc<dyn HistoryCell>],
-        highlight_cell: Option<usize>,
+        highlight_cells: Option<HighlightedCells>,
     ) -> Vec<Box<dyn Renderable>> {
         cells
             .iter()
             .enumerate()
             .flat_map(|(i, c)| {
                 let mut v: Vec<Box<dyn Renderable>> = Vec::new();
-                let mut cell_renderable = if c.as_any().is::<UserHistoryCell>() {
-                    Box::new(CachedRenderable::new(CellRenderable {
-                        cell: c.clone(),
-                        style: if highlight_cell == Some(i) {
-                            user_message_style().reversed()
-                        } else {
-                            user_message_style()
-                        },
-                    })) as Box<dyn Renderable>
+                let is_highlighted = highlight_cells.is_some_and(|highlight| highlight.contains(i));
+                let style = if c.as_any().is::<UserHistoryCell>() {
+                    if is_highlighted {
+                        user_message_style().reversed()
+                    } else {
+                        user_message_style()
+                    }
+                } else if is_highlighted {
+                    Style::default().reversed()
                 } else {
-                    Box::new(CachedRenderable::new(CellRenderable {
-                        cell: c.clone(),
-                        style: Style::default(),
-                    })) as Box<dyn Renderable>
+                    Style::default()
                 };
+                let mut cell_renderable = Box::new(CachedRenderable::new(CellRenderable {
+                    cell: c.clone(),
+                    style,
+                })) as Box<dyn Renderable>;
                 if !c.is_stream_continuation() && i > 0 {
                     cell_renderable = Box::new(InsetRenderable::new(
                         cell_renderable,
@@ -518,7 +592,7 @@ impl TranscriptOverlay {
         let had_prior_cells = !self.cells.is_empty();
         let tail_renderable = self.take_live_tail_renderable();
         self.cells.push(cell);
-        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cells);
         if let Some(tail) = tail_renderable {
             let tail = if !had_prior_cells
                 && self
@@ -587,12 +661,23 @@ impl TranscriptOverlay {
         }
     }
 
-    pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
-        self.highlight_cell = cell;
+    pub(crate) fn set_highlight_cells(&mut self, cells: Option<HighlightedCells>) {
+        self.highlight_cells = cells;
         self.rebuild_renderables();
-        if let Some(idx) = self.highlight_cell {
-            self.view.scroll_chunk_into_view(idx);
+        if let Some(highlight) = self.highlight_cells {
+            self.view.scroll_chunk_into_view(highlight.start());
         }
+    }
+
+    pub(crate) fn set_backtrack_mode(&mut self, mode: Option<TranscriptBacktrackMode>) {
+        self.backtrack_mode = mode;
+    }
+
+    pub(crate) fn set_footer_flash(&mut self, line: Line<'static>, duration: Duration) {
+        let expires_at = Instant::now()
+            .checked_add(duration)
+            .unwrap_or_else(Instant::now);
+        self.footer_flash = Some(FooterFlash { line, expires_at });
     }
 
     /// Returns whether the underlying pager view is currently pinned to the bottom.
@@ -605,7 +690,7 @@ impl TranscriptOverlay {
 
     fn rebuild_renderables(&mut self) {
         let tail_renderable = self.take_live_tail_renderable();
-        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cells);
         if let Some(tail) = tail_renderable {
             self.view.renderables.push(tail);
         }
@@ -633,20 +718,61 @@ impl TranscriptOverlay {
         renderable
     }
 
-    fn render_hints(&self, area: Rect, buf: &mut Buffer) {
+    fn render_hints(&mut self, area: Rect, buf: &mut Buffer) {
         let line1 = Rect::new(area.x, area.y, area.width, 1);
         let line2 = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
         render_key_hints(line1, buf, PAGER_KEY_HINTS);
 
+        let flash_visible = self
+            .footer_flash
+            .as_ref()
+            .is_some_and(|flash| Instant::now() < flash.expires_at);
+        if !flash_visible {
+            self.footer_flash = None;
+        }
+        if let Some(flash) = self.footer_flash.as_ref() {
+            flash.line.render_ref(line2, buf);
+            return;
+        }
+
         let mut pairs: Vec<(&[KeyBinding], &str)> = vec![(&[KEY_Q], "to quit")];
-        if self.highlight_cell.is_some() {
+        let has_highlight = self.highlight_cells.is_some();
+        let mode_label = match self.backtrack_mode {
+            Some(TranscriptBacktrackMode::User) => Some("mode: user"),
+            Some(TranscriptBacktrackMode::Agent) => Some("mode: agent"),
+            None => None,
+        };
+        if let Some(mode) = self.backtrack_mode {
+            match mode {
+                TranscriptBacktrackMode::User => {
+                    if has_highlight {
+                        pairs.push((&[KEY_ESC, KEY_LEFT], "to edit prev"));
+                        pairs.push((&[KEY_RIGHT], "to edit next"));
+                        pairs.push((&[KEY_ENTER], "to edit message"));
+                        pairs.push((&[KEY_C], "to copy"));
+                    } else {
+                        pairs.push((&[KEY_ESC], "to edit prev"));
+                    }
+                    pairs.push((&[KEY_TAB], "to switch"));
+                }
+                TranscriptBacktrackMode::Agent => {
+                    if has_highlight {
+                        pairs.push((&[KEY_ESC, KEY_LEFT], "prev response"));
+                        pairs.push((&[KEY_RIGHT], "next response"));
+                        pairs.push((&[KEY_C], "to copy"));
+                    }
+                    pairs.push((&[KEY_TAB], "to switch"));
+                }
+            }
+        } else if has_highlight {
             pairs.push((&[KEY_ESC, KEY_LEFT], "to edit prev"));
             pairs.push((&[KEY_RIGHT], "to edit next"));
             pairs.push((&[KEY_ENTER], "to edit message"));
         } else {
             pairs.push((&[KEY_ESC], "to edit prev"));
         }
-        render_key_hints(line2, buf, &pairs);
+        let suffix = mode_label.map(|label| Span::from(label.to_string()));
+        render_key_hints_with_suffix(line2, buf, &pairs, suffix);
     }
 
     pub(crate) fn render(&mut self, area: Rect, buf: &mut Buffer) {
@@ -837,7 +963,7 @@ mod tests {
         let mut overlay = TranscriptOverlay::new(vec![Arc::new(TestCell {
             lines: vec![Line::from("hello")],
         })]);
-        overlay.set_highlight_cell(Some(0));
+        overlay.set_highlight_cells(Some(HighlightedCells::Single(0)));
 
         // Render into a wide buffer so the footer hints aren't truncated.
         let area = Rect::new(0, 0, 120, 10);

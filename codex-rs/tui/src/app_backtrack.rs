@@ -24,13 +24,19 @@
 //! both committed history and in-flight activity without changing flush or coalescing behavior.
 
 use std::any::TypeId;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::app::App;
+use crate::clipboard_copy;
+use crate::clipboard_copy::CopyMethod;
 use crate::history_cell::SessionInfoCell;
 use crate::history_cell::UserHistoryCell;
+use crate::pager_overlay::HighlightedCells;
 use crate::pager_overlay::Overlay;
+use crate::pager_overlay::TranscriptBacktrackMode;
 use crate::tui;
 use crate::tui::TuiEvent;
 use codex_core::protocol::CodexErrorInfo;
@@ -43,9 +49,20 @@ use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
+use ratatui::style::Stylize;
+use ratatui::text::Line;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum BacktrackSelectionMode {
+    #[default]
+    User,
+    Agent,
+}
+
+const COPY_HINT_DURATION: Duration = Duration::from_secs(2);
 
 /// Aggregates all backtrack-related state used by the App.
-#[derive(Default)]
 pub(crate) struct BacktrackState {
     /// True when Esc has primed backtrack mode in the main view.
     pub(crate) primed: bool,
@@ -58,6 +75,13 @@ pub(crate) struct BacktrackState {
     /// This is an index into the filtered "user messages since the last session start" view,
     /// not an index into `transcript_cells`. `usize::MAX` indicates "no selection".
     pub(crate) nth_user_message: usize,
+    /// Index of the currently highlighted agent response.
+    ///
+    /// This is an index into the filtered "agent responses since the last session start" view,
+    /// not an index into `transcript_cells`. `usize::MAX` indicates "no selection".
+    pub(crate) nth_agent_message: usize,
+    /// Which message type is currently highlighted in the transcript overlay.
+    pub(crate) selection_mode: BacktrackSelectionMode,
     /// True when the transcript overlay is showing a backtrack preview.
     pub(crate) overlay_preview_active: bool,
     /// Pending rollback request awaiting confirmation from core.
@@ -65,6 +89,20 @@ pub(crate) struct BacktrackState {
     /// This acts as a guardrail: once we request a rollback, we block additional backtrack
     /// submissions until core responds with either a success or failure event.
     pub(crate) pending_rollback: Option<PendingBacktrackRollback>,
+}
+
+impl Default for BacktrackState {
+    fn default() -> Self {
+        Self {
+            primed: false,
+            base_id: None,
+            nth_user_message: usize::MAX,
+            nth_agent_message: usize::MAX,
+            selection_mode: BacktrackSelectionMode::User,
+            overlay_preview_active: false,
+            pending_rollback: None,
+        }
+    }
 }
 
 /// A user-visible backtrack choice that can be confirmed into a rollback request.
@@ -134,11 +172,33 @@ impl App {
                     Ok(true)
                 }
                 TuiEvent::Key(KeyEvent {
+                    code: KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('\t'),
+                    kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                    ..
+                }) => {
+                    self.toggle_backtrack_selection_mode(tui);
+                    Ok(true)
+                }
+                TuiEvent::Key(KeyEvent {
+                    code: KeyCode::Char(c),
+                    modifiers,
+                    kind: KeyEventKind::Press,
+                    ..
+                }) if !modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT)
+                    && c.eq_ignore_ascii_case(&'c') =>
+                {
+                    self.overlay_copy_highlighted_message(tui);
+                    Ok(true)
+                }
+                TuiEvent::Key(KeyEvent {
                     code: KeyCode::Enter,
                     kind: KeyEventKind::Press,
                     ..
                 }) => {
-                    self.overlay_confirm_backtrack(tui);
+                    if self.backtrack.selection_mode == BacktrackSelectionMode::User {
+                        self.overlay_confirm_backtrack(tui);
+                    }
                     Ok(true)
                 }
                 // Catchall: forward any other events to the overlay widget.
@@ -147,14 +207,43 @@ impl App {
                     Ok(true)
                 }
             }
-        } else if let TuiEvent::Key(KeyEvent {
-            code: KeyCode::Esc,
-            kind: KeyEventKind::Press | KeyEventKind::Repeat,
-            ..
-        }) = event
-        {
-            // First Esc in transcript overlay: begin backtrack preview at latest user message.
-            self.begin_overlay_backtrack_preview(tui);
+        } else if let TuiEvent::Key(key_event) = event {
+            if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                match key_event.code {
+                    KeyCode::Esc => {
+                        // First Esc in transcript overlay: begin backtrack preview at latest user message.
+                        self.begin_overlay_backtrack_preview(tui);
+                        return Ok(true);
+                    }
+                    KeyCode::Left => {
+                        self.begin_overlay_backtrack_preview(tui);
+                        self.step_backtrack_and_highlight(tui);
+                        return Ok(true);
+                    }
+                    KeyCode::Right => {
+                        self.begin_overlay_backtrack_preview(tui);
+                        self.step_forward_backtrack_and_highlight(tui);
+                        return Ok(true);
+                    }
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('\t') => {
+                        self.begin_overlay_backtrack_preview(tui);
+                        self.toggle_backtrack_selection_mode(tui);
+                        return Ok(true);
+                    }
+                    KeyCode::Char(c)
+                        if !key_event.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key_event.modifiers.contains(KeyModifiers::ALT)
+                            && c.eq_ignore_ascii_case(&'c') =>
+                    {
+                        self.begin_overlay_backtrack_preview(tui);
+                        self.overlay_copy_highlighted_message(tui);
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
+            // Not in backtrack mode: forward events to the overlay widget.
+            self.overlay_forward_event(tui, TuiEvent::Key(key_event))?;
             Ok(true)
         } else {
             // Not in backtrack mode: forward events to the overlay widget.
@@ -255,6 +344,8 @@ impl App {
     fn prime_backtrack(&mut self) {
         self.backtrack.primed = true;
         self.backtrack.nth_user_message = usize::MAX;
+        self.backtrack.nth_agent_message = usize::MAX;
+        self.backtrack.selection_mode = BacktrackSelectionMode::User;
         self.backtrack.base_id = self.chat_widget.thread_id();
         self.chat_widget.show_esc_backtrack_hint();
     }
@@ -263,6 +354,10 @@ impl App {
     fn open_backtrack_preview(&mut self, tui: &mut tui::Tui) {
         self.open_transcript_overlay(tui);
         self.backtrack.overlay_preview_active = true;
+        self.backtrack.selection_mode = BacktrackSelectionMode::User;
+        if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+            t.set_backtrack_mode(Some(TranscriptBacktrackMode::User));
+        }
         // Composer is hidden by overlay; clear its hint.
         self.chat_widget.clear_esc_backtrack_hint();
         self.step_backtrack_and_highlight(tui);
@@ -273,15 +368,27 @@ impl App {
         self.backtrack.primed = true;
         self.backtrack.base_id = self.chat_widget.thread_id();
         self.backtrack.overlay_preview_active = true;
+        self.backtrack.selection_mode = BacktrackSelectionMode::User;
+        if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+            t.set_backtrack_mode(Some(TranscriptBacktrackMode::User));
+        }
         let count = user_count(&self.transcript_cells);
         if let Some(last) = count.checked_sub(1) {
-            self.apply_backtrack_selection_internal(last);
+            self.apply_user_selection_internal(last);
         }
         tui.frame_requester().schedule_frame();
     }
 
-    /// Step selection to the next older user message and update overlay.
+    /// Step selection to the next older message in the active selection mode.
     fn step_backtrack_and_highlight(&mut self, tui: &mut tui::Tui) {
+        match self.backtrack.selection_mode {
+            BacktrackSelectionMode::User => self.step_user_backtrack_and_highlight(tui),
+            BacktrackSelectionMode::Agent => self.step_agent_backtrack_and_highlight(tui),
+        }
+    }
+
+    /// Step selection to the next older user message and update overlay.
+    fn step_user_backtrack_and_highlight(&mut self, tui: &mut tui::Tui) {
         let count = user_count(&self.transcript_cells);
         if count == 0 {
             return;
@@ -299,12 +406,43 @@ impl App {
                 .min(last_index)
         };
 
-        self.apply_backtrack_selection_internal(next_selection);
+        self.apply_user_selection_internal(next_selection);
         tui.frame_requester().schedule_frame();
     }
 
-    /// Step selection to the next newer user message and update overlay.
+    /// Step selection to the next older agent response and update overlay.
+    fn step_agent_backtrack_and_highlight(&mut self, tui: &mut tui::Tui) {
+        let count = agent_group_count(&self.transcript_cells);
+        if count == 0 {
+            return;
+        }
+
+        let last_index = count.saturating_sub(1);
+        let next_selection = if self.backtrack.nth_agent_message == usize::MAX {
+            last_index
+        } else if self.backtrack.nth_agent_message == 0 {
+            0
+        } else {
+            self.backtrack
+                .nth_agent_message
+                .saturating_sub(1)
+                .min(last_index)
+        };
+
+        self.apply_agent_selection_internal(next_selection);
+        tui.frame_requester().schedule_frame();
+    }
+
+    /// Step selection to the next newer message in the active selection mode.
     fn step_forward_backtrack_and_highlight(&mut self, tui: &mut tui::Tui) {
+        match self.backtrack.selection_mode {
+            BacktrackSelectionMode::User => self.step_forward_user_backtrack_and_highlight(tui),
+            BacktrackSelectionMode::Agent => self.step_forward_agent_backtrack_and_highlight(tui),
+        }
+    }
+
+    /// Step selection to the next newer user message and update overlay.
+    fn step_forward_user_backtrack_and_highlight(&mut self, tui: &mut tui::Tui) {
         let count = user_count(&self.transcript_cells);
         if count == 0 {
             return;
@@ -320,21 +458,62 @@ impl App {
                 .min(last_index)
         };
 
-        self.apply_backtrack_selection_internal(next_selection);
+        self.apply_user_selection_internal(next_selection);
         tui.frame_requester().schedule_frame();
     }
 
-    /// Apply a computed backtrack selection to the overlay and internal counter.
-    fn apply_backtrack_selection_internal(&mut self, nth_user_message: usize) {
+    /// Step selection to the next newer agent response and update overlay.
+    fn step_forward_agent_backtrack_and_highlight(&mut self, tui: &mut tui::Tui) {
+        let count = agent_group_count(&self.transcript_cells);
+        if count == 0 {
+            return;
+        }
+
+        let last_index = count.saturating_sub(1);
+        let next_selection = if self.backtrack.nth_agent_message == usize::MAX {
+            last_index
+        } else {
+            self.backtrack
+                .nth_agent_message
+                .saturating_add(1)
+                .min(last_index)
+        };
+
+        self.apply_agent_selection_internal(next_selection);
+        tui.frame_requester().schedule_frame();
+    }
+
+    /// Apply a computed user selection to the overlay and internal counter.
+    fn apply_user_selection_internal(&mut self, nth_user_message: usize) {
         if let Some(cell_idx) = nth_user_position(&self.transcript_cells, nth_user_message) {
             self.backtrack.nth_user_message = nth_user_message;
             if let Some(Overlay::Transcript(t)) = &mut self.overlay {
-                t.set_highlight_cell(Some(cell_idx));
+                t.set_highlight_cells(Some(HighlightedCells::Single(cell_idx)));
             }
         } else {
             self.backtrack.nth_user_message = usize::MAX;
             if let Some(Overlay::Transcript(t)) = &mut self.overlay {
-                t.set_highlight_cell(None);
+                t.set_highlight_cells(None);
+            }
+        }
+    }
+
+    /// Apply a computed agent selection to the overlay and internal counter.
+    fn apply_agent_selection_internal(&mut self, nth_agent_message: usize) {
+        if let Some(cell_idx) = nth_agent_group_position(&self.transcript_cells, nth_agent_message)
+        {
+            self.backtrack.nth_agent_message = nth_agent_message;
+            if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+                let range = agent_group_range(&self.transcript_cells, cell_idx);
+                t.set_highlight_cells(Some(HighlightedCells::Range {
+                    start: range.start,
+                    end: range.end,
+                }));
+            }
+        } else {
+            self.backtrack.nth_agent_message = usize::MAX;
+            if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+                t.set_highlight_cells(None);
             }
         }
     }
@@ -402,12 +581,8 @@ impl App {
     }
 
     /// Handle Esc in overlay backtrack preview: step selection if armed, else forward.
-    fn overlay_step_backtrack(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
-        if self.backtrack.base_id.is_some() {
-            self.step_backtrack_and_highlight(tui);
-        } else {
-            self.overlay_forward_event(tui, event)?;
-        }
+    fn overlay_step_backtrack(&mut self, tui: &mut tui::Tui, _event: TuiEvent) -> Result<()> {
+        self.step_backtrack_and_highlight(tui);
         Ok(())
     }
 
@@ -415,14 +590,142 @@ impl App {
     fn overlay_step_backtrack_forward(
         &mut self,
         tui: &mut tui::Tui,
-        event: TuiEvent,
+        _event: TuiEvent,
     ) -> Result<()> {
-        if self.backtrack.base_id.is_some() {
-            self.step_forward_backtrack_and_highlight(tui);
-        } else {
-            self.overlay_forward_event(tui, event)?;
-        }
+        self.step_forward_backtrack_and_highlight(tui);
         Ok(())
+    }
+
+    fn set_backtrack_selection_mode(&mut self, mode: BacktrackSelectionMode) {
+        self.backtrack.selection_mode = mode;
+        if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+            let mode = match mode {
+                BacktrackSelectionMode::User => TranscriptBacktrackMode::User,
+                BacktrackSelectionMode::Agent => TranscriptBacktrackMode::Agent,
+            };
+            t.set_backtrack_mode(Some(mode));
+        }
+    }
+
+    fn toggle_backtrack_selection_mode(&mut self, tui: &mut tui::Tui) {
+        let next = match self.backtrack.selection_mode {
+            BacktrackSelectionMode::User => BacktrackSelectionMode::Agent,
+            BacktrackSelectionMode::Agent => BacktrackSelectionMode::User,
+        };
+        self.set_backtrack_selection_mode(next);
+
+        match self.backtrack.selection_mode {
+            BacktrackSelectionMode::User => {
+                if let Some(last) = user_count(&self.transcript_cells).checked_sub(1) {
+                    self.apply_user_selection_internal(last);
+                } else {
+                    self.apply_user_selection_internal(usize::MAX);
+                }
+            }
+            BacktrackSelectionMode::Agent => {
+                if let Some(last) = agent_group_count(&self.transcript_cells).checked_sub(1) {
+                    self.apply_agent_selection_internal(last);
+                } else {
+                    self.apply_agent_selection_internal(usize::MAX);
+                }
+            }
+        }
+
+        tui.frame_requester().schedule_frame();
+    }
+
+    fn ensure_selection_for_mode(&mut self, mode: BacktrackSelectionMode) -> bool {
+        match mode {
+            BacktrackSelectionMode::User => {
+                let count = user_count(&self.transcript_cells);
+                if count == 0 {
+                    self.apply_user_selection_internal(usize::MAX);
+                    return false;
+                }
+                let last_index = count.saturating_sub(1);
+                let selection = if self.backtrack.nth_user_message == usize::MAX {
+                    last_index
+                } else {
+                    self.backtrack.nth_user_message.min(last_index)
+                };
+                self.apply_user_selection_internal(selection);
+                true
+            }
+            BacktrackSelectionMode::Agent => {
+                let count = agent_group_count(&self.transcript_cells);
+                if count == 0 {
+                    self.apply_agent_selection_internal(usize::MAX);
+                    return false;
+                }
+                let last_index = count.saturating_sub(1);
+                let selection = if self.backtrack.nth_agent_message == usize::MAX {
+                    last_index
+                } else {
+                    self.backtrack.nth_agent_message.min(last_index)
+                };
+                self.apply_agent_selection_internal(selection);
+                true
+            }
+        }
+    }
+
+    fn selection_text_for_mode(&self, mode: BacktrackSelectionMode) -> Option<String> {
+        match mode {
+            BacktrackSelectionMode::User => {
+                if self.backtrack.nth_user_message == usize::MAX {
+                    return None;
+                }
+                nth_user_position(&self.transcript_cells, self.backtrack.nth_user_message)
+                    .and_then(|idx| self.transcript_cells.get(idx))
+                    .and_then(|cell| cell.as_any().downcast_ref::<UserHistoryCell>())
+                    .map(|cell| cell.message.clone())
+            }
+            BacktrackSelectionMode::Agent => {
+                if self.backtrack.nth_agent_message == usize::MAX {
+                    return None;
+                }
+                self.chat_widget
+                    .agent_markdown_for_index(self.backtrack.nth_agent_message)
+                    .map(str::to_string)
+            }
+        }
+    }
+
+    fn overlay_copy_highlighted_message(&mut self, tui: &mut tui::Tui) {
+        let primary_mode = self.backtrack.selection_mode;
+        let mut text = if self.ensure_selection_for_mode(primary_mode) {
+            self.selection_text_for_mode(primary_mode)
+        } else {
+            None
+        };
+        if text.is_none() {
+            let fallback_mode = match primary_mode {
+                BacktrackSelectionMode::User => BacktrackSelectionMode::Agent,
+                BacktrackSelectionMode::Agent => BacktrackSelectionMode::User,
+            };
+            if self.ensure_selection_for_mode(fallback_mode) {
+                text = self.selection_text_for_mode(fallback_mode);
+                if text.is_some() {
+                    self.set_backtrack_selection_mode(fallback_mode);
+                }
+            }
+        }
+
+        let line = if let Some(text) = text {
+            match clipboard_copy::copy_to_clipboard(&text) {
+                Ok(CopyMethod::Native) => Line::from("Copied Markdown".green()),
+                Ok(CopyMethod::Osc52) => Line::from("Copied Markdown (OSC 52)".green()),
+                Err(err) => Line::from(format!("Copy failed: {err}").red()),
+            }
+        } else {
+            Line::from("No message selected".red())
+        };
+
+        if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+            t.set_footer_flash(line, COPY_HINT_DURATION);
+        }
+        tui.frame_requester().schedule_frame();
+        tui.frame_requester().schedule_frame_in(COPY_HINT_DURATION);
     }
 
     /// Confirm a primed backtrack from the main view (no overlay visible).
@@ -438,6 +741,8 @@ impl App {
         self.backtrack.primed = false;
         self.backtrack.base_id = None;
         self.backtrack.nth_user_message = usize::MAX;
+        self.backtrack.nth_agent_message = usize::MAX;
+        self.backtrack.selection_mode = BacktrackSelectionMode::User;
         // In case a hint is somehow still visible (e.g., race with overlay open/close).
         self.chat_widget.clear_esc_backtrack_hint();
     }
@@ -557,6 +862,61 @@ fn user_positions_iter(
         .enumerate()
         .skip(start)
         .filter_map(move |(idx, cell)| (type_of(cell) == user_type).then_some(idx))
+}
+
+fn agent_group_count(cells: &[Arc<dyn crate::history_cell::HistoryCell>]) -> usize {
+    agent_group_positions_iter(cells).count()
+}
+
+fn nth_agent_group_position(
+    cells: &[Arc<dyn crate::history_cell::HistoryCell>],
+    nth: usize,
+) -> Option<usize> {
+    agent_group_positions_iter(cells)
+        .enumerate()
+        .find_map(|(i, idx)| (i == nth).then_some(idx))
+}
+
+fn agent_group_positions_iter(
+    cells: &[Arc<dyn crate::history_cell::HistoryCell>],
+) -> impl Iterator<Item = usize> + '_ {
+    let session_start_type = TypeId::of::<SessionInfoCell>();
+    let agent_type = TypeId::of::<crate::history_cell::AgentMessageCell>();
+    let type_of = |cell: &Arc<dyn crate::history_cell::HistoryCell>| cell.as_any().type_id();
+
+    let start = cells
+        .iter()
+        .rposition(|cell| type_of(cell) == session_start_type)
+        .map_or(0, |idx| idx + 1);
+
+    cells
+        .iter()
+        .enumerate()
+        .skip(start)
+        .filter_map(move |(idx, cell)| {
+            if type_of(cell) == agent_type && !cell.is_stream_continuation() {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+}
+
+fn agent_group_range(
+    cells: &[Arc<dyn crate::history_cell::HistoryCell>],
+    start_idx: usize,
+) -> Range<usize> {
+    let mut end = start_idx.saturating_add(1);
+    for cell in cells.iter().skip(end) {
+        if cell.as_any().is::<crate::history_cell::AgentMessageCell>()
+            && cell.is_stream_continuation()
+        {
+            end = end.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    start_idx..end
 }
 
 #[cfg(test)]
