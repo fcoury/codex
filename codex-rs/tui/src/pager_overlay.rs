@@ -125,8 +125,7 @@ const PAGER_KEY_HINTS: &[(&[KeyBinding], &str)] = &[
 
 /// Render a single line of key hints from (key(s), description) pairs.
 ///
-/// An optional `prefix` is rendered bold at the start of the line (e.g. a mode
-/// indicator like `[user]`).
+/// An optional `prefix` is rendered bold at the start of the line.
 fn render_key_hints(
     area: Rect,
     buf: &mut Buffer,
@@ -698,15 +697,15 @@ impl TranscriptOverlay {
                     pairs.push((&[KEY_RIGHT], "next"));
                     pairs.push((&[KEY_ENTER], "edit"));
                     pairs.push((&[KEY_C], "copy"));
-                    pairs.push((&[KEY_TAB], "agent/user msgs"));
-                    Some("[user]")
+                    pairs.push((&[KEY_TAB], "agent msgs"));
+                    None
                 }
                 BrowseMode::AgentCopy => {
                     pairs.push((&[KEY_ESC, KEY_LEFT], "prev"));
                     pairs.push((&[KEY_RIGHT], "next"));
                     pairs.push((&[KEY_C, KEY_ENTER], "copy"));
-                    pairs.push((&[KEY_TAB], "agent/user msgs"));
-                    Some("[agent]")
+                    pairs.push((&[KEY_TAB], "user msgs"));
+                    None
                 }
             }
         } else {

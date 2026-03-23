@@ -555,11 +555,8 @@ impl App {
         let remaining = agent_group_count(&self.transcript_cells);
         self.chat_widget.agent_turn_markdowns.truncate(remaining);
         // Clear the quick-copy cache — the last response may have been rolled back.
-        self.chat_widget.last_agent_markdown = self
-            .chat_widget
-            .agent_turn_markdowns
-            .last()
-            .cloned();
+        self.chat_widget.last_agent_markdown =
+            self.chat_widget.agent_turn_markdowns.last().cloned();
     }
 
     // --- Agent browse mode ---
