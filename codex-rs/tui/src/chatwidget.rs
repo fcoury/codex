@@ -2390,7 +2390,12 @@ impl ChatWidget {
                 // Reset the flag even if we don't show separator (no work was done)
                 self.needs_final_message_separator = false;
             }
-            self.stream_controller = Some(StreamController::new(self.current_stream_width(2)));
+            self.stream_controller = Some(StreamController::new(
+                self.current_stream_width(2),
+                self.config
+                    .features
+                    .enabled(Feature::StreamTableLiveTailReflow),
+            ));
         }
         if let Some(controller) = self.stream_controller.as_mut()
             && controller.push(&delta)
@@ -3911,7 +3916,7 @@ impl ChatWidget {
 
     fn sync_active_stream_tail(&mut self) {
         let Some((tail_lines, tail_starts_stream)) =
-            self.stream_controller.as_ref().map(|controller| {
+            self.stream_controller.as_mut().map(|controller| {
                 (
                     controller.current_tail_lines(),
                     controller.tail_starts_stream(),

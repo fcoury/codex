@@ -1255,7 +1255,7 @@ async fn add_to_history_does_not_commit_transient_stream_tail_after_controller_c
 async fn on_error_does_not_persist_transient_stream_tail_during_finalize_turn() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
 
-    chat.stream_controller = Some(StreamController::new(Some(80)));
+    chat.stream_controller = Some(StreamController::new(Some(80), false));
     chat.active_cell = Some(Box::new(history_cell::StreamingAgentTailCell::new(
         vec![ratatui::text::Line::from("transient stream tail preview")],
         true,
@@ -3494,7 +3494,7 @@ async fn flush_answer_stream_does_not_stop_animation_while_plan_stream_is_active
         "expected plan stream to have queued lines for this repro",
     );
     chat.plan_stream_controller = Some(plan_controller);
-    chat.stream_controller = Some(StreamController::new(Some(80)));
+    chat.stream_controller = Some(StreamController::new(Some(80), false));
 
     while rx.try_recv().is_ok() {}
 
@@ -3527,7 +3527,7 @@ async fn flush_answer_stream_does_not_stop_animation_while_plan_table_stream_is_
         "expected queued table header lines for this repro",
     );
     chat.plan_stream_controller = Some(plan_controller);
-    chat.stream_controller = Some(StreamController::new(Some(80)));
+    chat.stream_controller = Some(StreamController::new(Some(80), false));
 
     while rx.try_recv().is_ok() {}
 
@@ -6809,7 +6809,7 @@ async fn interrupt_remains_responsive_during_resized_table_stream() {
     let resized_tail = {
         let controller = chat
             .stream_controller
-            .as_ref()
+            .as_mut()
             .expect("expected stream controller after resize");
         lines_to_single_string(&controller.current_tail_lines())
     };
@@ -6825,7 +6825,7 @@ async fn interrupt_remains_responsive_during_resized_table_stream() {
     let tail_after_stale_delta = {
         let controller = chat
             .stream_controller
-            .as_ref()
+            .as_mut()
             .expect("expected stream controller after stale delta");
         lines_to_single_string(&controller.current_tail_lines())
     };

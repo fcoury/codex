@@ -139,6 +139,8 @@ pub enum Feature {
     Personality,
     /// Prevent idle system sleep while a turn is actively running.
     PreventIdleSleep,
+    /// Speculatively re-render table holdback tail with uncommitted source.
+    StreamTableLiveTailReflow,
     /// Use the Responses API WebSocket transport for OpenAI by default.
     ResponsesWebsockets,
     /// Enable Responses API websocket v2 mode.
@@ -638,6 +640,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         } else {
             Stage::UnderDevelopment
         },
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::StreamTableLiveTailReflow,
+        key: "stream_table_live_tail_reflow",
+        stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {
