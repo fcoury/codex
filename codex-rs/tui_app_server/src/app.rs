@@ -61,6 +61,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::Turn;
@@ -2161,6 +2162,70 @@ impl App {
         Ok(())
     }
 
+    async fn hydrate_collab_agent_metadata_for_notification(
+        &mut self,
+        app_server: &mut AppServerSession,
+        notification: &ServerNotification,
+    ) {
+        let receiver_thread_ids = match notification {
+            ServerNotification::ItemStarted(notification) => match &notification.item {
+                ThreadItem::CollabAgentToolCall {
+                    receiver_thread_ids,
+                    ..
+                } => receiver_thread_ids,
+                _ => return,
+            },
+            ServerNotification::ItemCompleted(notification) => match &notification.item {
+                ThreadItem::CollabAgentToolCall {
+                    receiver_thread_ids,
+                    ..
+                } => receiver_thread_ids,
+                _ => return,
+            },
+            _ => return,
+        };
+
+        for receiver_thread_id in receiver_thread_ids {
+            let Ok(thread_id) = ThreadId::from_string(receiver_thread_id) else {
+                tracing::warn!(
+                    thread_id = receiver_thread_id,
+                    "ignoring collab receiver with invalid thread id during metadata hydration"
+                );
+                continue;
+            };
+
+            if self
+                .agent_navigation
+                .get(&thread_id)
+                .is_some_and(|entry| entry.agent_nickname.is_some() || entry.agent_role.is_some())
+            {
+                continue;
+            }
+
+            match app_server
+                .thread_read(thread_id, /*include_turns*/ false)
+                .await
+            {
+                Ok(thread) => {
+                    self.ensure_thread_channel(thread_id);
+                    self.upsert_agent_picker_thread(
+                        thread_id,
+                        thread.agent_nickname,
+                        thread.agent_role,
+                        /*is_closed*/ false,
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        error = %err,
+                        "failed to hydrate collab receiver thread metadata"
+                    );
+                }
+            }
+        }
+    }
+
     async fn infer_session_for_thread_notification(
         &mut self,
         thread_id: ThreadId,
@@ -2498,6 +2563,11 @@ impl App {
         agent_role: Option<String>,
         is_closed: bool,
     ) {
+        self.chat_widget.set_collab_agent_metadata(
+            thread_id,
+            agent_nickname.clone(),
+            agent_role.clone(),
+        );
         self.agent_navigation
             .upsert(thread_id, agent_nickname, agent_role, is_closed);
         self.sync_active_agent_label();
@@ -2584,6 +2654,16 @@ impl App {
         tui.terminal.clear_scrollback()?;
         tui.terminal.clear()?;
         Ok(())
+    }
+
+    fn sync_chat_widget_collab_agent_metadata(&mut self) {
+        for (thread_id, entry) in self.agent_navigation.ordered_threads() {
+            self.chat_widget.set_collab_agent_metadata(
+                thread_id,
+                entry.agent_nickname.clone(),
+                entry.agent_role.clone(),
+            );
+        }
     }
 
     fn reset_thread_event_state(&mut self) {
@@ -2800,6 +2880,7 @@ impl App {
         snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
+        self.sync_chat_widget_collab_agent_metadata();
         if let Some(session) = snapshot.session {
             self.chat_widget.handle_thread_session(session);
         }
@@ -4811,6 +4892,12 @@ impl App {
             // thread, so unrelated shutdowns cannot consume this marker.
             self.pending_shutdown_exit_thread_id = None;
         }
+
+        if let ThreadBufferedEvent::Notification(notification) = &event {
+            self.hydrate_collab_agent_metadata_for_notification(app_server, notification)
+                .await;
+        }
+
         self.handle_thread_event_now(event);
         if self.backtrack_render_pending {
             tui.frame_requester().schedule_frame();
