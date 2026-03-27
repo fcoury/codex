@@ -145,6 +145,7 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
+use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
 
 use super::chat_composer_history::ChatComposerHistory;
@@ -4412,18 +4413,31 @@ impl ChatComposer {
                 }
             }
         }
+        let is_zellij = codex_terminal_detection::terminal_info().is_zellij();
         let style = user_message_style();
+        let textarea_style = style.fg(ratatui::style::Color::Reset);
         Block::default().style(style).render_ref(composer_rect, buf);
         if !remote_images_rect.is_empty() {
             Paragraph::new(self.remote_images_lines(remote_images_rect.width))
                 .style(style)
                 .render_ref(remote_images_rect, buf);
         }
+        if is_zellij && !textarea_rect.is_empty() {
+            buf.set_style(textarea_rect, textarea_style);
+        }
         if !textarea_rect.is_empty() {
             let prompt = if self.input_enabled {
-                Span::styled("›", style.add_modifier(ratatui::style::Modifier::BOLD))
+                if is_zellij {
+                    Span::styled("›", style.fg(ratatui::style::Color::Cyan))
+                } else {
+                    "›".bold()
+                }
             } else {
-                Span::styled("›", style.add_modifier(ratatui::style::Modifier::DIM))
+                if is_zellij {
+                    Span::styled("›", style.fg(ratatui::style::Color::DarkGray))
+                } else {
+                    "›".dim()
+                }
             };
             buf.set_span(
                 textarea_rect.x - LIVE_PREFIX_COLS,
@@ -4434,13 +4448,45 @@ impl ChatComposer {
         }
 
         let mut state = self.textarea_state.borrow_mut();
-        if let Some(mask_char) = mask_char {
-            self.textarea
-                .render_ref_masked(textarea_rect, buf, &mut state, mask_char, style);
-        } else {
-            self.textarea.render_ref_styled(textarea_rect, buf, &mut state, style);
+        let textarea_is_empty = self.textarea.text().is_empty();
+        if is_zellij && textarea_is_empty {
+            tracing::info!(
+                ?textarea_rect,
+                input_enabled = self.input_enabled,
+                has_mask_char = mask_char.is_some(),
+                placeholder_text = if self.input_enabled {
+                    self.placeholder_text.as_str()
+                } else {
+                    self.input_disabled_placeholder
+                        .as_deref()
+                        .unwrap_or("Input disabled.")
+                },
+                "zellij empty composer render"
+            );
         }
-        if self.textarea.text().is_empty() {
+        if let Some(mask_char) = mask_char {
+            self.textarea.render_ref_masked(
+                textarea_rect,
+                buf,
+                &mut state,
+                mask_char,
+                if is_zellij {
+                    textarea_style
+                } else {
+                    ratatui::style::Style::default()
+                },
+            );
+        } else if is_zellij && textarea_is_empty {
+            tracing::info!(?textarea_rect, "zellij empty composer fill branch");
+            buf.set_style(textarea_rect, textarea_style);
+        } else if is_zellij {
+            tracing::info!(?textarea_rect, "zellij styled textarea branch");
+            self.textarea
+                .render_ref_styled(textarea_rect, buf, &mut state, textarea_style);
+        } else {
+            StatefulWidgetRef::render_ref(&(&self.textarea), textarea_rect, buf, &mut state);
+        }
+        if textarea_is_empty {
             let text = if self.input_enabled {
                 self.placeholder_text.as_str().to_string()
             } else {
@@ -4450,9 +4496,18 @@ impl ChatComposer {
                     .to_string()
             };
             if !textarea_rect.is_empty() {
-                let placeholder = Span::styled(text, style.add_modifier(ratatui::style::Modifier::DIM));
-                Line::from(vec![placeholder]).style(style)
-                    .render_ref(textarea_rect.inner(Margin::new(0, 0)), buf);
+                if is_zellij {
+                    buf.set_string(
+                        textarea_rect.x,
+                        textarea_rect.y,
+                        text,
+                        textarea_style.fg(ratatui::style::Color::White).italic(),
+                    );
+                } else {
+                    let placeholder = Span::from(text).dim();
+                    let line = Line::from(vec![placeholder]);
+                    line.render_ref(textarea_rect.inner(Margin::new(0, 0)), buf);
+                }
             }
         }
     }

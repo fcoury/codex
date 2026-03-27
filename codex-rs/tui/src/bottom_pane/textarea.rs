@@ -19,7 +19,6 @@ use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
@@ -1388,6 +1387,7 @@ impl TextArea {
             let r = &lines[idx];
             let y = area.y + row as u16;
             let line_range = r.start..r.end - 1;
+            buf.set_style(Rect::new(area.x, y, area.width, 1), base_style);
             // Draw base line with the provided style.
             buf.set_string(area.x, y, &self.text[line_range.clone()], base_style);
 
@@ -1401,7 +1401,7 @@ impl TextArea {
                 }
                 let styled = &self.text[overlap_start..overlap_end];
                 let x_off = self.text[line_range.start..overlap_start].width() as u16;
-                let style = Style::default().fg(Color::Cyan);
+                let style = base_style.fg(ratatui::style::Color::Cyan);
                 buf.set_string(area.x + x_off, y, styled, style);
             }
         }
@@ -1420,6 +1420,7 @@ impl TextArea {
             let r = &lines[idx];
             let y = area.y + row as u16;
             let line_range = r.start..r.end - 1;
+            buf.set_style(Rect::new(area.x, y, area.width, 1), base_style);
             let masked = self.text[line_range.clone()]
                 .chars()
                 .map(|_| mask_char)

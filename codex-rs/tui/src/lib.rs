@@ -43,7 +43,6 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_state::log_db;
-use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::terminal_info;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_oss::ensure_oss_provider_ready;
@@ -1198,7 +1197,7 @@ impl Drop for TerminalRestoreGuard {
 ///   - `auto` (default): Auto-detect the terminal multiplexer and disable alternate screen
 ///     only in Zellij, enabling it everywhere else
 fn determine_alt_screen_mode(no_alt_screen: bool, tui_alternate_screen: AltScreenMode) -> bool {
-    if no_alt_screen {
+    let use_alt_screen = if no_alt_screen {
         false
     } else {
         match tui_alternate_screen {
@@ -1206,10 +1205,23 @@ fn determine_alt_screen_mode(no_alt_screen: bool, tui_alternate_screen: AltScree
             AltScreenMode::Never => false,
             AltScreenMode::Auto => {
                 let terminal_info = terminal_info();
-                !matches!(terminal_info.multiplexer, Some(Multiplexer::Zellij { .. }))
+                !terminal_info.is_zellij()
             }
         }
-    }
+    };
+
+    let terminal_info = terminal_info();
+    tracing::info!(
+        no_alt_screen,
+        ?tui_alternate_screen,
+        terminal_name = ?terminal_info.name,
+        multiplexer = ?terminal_info.multiplexer,
+        is_zellij = terminal_info.is_zellij(),
+        use_alt_screen,
+        "determined tui alternate-screen mode"
+    );
+
+    use_alt_screen
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

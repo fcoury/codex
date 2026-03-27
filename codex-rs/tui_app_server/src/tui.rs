@@ -253,6 +253,7 @@ pub struct Tui {
     terminal_focused: Arc<AtomicBool>,
     enhanced_keys_supported: bool,
     notification_backend: Option<DesktopNotificationBackend>,
+    is_zellij: bool,
     // When false, enter_alt_screen() becomes a no-op (for Zellij scrollback support)
     alt_screen_enabled: bool,
 }
@@ -269,10 +270,7 @@ impl Tui {
         supports_color::on_cached(supports_color::Stream::Stdout);
         let _ = crate::terminal_palette::default_colors();
 
-        let is_zellij = matches!(
-            codex_terminal_detection::terminal_info().multiplexer,
-            Some(codex_terminal_detection::Multiplexer::Zellij { .. })
-        );
+        let is_zellij = codex_terminal_detection::terminal_info().is_zellij();
 
         Self {
             frame_requester,
@@ -287,7 +285,8 @@ impl Tui {
             terminal_focused: Arc::new(AtomicBool::new(true)),
             enhanced_keys_supported,
             notification_backend: Some(detect_backend(NotificationMethod::default())),
-            alt_screen_enabled: !is_zellij,
+            is_zellij,
+            alt_screen_enabled: true,
         }
     }
 
@@ -483,6 +482,7 @@ impl Tui {
             }
 
             let size = terminal.size()?;
+            let mut needs_full_repaint = false;
 
             let mut area = terminal.viewport_area;
             area.height = height.min(size.height);
@@ -490,11 +490,15 @@ impl Tui {
             // If the viewport has expanded, scroll everything else up to make room.
             if area.bottom() > size.height {
                 let scroll_by = area.bottom() - size.height;
-                if !self.alt_screen_enabled {
-                    crossterm::queue!(terminal.backend_mut(), crossterm::cursor::MoveTo(0, size.height.saturating_sub(1)))?;
+                if self.is_zellij {
+                    crossterm::queue!(
+                        terminal.backend_mut(),
+                        crossterm::cursor::MoveTo(0, size.height.saturating_sub(1))
+                    )?;
                     for _ in 0..scroll_by {
                         crossterm::queue!(terminal.backend_mut(), crossterm::style::Print("\n"))?;
                     }
+                    needs_full_repaint = true;
                 } else {
                     terminal
                         .backend_mut()
@@ -509,11 +513,20 @@ impl Tui {
             }
 
             if !self.pending_history_lines.is_empty() {
-                crate::insert_history::insert_history_lines(
+                crate::insert_history::insert_history_lines_with_mode(
                     terminal,
                     self.pending_history_lines.clone(),
+                    crate::insert_history::InsertHistoryMode::new(self.is_zellij),
                 )?;
+                if self.is_zellij {
+                    needs_full_repaint = true;
+                }
                 self.pending_history_lines.clear();
+            }
+
+            if needs_full_repaint {
+                tracing::info!("invalidating viewport after direct zellij terminal mutation");
+                terminal.invalidate_viewport();
             }
 
             // Update the y position for suspending so Ctrl-Z can place the cursor correctly.

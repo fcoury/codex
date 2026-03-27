@@ -29,11 +29,40 @@ use ratatui::style::Modifier;
 use ratatui::text::Line;
 use ratatui::text::Span;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertHistoryMode {
+    Standard,
+    Zellij,
+}
+
+impl InsertHistoryMode {
+    pub fn new(is_zellij: bool) -> Self {
+        if is_zellij {
+            Self::Zellij
+        } else {
+            Self::Standard
+        }
+    }
+}
+
 /// Insert `lines` above the viewport using the terminal's backend writer
 /// (avoids direct stdout references).
 pub fn insert_history_lines<B>(
     terminal: &mut crate::custom_terminal::Terminal<B>,
     lines: Vec<Line>,
+) -> io::Result<()>
+where
+    B: Backend + Write,
+{
+    insert_history_lines_with_mode(terminal, lines, InsertHistoryMode::Standard)
+}
+
+/// Insert `lines` above the viewport using the terminal's backend writer
+/// (avoids direct stdout references).
+pub fn insert_history_lines_with_mode<B>(
+    terminal: &mut crate::custom_terminal::Terminal<B>,
+    lines: Vec<Line>,
+    mode: InsertHistoryMode,
 ) -> io::Result<()>
 where
     B: Backend + Write,
@@ -74,12 +103,8 @@ where
         wrapped.extend(line_wrapped);
     }
     let wrapped_lines = wrapped_rows as u16;
-    let is_zellij = matches!(
-        codex_terminal_detection::terminal_info().multiplexer,
-        Some(codex_terminal_detection::Multiplexer::Zellij { .. })
-    );
 
-    if is_zellij {
+    if matches!(mode, InsertHistoryMode::Zellij) {
         let space_below = screen_size.height.saturating_sub(area.bottom());
         let shift_down = wrapped_lines.min(space_below);
         let scroll_up_amount = wrapped_lines.saturating_sub(shift_down);
