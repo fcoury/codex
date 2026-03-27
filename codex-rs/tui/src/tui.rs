@@ -269,6 +269,11 @@ impl Tui {
         supports_color::on_cached(supports_color::Stream::Stdout);
         let _ = crate::terminal_palette::default_colors();
 
+        let is_zellij = matches!(
+            codex_terminal_detection::terminal_info().multiplexer,
+            Some(codex_terminal_detection::Multiplexer::Zellij { .. })
+        );
+
         Self {
             frame_requester,
             draw_tx,
@@ -282,7 +287,7 @@ impl Tui {
             terminal_focused: Arc::new(AtomicBool::new(true)),
             enhanced_keys_supported,
             notification_backend: Some(detect_backend(NotificationMethod::default())),
-            alt_screen_enabled: true,
+            alt_screen_enabled: !is_zellij,
         }
     }
 
@@ -484,9 +489,17 @@ impl Tui {
             area.width = size.width;
             // If the viewport has expanded, scroll everything else up to make room.
             if area.bottom() > size.height {
-                terminal
-                    .backend_mut()
-                    .scroll_region_up(0..area.top(), area.bottom() - size.height)?;
+                let scroll_by = area.bottom() - size.height;
+                if !self.alt_screen_enabled {
+                    crossterm::queue!(terminal.backend_mut(), crossterm::cursor::MoveTo(0, size.height.saturating_sub(1)))?;
+                    for _ in 0..scroll_by {
+                        crossterm::queue!(terminal.backend_mut(), crossterm::style::Print("\n"))?;
+                    }
+                } else {
+                    terminal
+                        .backend_mut()
+                        .scroll_region_up(0..area.top(), scroll_by)?;
+                }
                 area.y = size.height - area.height;
             }
             if area != terminal.viewport_area {
