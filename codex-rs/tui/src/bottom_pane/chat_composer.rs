@@ -145,7 +145,6 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
-use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
 
 use super::chat_composer_history::ChatComposerHistory;
@@ -4407,9 +4406,9 @@ impl ChatComposer {
         }
         if !textarea_rect.is_empty() {
             let prompt = if self.input_enabled {
-                "›".bold()
+                Span::styled("›", style.add_modifier(ratatui::style::Modifier::BOLD))
             } else {
-                "›".dim()
+                Span::styled("›", style.add_modifier(ratatui::style::Modifier::DIM))
             };
             buf.set_span(
                 textarea_rect.x - LIVE_PREFIX_COLS,
@@ -4422,9 +4421,9 @@ impl ChatComposer {
         let mut state = self.textarea_state.borrow_mut();
         if let Some(mask_char) = mask_char {
             self.textarea
-                .render_ref_masked(textarea_rect, buf, &mut state, mask_char);
+                .render_ref_masked(textarea_rect, buf, &mut state, mask_char, style);
         } else {
-            StatefulWidgetRef::render_ref(&(&self.textarea), textarea_rect, buf, &mut state);
+            self.textarea.render_ref_styled(textarea_rect, buf, &mut state, style);
         }
         if self.textarea.text().is_empty() {
             let text = if self.input_enabled {
@@ -4436,8 +4435,8 @@ impl ChatComposer {
                     .to_string()
             };
             if !textarea_rect.is_empty() {
-                let placeholder = Span::from(text).dim();
-                Line::from(vec![placeholder])
+                let placeholder = Span::styled(text, style.add_modifier(ratatui::style::Modifier::DIM));
+                Line::from(vec![placeholder]).style(style)
                     .render_ref(textarea_rect.inner(Margin::new(0, 0)), buf);
             }
         }
