@@ -824,6 +824,9 @@ async fn maybe_request_mcp_tool_approval(
         }
     }
 
+    if matches!(turn_context.approval_policy.value(), AskForApproval::Never) {
+        return Some(McpToolApprovalDecision::Decline);
+    }
     let session_approval_key = session_mcp_tool_approval_key(invocation, metadata, approval_mode);
     let persistent_approval_key =
         persistent_mcp_tool_approval_key(invocation, metadata, approval_mode);
